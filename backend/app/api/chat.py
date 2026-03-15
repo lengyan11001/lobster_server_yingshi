@@ -1,0 +1,1313 @@
+"""Chat endpoint — direct LLM API with MCP tool-calling loop.
+
+Primary flow:
+  POST /chat → resolve model + API key → fetch MCP tools from local MCP server
+  → call LLM with function definitions + messages → process tool_calls → loop
+  → return final reply
+
+POST /chat/stream: same but streams SSE progress (tool_start/tool_end) so the UI can show "thinking" steps.
+Falls back to OpenClaw Gateway when no direct API config is available.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import json
+import logging
+import re
+import time
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from ..core.config import settings
+from ..db import get_db
+from .auth import get_current_user, oauth2_scheme
+from .consumption_accounts import get_effective_sutui_token
+from ..models import CapabilityCallLog, ChatTurnLog, ToolCallLog, User
+
+_BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+MAX_HISTORY = 20
+MAX_TOOL_ROUNDS = 8
+# 单条历史消息最大字符数，避免长回复再次送入模型导致重复/延续上一条
+MAX_HISTORY_MESSAGE_CHARS = 1200
+MCP_URL = "http://127.0.0.1:8001/mcp"
+
+_URL_RE = re.compile(r'https?://[^\s"\'<>\)\]]+', re.IGNORECASE)
+_pending_tool_logs: contextvars.ContextVar[List[Dict]] = contextvars.ContextVar("_pending_tool_logs", default=[])
+
+_PROVIDERS: Dict[str, Dict[str, str]] = {
+    "deepseek":  {"base_url": "https://api.deepseek.com",  "env": "DEEPSEEK_API_KEY"},
+    "openai":    {"base_url": "https://api.openai.com",    "env": "OPENAI_API_KEY"},
+    "anthropic": {"base_url": "https://api.anthropic.com", "env": "ANTHROPIC_API_KEY"},
+    "google":    {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "env": "GEMINI_API_KEY"},
+}
+
+_NO_TOOL_SUPPORT = {"deepseek-reasoner", "o3-mini"}
+
+
+# ── Pydantic models ───────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str = Field(..., description="user | assistant | system")
+    content: str = Field(..., description="消息内容")
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., description="当前用户输入")
+    history: Optional[List[ChatMessage]] = Field(default_factory=list)
+    session_id: Optional[str] = None
+    context_id: Optional[str] = None
+    model: Optional[str] = None
+    attachment_asset_ids: Optional[List[str]] = Field(default_factory=list, description="本条消息附带的素材 ID，将生成可访问 URL 供速推等使用")
+
+
+class ChatResponse(BaseModel):
+    reply: str
+
+
+# ── API key / provider resolution ─────────────────────────────────
+
+def _all_api_keys() -> Dict[str, str]:
+    """Merge keys from openclaw.json literal values and openclaw/.env."""
+    keys: Dict[str, str] = {}
+    try:
+        p = _BASE_DIR / "openclaw" / "openclaw.json"
+        if p.exists():
+            text = p.read_text(encoding="utf-8")
+            for pid, pd in json.loads(text).get("models", {}).get("providers", {}).items():
+                if isinstance(pd, dict):
+                    k = (pd.get("apiKey") or "").strip()
+                    if k and not k.startswith("${"):
+                        env_name = _PROVIDERS.get(pid, {}).get("env", "")
+                        if env_name:
+                            keys[env_name] = k
+    except Exception:
+        pass
+    try:
+        ep = _BASE_DIR / "openclaw" / ".env"
+        if ep.exists():
+            for line in ep.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    if v.strip():
+                        keys[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return keys
+
+
+def _resolve_config(model: str) -> Optional[Dict[str, Any]]:
+    """Return {base_url, api_key, model_name, provider} or None."""
+    if "/" not in model:
+        return None
+    provider, model_name = model.split("/", 1)
+    pcfg = _PROVIDERS.get(provider)
+    if not pcfg:
+        return None
+    api_key = _all_api_keys().get(pcfg["env"], "")
+    if not api_key:
+        return None
+    return {
+        "base_url": pcfg["base_url"],
+        "api_key": api_key,
+        "model_name": model_name,
+        "provider": provider,
+    }
+
+
+def _pick_default_model() -> str:
+    """Return the first model that has a configured API key."""
+    try:
+        p = _BASE_DIR / "openclaw" / "openclaw.json"
+        if p.exists():
+            primary = json.loads(p.read_text(encoding="utf-8")).get(
+                "agents", {}
+            ).get("defaults", {}).get("model", {}).get("primary", "")
+            if primary and _resolve_config(primary):
+                return primary
+    except Exception:
+        pass
+    for first in ["deepseek/deepseek-chat", "openai/gpt-4o",
+                   "anthropic/claude-sonnet-4-5", "google/gemini-2.5-pro"]:
+        if _resolve_config(first):
+            return first
+    raise HTTPException(
+        400,
+        detail="未配置任何 LLM API Key，请到「系统配置」页面添加至少一个模型的 API Key（如 DeepSeek、OpenAI 等）",
+    )
+
+
+# ── MCP tool helpers ──────────────────────────────────────────────
+
+async def _fetch_mcp_tools() -> List[Dict]:
+    """Fetch available tools from the local MCP server (port 8001)."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(MCP_URL, json={
+                "jsonrpc": "2.0", "id": "lt",
+                "method": "tools/list", "params": {},
+            })
+        tools = r.json().get("result", {}).get("tools", [])
+        logger.info("[对话] MCP tools/list 成功 tools_count=%s", len(tools))
+        return tools
+    except Exception as e:
+        logger.warning("[对话] MCP tools/list 失败: %s", e)
+        return []
+
+
+async def _exec_tool(
+    name: str,
+    args: Dict,
+    token: str = "",
+    sutui_token: Optional[str] = None,
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+) -> str:
+    """Execute a tool on the local MCP server and return the text result. progress_cb: 可选，用于流式推送进度（tool_start/tool_end）。"""
+    capability_id = (args.get("capability_id") or "").strip() if name == "invoke_capability" else None
+    phase = None
+    if capability_id == "video.generate":
+        phase = "video_submit"
+    elif capability_id == "task.get_result":
+        phase = "task_polling"
+    ev_start = {"type": "tool_start", "name": name, "args": list(args.keys())}
+    if capability_id is not None:
+        ev_start["capability_id"] = capability_id
+    if phase:
+        ev_start["phase"] = phase
+    if progress_cb:
+        try:
+            await progress_cb(ev_start)
+        except Exception:
+            pass
+    t0 = time.perf_counter()
+    success = True
+    result_text = ""
+    # task.get_result may poll upstream for up to 30 min (video generation)
+    timeout = 120.0
+    if name == "invoke_capability" and (args.get("capability_id") or "").strip() == "task.get_result":
+        timeout = 35 * 60.0  # 35 min
+    try:
+        hdrs: Dict[str, str] = {"Content-Type": "application/json"}
+        if token:
+            hdrs["Authorization"] = f"Bearer {token}"
+        if sutui_token:
+            hdrs["X-Sutui-Token"] = sutui_token
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(MCP_URL, json={
+                "jsonrpc": "2.0", "id": "ct",
+                "method": "tools/call",
+                "params": {"name": name, "arguments": args},
+            }, headers=hdrs)
+        res = r.json().get("result", {})
+        content = res.get("content", [])
+        if isinstance(content, list) and content:
+            texts = [
+                x.get("text", "")
+                for x in content
+                if isinstance(x, dict) and x.get("type") == "text"
+            ]
+            result_text = "\n".join(t for t in texts if t) or json.dumps(content, ensure_ascii=False)
+        else:
+            result_text = json.dumps(res, ensure_ascii=False)
+    except Exception as e:
+        result_text = f"工具调用失败: {e}"
+        success = False
+        logger.warning("[对话] 工具执行异常 name=%s capability_id=%s: %s", name, capability_id, e)
+
+    ms = round((time.perf_counter() - t0) * 1000)
+    logger.info("[对话] 工具执行 name=%s capability_id=%s latency_ms=%s success=%s", name, capability_id or "-", ms, success)
+    urls = _URL_RE.findall(result_text)
+    try:
+        logs = _pending_tool_logs.get()
+    except LookupError:
+        logs = []
+        _pending_tool_logs.set(logs)
+    logs.append({
+        "tool_name": name,
+        "arguments": args,
+        "result_text": result_text[:10000],
+        "result_urls": ",".join(urls[:20]) if urls else None,
+        "success": success,
+        "latency_ms": ms,
+    })
+    ev_end = {"type": "tool_end", "name": name, "preview": (result_text or "")[:200]}
+    if capability_id is not None:
+        ev_end["capability_id"] = capability_id
+    if phase:
+        ev_end["phase"] = phase
+    if phase == "task_polling":
+        ev_end["in_progress"] = _is_task_result_in_progress(result_text)
+    if progress_cb:
+        try:
+            await progress_cb(ev_end)
+        except Exception:
+            pass
+    return result_text
+
+
+# ── LLM API calls with tool-calling loop ──────────────────────────
+
+_PROVIDER_NAMES = {
+    "deepseek": "DeepSeek", "openai": "OpenAI",
+    "anthropic": "Anthropic", "google": "Google Gemini",
+}
+
+def _raise_api_err(resp: httpx.Response, model: str = ""):
+    detail = resp.text[:500]
+    try:
+        e = resp.json().get("error", {})
+        detail = (e.get("message") if isinstance(e, dict) else str(e)) or detail
+    except Exception:
+        pass
+    if resp.status_code in (401, 403):
+        provider = model.split("/", 1)[0] if "/" in model else ""
+        name = _PROVIDER_NAMES.get(provider, provider or "LLM")
+        raise HTTPException(
+            502,
+            detail=f"{name} API Key 无效或未配置，请到「系统配置」页面设置正确的 API Key。",
+        )
+    raise HTTPException(502, detail=f"LLM API 错误 ({resp.status_code}): {detail}")
+
+
+_DSML_FC_RE = re.compile(
+    r'<[\uff5c|]DSML[\uff5c|]function_calls>(.*?)</[\uff5c|]DSML[\uff5c|]function_calls>',
+    re.DOTALL,
+)
+_DSML_INVOKE_RE = re.compile(
+    r'<[\uff5c|]DSML[\uff5c|]invoke\s+name="([^"]+)">(.*?)</[\uff5c|]DSML[\uff5c|]invoke>',
+    re.DOTALL,
+)
+_DSML_PARAM_RE = re.compile(
+    r'<[\uff5c|]DSML[\uff5c|]parameter\s+name="([^"]+)"\s+string="(true|false)">(.*?)</[\uff5c|]DSML[\uff5c|]parameter>',
+    re.DOTALL,
+)
+
+
+def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
+    """Parse DeepSeek DSML or similar text-embedded tool calls."""
+    calls: List[Dict[str, Any]] = []
+    for fc_match in _DSML_FC_RE.finditer(content):
+        block = fc_match.group(1)
+        for inv in _DSML_INVOKE_RE.finditer(block):
+            name = inv.group(1)
+            body = inv.group(2)
+            args: Dict[str, Any] = {}
+            for pm in _DSML_PARAM_RE.finditer(body):
+                pname, is_str, pvalue = pm.group(1), pm.group(2), pm.group(3).strip()
+                if is_str == "false":
+                    try:
+                        pvalue = json.loads(pvalue)
+                    except Exception:
+                        pass
+                args[pname] = pvalue
+            calls.append({"name": name, "arguments": args})
+    return calls
+
+
+def _strip_dsml(content: str) -> str:
+    """Remove DSML markup from text content, return readable portion."""
+    cleaned = _DSML_FC_RE.sub("", content).strip()
+    cleaned = re.sub(r'<[\uff5c|]DSML[\uff5c|][^>]*>', '', cleaned).strip()
+    return cleaned
+
+
+def _reply_for_user(reply: str) -> str:
+    """Strip DSML from reply so user never sees raw function_calls; use friendly text if nothing left."""
+    out = _strip_dsml(reply or "").strip()
+    if not out:
+        return "正在处理…"
+    return out
+
+
+# 速推 task.get_result 状态：先判进行中再判终态，避免「未完成」等误判
+_TASK_TERMINAL_STATUSES = (
+    "success", "completed", "done", "succeeded", "finished",
+    "failed", "error", "cancelled", "canceled", "timeout", "expired",
+    "已完成", "生成成功", "成功", "完成", "失败", "错误", "取消", "超时",
+)
+_TASK_IN_PROGRESS_STATUSES = (
+    "pending", "queued", "submitted", "processing", "generating", "running",
+    "处理中", "生成中", "排队中", "运行中", "上传中", "等待中",
+)
+
+
+def _is_task_result_in_progress(result_text: str) -> bool:
+    """True if task.get_result 表示仍在进行中（需继续 15s 轮询）。先判进行中再判终态，避免「未完成」等误判为终态."""
+    if not result_text:
+        return False
+    raw = (result_text or "").lower()
+    # 1) 先判进行中：任一出现则继续轮询（优先，避免「未完成」里的「完成」误判）
+    for s in _TASK_IN_PROGRESS_STATUSES:
+        if s in raw or s in result_text or f'"status":"{s}"' in raw:
+            return True
+    if any(x in raw for x in ("pending", "processing", "generating", "running", "queued")):
+        return True
+    # 2) 再判终态
+    for s in _TASK_TERMINAL_STATUSES:
+        if s in raw or s in result_text or f'"status":"{s}"' in raw:
+            return False
+    return False
+
+
+def _task_result_hint(result_text: str) -> str:
+    """从 task.get_result 返回文本中提取一句简短状态，供前端展示「查询结果」."""
+    if not result_text or not result_text.strip():
+        return ""
+    raw = (result_text or "").strip()
+    if _is_task_result_in_progress(result_text):
+        try:
+            import json
+            d = json.loads(raw) if raw.startswith("{") else {}
+            status = (d.get("status") or d.get("result", {}).get("status") or "").strip()
+            if status:
+                return f"当前状态: {status}"
+        except Exception:
+            pass
+        return "当前状态: 仍生成中"
+    try:
+        import json
+        d = json.loads(raw) if raw.startswith("{") else {}
+        status = (d.get("status") or d.get("result", {}).get("status") or "").strip()
+        if status:
+            return f"结果: {status}"
+    except Exception:
+        pass
+    return "结果: 已完成"
+
+
+async def _chat_openai(
+    msgs: List[Dict],
+    cfg: Dict,
+    mcp_tools: List[Dict],
+    token: str,
+    sutui_token: Optional[str] = None,
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+) -> str:
+    """OpenAI-compatible chat loop (DeepSeek, OpenAI, Google Gemini)."""
+    base = cfg["base_url"].rstrip("/")
+    if "googleapis.com" in base or base.endswith("/v1"):
+        url = f"{base}/chat/completions"
+    else:
+        url = f"{base}/v1/chat/completions"
+
+    hdrs = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {cfg['api_key']}",
+    }
+    model = cfg["model_name"]
+    use_tools = model not in _NO_TOOL_SUPPORT and bool(mcp_tools)
+    oai_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("inputSchema", {"type": "object", "properties": {}}),
+            },
+        }
+        for t in mcp_tools
+    ] if use_tools else []
+
+    _ACTION_KW = re.compile(
+        r"(发布|生成|打开浏览器|帮你|开始|正在|马上|登录|查看素材|查看账号|"
+        r"invoke_capability|publish_content|open_account_browser|list_assets)",
+        re.IGNORECASE,
+    )
+    # 仅当用户当前消息包含操作意图时才强制要求调用工具，避免对「你好」等问候误触发
+    _USER_ACTION_KW = re.compile(
+        r"(帮我|给我|生成.*图|发.*抖音|发布到|打开浏览器|登录|查看素材|查看账号|"
+        r"invoke_capability|publish_content|open_account_browser|list_assets|生成图片|发布内容)",
+        re.IGNORECASE,
+    )
+    force_tool_retry_done = False
+
+    cur = list(msgs)
+    for rnd in range(MAX_TOOL_ROUNDS):
+        body: Dict[str, Any] = {"model": model, "messages": cur, "stream": False}
+        if oai_tools and rnd < MAX_TOOL_ROUNDS - 1:
+            body["tools"] = oai_tools
+            body["tool_choice"] = "auto"
+
+        async with httpx.AsyncClient(timeout=120.0) as c:
+            resp = await c.post(url, json=body, headers=hdrs)
+        if resp.status_code != 200:
+            _raise_api_err(resp, model=f"{cfg.get('provider','')}/{cfg.get('model_name','')}")
+
+        choice = (resp.json().get("choices") or [{}])[0]
+        msg = choice.get("message", {})
+        tcs = msg.get("tool_calls", [])
+
+        if tcs:
+            cur.append(msg)
+            for tc in tcs:
+                fn = tc.get("function", {})
+                try:
+                    a = json.loads(fn.get("arguments", "{}"))
+                except Exception:
+                    a = {}
+                logger.info("[CHAT] tool_call: %s(%s)", fn.get("name"), list(a.keys()))
+                res = await _exec_tool(fn.get("name", ""), a, token, sutui_token, progress_cb=progress_cb)
+                if (
+                    fn.get("name") == "invoke_capability"
+                    and (a.get("capability_id") or "").strip() == "task.get_result"
+                    and _is_task_result_in_progress(res)
+                ):
+                    poll_interval = 15
+                    max_wait_sec = 20 * 60
+                    waited = 0
+                    task_id = (a.get("task_id") or a.get("payload", {}).get("task_id") or "").strip() if isinstance(a.get("payload"), dict) else (a.get("task_id") or "").strip()
+                    while waited < max_wait_sec:
+                        await asyncio.sleep(poll_interval)
+                        waited += poll_interval
+                        logger.info("[CHAT] task.get_result 轮询 %ds task_id=%s", waited, task_id or "(无)")
+                        res = await _exec_tool(fn.get("name", ""), a, token, sutui_token, progress_cb=None)
+                        if progress_cb:
+                            try:
+                                ev = {"type": "task_poll", "message": f"正在查询生成结果…（{waited}秒）"}
+                                if task_id:
+                                    ev["task_id"] = task_id
+                                ev["result_hint"] = _task_result_hint(res)
+                                await progress_cb(ev)
+                            except Exception:
+                                pass
+                        if not _is_task_result_in_progress(res):
+                            break
+                    if progress_cb:
+                        try:
+                            await progress_cb({
+                                "type": "tool_end",
+                                "name": fn.get("name", ""),
+                                "preview": (res or "")[:200],
+                                "capability_id": "task.get_result",
+                                "phase": "task_polling",
+                                "in_progress": False,
+                            })
+                            await progress_cb({"type": "status", "message": "正在生成回复…"})
+                        except Exception:
+                            pass
+                cur.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": res,
+                })
+            continue
+
+        content = (msg.get("content") or "").strip()
+        logger.info("[CHAT] rnd=%d no tool_calls, content_len=%d", rnd, len(content))
+
+        text_calls = _parse_text_tool_calls(content) if content else []
+        if text_calls and rnd < MAX_TOOL_ROUNDS - 1:
+            logger.info("[CHAT] parsed %d text-embedded tool calls (round %d)", len(text_calls), rnd)
+            preamble = _strip_dsml(content)
+            cur.append({"role": "assistant", "content": preamble or "正在调用工具..."})
+            results = []
+            for tc_info in text_calls:
+                logger.info("[CHAT] text_tool_call: %s(%s)", tc_info["name"], list(tc_info["arguments"].keys()))
+                res = await _exec_tool(tc_info["name"], tc_info["arguments"], token, sutui_token, progress_cb=progress_cb)
+                if (
+                    tc_info["name"] == "invoke_capability"
+                    and (tc_info["arguments"].get("capability_id") or "").strip() == "task.get_result"
+                    and _is_task_result_in_progress(res)
+                ):
+                    poll_interval = 15
+                    max_wait_sec = 20 * 60
+                    waited = 0
+                    args = tc_info["arguments"]
+                    task_id = (args.get("task_id") or ((args.get("payload") or {}).get("task_id") if isinstance(args.get("payload"), dict) else None) or "").strip()
+                    while waited < max_wait_sec:
+                        await asyncio.sleep(poll_interval)
+                        waited += poll_interval
+                        logger.info("[CHAT] task.get_result 轮询 %ds task_id=%s", waited, task_id or "(无)")
+                        res = await _exec_tool(
+                            tc_info["name"], tc_info["arguments"], token, sutui_token, progress_cb=None
+                        )
+                        if progress_cb:
+                            try:
+                                ev = {"type": "task_poll", "message": f"正在查询生成结果…（{waited}秒）"}
+                                if task_id:
+                                    ev["task_id"] = task_id
+                                ev["result_hint"] = _task_result_hint(res)
+                                await progress_cb(ev)
+                            except Exception:
+                                pass
+                        if not _is_task_result_in_progress(res):
+                            break
+                    if progress_cb:
+                        try:
+                            await progress_cb({
+                                "type": "tool_end",
+                                "name": tc_info["name"],
+                                "preview": (res or "")[:200],
+                                "capability_id": "task.get_result",
+                                "phase": "task_polling",
+                                "in_progress": False,
+                            })
+                            await progress_cb({"type": "status", "message": "正在生成回复…"})
+                        except Exception:
+                            pass
+                results.append(f"[{tc_info['name']}] {res}")
+            cur.append({"role": "user", "content": "工具调用结果:\n" + "\n\n".join(results) + "\n\n请根据以上结果回答用户。"})
+            continue
+
+        # 用户明确要求执行操作、且助手只回了文字没调工具时，强制要求调工具（不因「已成功」等总结语放过）
+        last_user_msg = ""
+        for m in reversed(cur):
+            if m.get("role") == "user":
+                last_user_msg = (m.get("content") or "").strip()
+                break
+        if (
+            oai_tools
+            and rnd == 0
+            and not force_tool_retry_done
+            and _ACTION_KW.search(content)
+            and _USER_ACTION_KW.search(last_user_msg)
+        ):
+            logger.warning(
+                "[CHAT] LLM replied with action text but NO tool_call (user asked for action). "
+                "Retrying with tool_choice=required. Content preview: %s",
+                content[:200],
+            )
+            force_tool_retry_done = True
+            cur.append({"role": "assistant", "content": content})
+            cur.append({
+                "role": "user",
+                "content": (
+                    "你刚才只回复了文字，没有调用任何工具。"
+                    "请立即调用对应的工具来执行操作（如 publish_content、invoke_capability、open_account_browser 等），"
+                    "不要只用文字描述。"
+                ),
+            })
+            body_retry: Dict[str, Any] = {
+                "model": model, "messages": cur, "stream": False,
+                "tools": oai_tools, "tool_choice": "required",
+            }
+            async with httpx.AsyncClient(timeout=120.0) as c:
+                resp2 = await c.post(url, json=body_retry, headers=hdrs)
+            if resp2.status_code == 200:
+                choice2 = (resp2.json().get("choices") or [{}])[0]
+                msg2 = choice2.get("message", {})
+                tcs2 = msg2.get("tool_calls", [])
+                if tcs2:
+                    logger.info("[CHAT] forced retry produced %d tool_calls", len(tcs2))
+                    cur.append(msg2)
+                    for tc in tcs2:
+                        fn = tc.get("function", {})
+                        try:
+                            a = json.loads(fn.get("arguments", "{}"))
+                        except Exception:
+                            a = {}
+                        logger.info("[CHAT] tool_call(forced): %s(%s)", fn.get("name"), list(a.keys()))
+                        res = await _exec_tool(fn.get("name", ""), a, token, sutui_token, progress_cb=progress_cb)
+                        cur.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "content": res,
+                        })
+                    continue
+                else:
+                    logger.warning("[CHAT] forced retry still no tool_calls")
+
+        if oai_tools and rnd == 0:
+            _FAKE_PATTERN = re.compile(
+                r"(已为你|已成功|已生成|已发布|发布成功|生成完成|"
+                r"!\[.*\]\(https?://|https?://.*\.(jpg|png|mp4))",
+                re.IGNORECASE,
+            )
+            if _FAKE_PATTERN.search(content):
+                logger.warning("[CHAT] possible fabricated result (no tools called): %s", content[:300])
+                try:
+                    logs = _pending_tool_logs.get()
+                except LookupError:
+                    logs = []
+                if not logs:
+                    content += "\n\n⚠️ 注意：以上回复可能是AI模拟的结果，并非真实执行。如需真正执行操作，请再次明确告诉我。"
+
+        return _reply_for_user(content)
+
+    return "（工具调用轮数已达上限）"
+
+
+async def _chat_anthropic(
+    msgs: List[Dict],
+    cfg: Dict,
+    mcp_tools: List[Dict],
+    token: str,
+    sutui_token: Optional[str] = None,
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+) -> str:
+    """Anthropic Messages API chat loop."""
+    hdrs = {
+        "Content-Type": "application/json",
+        "x-api-key": cfg["api_key"],
+        "anthropic-version": "2023-06-01",
+    }
+    sys_text = ""
+    ant_msgs: List[Dict] = []
+    for m in msgs:
+        if m["role"] == "system":
+            sys_text = m["content"]
+        elif m["role"] in ("user", "assistant"):
+            ant_msgs.append({"role": m["role"], "content": m["content"]})
+
+    ant_tools = [
+        {
+            "name": t["name"],
+            "description": t.get("description", ""),
+            "input_schema": t.get("inputSchema", {"type": "object", "properties": {}}),
+        }
+        for t in mcp_tools
+    ]
+
+    for rnd in range(MAX_TOOL_ROUNDS):
+        body: Dict[str, Any] = {
+            "model": cfg["model_name"],
+            "max_tokens": 4096,
+            "messages": ant_msgs,
+        }
+        if sys_text:
+            body["system"] = sys_text
+        if ant_tools and rnd < MAX_TOOL_ROUNDS - 1:
+            body["tools"] = ant_tools
+
+        async with httpx.AsyncClient(timeout=120.0) as c:
+            resp = await c.post(
+                "https://api.anthropic.com/v1/messages", json=body, headers=hdrs,
+            )
+        if resp.status_code != 200:
+            _raise_api_err(resp, model="anthropic/" + cfg.get("model_name", ""))
+
+        data = resp.json()
+        blocks = data.get("content", [])
+        tus = [b for b in blocks if b.get("type") == "tool_use"]
+
+        if tus and data.get("stop_reason") == "tool_use":
+            ant_msgs.append({"role": "assistant", "content": blocks})
+            results = []
+            for tu in tus:
+                logger.info("tool_call: %s", tu["name"])
+                r = await _exec_tool(tu["name"], tu.get("input", {}), token, sutui_token, progress_cb=progress_cb)
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tu["id"],
+                    "content": r,
+                })
+            ant_msgs.append({"role": "user", "content": results})
+            continue
+
+        text_parts = [
+            b.get("text", "") for b in blocks if b.get("type") == "text"
+        ]
+        return "\n".join(text_parts).strip() or "（无回复内容）"
+
+    return "（工具调用轮数已达上限）"
+
+
+# ── OpenClaw Gateway fallback ─────────────────────────────────────
+
+async def _try_openclaw(
+    msgs: List[Dict], model: str, raw_token: str,
+) -> Optional[str]:
+    """Attempt to get a reply via OpenClaw Gateway. Returns None on failure."""
+    oc_base = (settings.openclaw_gateway_url or "").strip().rstrip("/")
+    oc_token = (settings.openclaw_gateway_token or "").strip()
+    if not oc_base or not oc_token:
+        return None
+
+    agent_id = "main"
+    if model and "/" in model:
+        slug = re.sub(
+            r'[^a-z0-9_-]', '-',
+            model.lower().replace("/", "-").replace(".", "-"),
+        )
+        agent_id = re.sub(r'-+', '-', slug).strip('-')[:64] or "main"
+
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as c:
+            resp = await c.post(
+                f"{oc_base}/v1/chat/completions",
+                json={"model": model, "messages": msgs, "stream": False},
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {oc_token}",
+                    "x-openclaw-agent-id": agent_id,
+                    "x-user-authorization": f"Bearer {raw_token}",
+                },
+            )
+        if resp.status_code == 200:
+            choices = resp.json().get("choices", [])
+            if choices:
+                return (choices[0].get("message", {}).get("content") or "").strip()
+    except Exception:
+        pass
+    return None
+
+
+# ── Chat turn logging ─────────────────────────────────────────────
+
+def _flush_tool_logs(db: Session, uid: int, session_id: Optional[str], model: Optional[str]):
+    """Persist collected tool call records to the database."""
+    try:
+        logs = _pending_tool_logs.get()
+    except LookupError:
+        return
+    for entry in logs:
+        db.add(ToolCallLog(
+            user_id=uid,
+            tool_name=entry["tool_name"],
+            arguments=entry.get("arguments"),
+            result_text=entry.get("result_text"),
+            result_urls=entry.get("result_urls"),
+            success=entry.get("success", True),
+            latency_ms=entry.get("latency_ms"),
+            session_id=(session_id or "")[:128] or None,
+            model=(model or "")[:128] or None,
+        ))
+    _pending_tool_logs.set([])
+
+
+def _log_turn(
+    db: Session, uid: int, user_msg: str, reply: str,
+    sid: Optional[str], cid: Optional[str], meta: Optional[Dict] = None,
+):
+    db.add(ChatTurnLog(
+        user_id=uid,
+        session_id=(sid or "")[:128] or None,
+        context_id=(cid or "")[:128] or None,
+        user_message=(user_msg or "")[:5000],
+        assistant_reply=(reply or "")[:20000],
+        meta=meta or {},
+    ))
+
+
+# ── Main endpoint ─────────────────────────────────────────────────
+
+def _build_user_content_with_attachments(
+    payload: ChatRequest,
+    request: Optional[Request] = None,
+    db=None,
+    user_id: Optional[int] = None,
+) -> str:
+    user_content = (payload.message or "").strip()
+    if getattr(payload, "attachment_asset_ids", None) and request:
+        try:
+            from backend.app.api.assets import build_asset_file_url, get_asset_public_url
+            pairs = []
+            aids = [a for a in (payload.attachment_asset_ids or [])[:5] if isinstance(a, str) and a.strip()]
+            for aid in aids:
+                aid = aid.strip()
+                if db is not None and user_id is not None:
+                    u = get_asset_public_url(aid, user_id, request, db)
+                else:
+                    u = build_asset_file_url(request, aid)
+                if u:
+                    pairs.append((aid, u))
+            if pairs:
+                logger.info("[CHAT] 注入素材 URL: asset_ids=%s", [p[0] for p in pairs])
+                user_content += "\n\n【用户本条消息上传的素材】生成视频时请使用以下 URL 作为 image_url，勿使用历史中的其他素材。\n"
+                user_content += "\n".join(f"- asset_id: {aid}  URL: {u}" for aid, u in pairs)
+        except Exception:
+            pass
+    return user_content or "（无文字）"
+
+
+@router.post("/chat", response_model=ChatResponse, summary="智能对话")
+async def chat_endpoint(
+    request: Request,
+    payload: ChatRequest,
+    raw_token: str = Depends(oauth2_scheme),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _pending_tool_logs.set([])
+
+    edition = (getattr(settings, "lobster_edition", None) or "online").strip().lower()
+    if edition == "online":
+        model = "sutui"
+        # 速推能力由服务器转发，使用服务器侧 Token，不传用户 token
+        sutui_token = None
+    else:
+        sutui_token = None
+        model = payload.model or getattr(current_user, "preferred_model", None) or ""
+        if not model or model == "openclaw":
+            model = _pick_default_model()
+
+    mcp_tools = await _fetch_mcp_tools()
+    has_tools = bool(mcp_tools)
+    if not has_tools:
+        logger.info(
+            "MCP tools empty (port 8001 may be down or unreachable), chat has no capabilities; "
+            "user will see 'cannot generate image'. Check that MCP service is started (run_mcp.bat / start.bat)."
+        )
+    # 在线版：对话用首个已配置的模型（无则走 OpenClaw），能力走速推（sutui_token）
+    if edition == "online":
+        try:
+            resolve_model = _pick_default_model()
+        except HTTPException:
+            resolve_model = None
+    else:
+        resolve_model = model
+
+    sys_prompt = (
+        "你是「龙虾」(Lobster)，用户的私人 AI 助手。"
+        "龙虾内置了「速推 MCP」能力：文生图、图生视频、语音合成、视频解析等，具体以 list_capabilities 返回为准。\n\n"
+        + (
+            "【绝对禁止 — 违反将导致严重错误】\n"
+            "1. 禁止模拟/伪造工具调用结果。你没有能力直接生成图片、发布内容、操作浏览器。你只能通过调用工具来做这些事。\n"
+            "2. 禁止编造 URL、asset_id、图片链接、发布结果。所有数据必须来自工具返回。\n"
+            "3. 禁止在回复中假装已经完成了操作（如\"已为你生成\"\"已发布成功\"）而实际没有调用工具。\n"
+            "4. 禁止用文字描述代替工具调用。说\"好的，我来发布\"然后不调用工具 = 严重错误。\n"
+            "5. 当用户要求执行操作时，你必须在本轮回复中调用工具，不能只回复文字。\n\n"
+            "【正确做法】\n"
+            "- 用户问「你能做什么」「速推能力」「MCP 能力」「内置能力」等 → 必须先调用 list_capabilities，根据返回的 capability 列表和描述如实回答，不要用通用话术。\n"
+            "- 用户要你做事 → 立即调用对应的工具函数，等工具返回真实结果后再回复用户。\n"
+            "- 不确定该调哪个工具 → 先调用 list_capabilities 或 list_assets 查询，不要猜测。\n"
+            "- 工具调用失败 → 如实告诉用户失败原因，不要编造成功结果。\n\n"
+            "【工具使用指南】\n"
+            "生成图片：invoke_capability(capability_id=\"image.generate\", payload={\"prompt\":\"...\", \"model\":\"jimeng-4.0\"})\n"
+            "  → 返回 task_id 后用 task.get_result(task_id) 取结果，结果中 saved_assets[0].asset_id 为素材ID\n"
+            "生成视频：文生视频 invoke_capability(capability_id=\"video.generate\", payload={\"model\":\"st-ai/super-seed2\", \"prompt\":\"...\", \"duration\":5})\n"
+            "  图生视频 同上但 payload 加 image_url（图片需公开 URL，本地图先用 sutui.transfer_url 转存）\n"
+            "  → 返回 task_id 后必须调 task.get_result(task_id) 轮询，视频通常 30–120 秒完成\n"
+            "生成并发布：先 invoke_capability 生成 → 拿 asset_id → 调 publish_content\n"
+            "当用户要求「发到某账号」「发布到抖音」等时，在 task.get_result 返回成功（含 saved_assets 或 result 中的 asset_id）后，立即调用 publish_content(asset_id, account_nickname, ...)，无需等用户再次确认或点击。\n"
+            "【发布约束】\n"
+            "- 发布必须由你调用 publish_content 等工具完成，不得要求用户「点加号」「到发布页」「准备好后告诉我」等手动操作。\n"
+            "- task.get_result 返回成功且用户要求发布时，必须**在同一轮**紧接着调用 publish_content（或先 list_publish_accounts 再 publish_content），禁止只回复「视频已生成，现在去发布」「让我检查某账号是否存在」等文字而不调用工具；若需确认账号，先调 list_publish_accounts，拿到结果后立即调 publish_content。\n"
+            "- 用户说「用某素材生成视频并发布到某账号」时：发布时 asset_id 必须用 task.get_result 返回的 saved_assets 中的 ID（本次生成的视频），不得用用户提供的垫图/输入素材 ID。\n"
+            "- 用户说「用生成的」「发刚才生成的」「用这个生成的素材」时：即指上一轮 task.get_result 已返回结果中的 saved_assets[0].asset_id，直接调用 publish_content(该 asset_id, account_nickname, ...)，不要再次调用 video.generate 或 task.get_result。\n"
+            "- 若 invoke_capability 或 task.get_result 返回错误/失败，必须明确告知用户「本次生成失败」及原因，不得用其他素材或历史结果冒充本次生成成功；只有当前 task.get_result 明确返回成功且含 saved_assets 时，才可回复「视频已生成」并继续发布。失败后禁止自行重试或再生成一个别的视频，只把失败原因提示给用户即可。\n"
+            "发布：publish_content(asset_id, account_nickname, title, description, tags)\n"
+            "打开浏览器：open_account_browser(account_nickname=\"xxx\")\n"
+            "检查登录：check_account_login(account_nickname=\"xxx\")\n"
+            "查素材：list_assets  查账号：list_publish_accounts\n"
+            if has_tools
+            else (
+                "\n【当前无可用工具】能力服务(MCP 端口 8001)未就绪。"
+                "若用户要求生成图片、视频、发布等，请回复：当前无法使用速推能力，请确认 (1) 已用 start.bat 或 start_headless.bat 启动完整服务（含 MCP）；(2) 已使用速推账号登录或配置算力账号。"
+                "可访问 http://本机IP:8000/api/health 查看 mcp.reachable 与 mcp.tools_count。\n\n"
+            )
+        )
+        + "回答使用中文，简洁友好。"
+        + " 当用户发送新的短消息（如问候、新问题）时，请直接针对该新消息简短回复，不要重复或延续上一条长回复的内容。"
+    )
+
+    messages: List[Dict[str, str]] = [{"role": "system", "content": sys_prompt}]
+    for m in (payload.history or []):
+        if m.role in ("user", "assistant") and (m.content or "").strip():
+            content = m.content.strip()
+            if len(content) > MAX_HISTORY_MESSAGE_CHARS:
+                content = (
+                    content[: MAX_HISTORY_MESSAGE_CHARS // 2].rstrip()
+                    + "\n\n...(上条内容已省略，请根据用户新消息直接回复。)"
+                )
+            messages.append({"role": m.role, "content": content})
+    if len(messages) > MAX_HISTORY + 1:
+        messages = [messages[0]] + messages[-MAX_HISTORY:]
+    messages.append({"role": "user", "content": _build_user_content_with_attachments(payload, request, db=db, user_id=current_user.id)})
+
+    t0 = time.perf_counter()
+
+    # ── Primary path: direct LLM API with MCP tools ──
+    cfg = _resolve_config(resolve_model) if resolve_model else None
+    if cfg:
+        try:
+            logger.info("[对话] 请求 model=%s tools=%d", model, len(mcp_tools))
+            if cfg["provider"] == "anthropic":
+                reply = await _chat_anthropic(messages, cfg, mcp_tools, raw_token, sutui_token=sutui_token)
+            else:
+                reply = await _chat_openai(messages, cfg, mcp_tools, raw_token, sutui_token=sutui_token)
+
+            ms = round((time.perf_counter() - t0) * 1000)
+            _flush_tool_logs(db, current_user.id, payload.session_id, model)
+            _log_turn(
+                db, current_user.id, payload.message, _reply_for_user(reply),
+                payload.session_id, payload.context_id,
+                {"model": model, "mode": "direct", "duration_ms": ms, "tools": len(mcp_tools)},
+            )
+            db.commit()
+            return JSONResponse(
+                content=ChatResponse(reply=_reply_for_user(reply)).model_dump(),
+                headers={"X-Duration-Ms": str(ms)},
+            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Direct LLM call failed, trying OpenClaw fallback: %s", e)
+
+    # ── Fallback: OpenClaw Gateway (no MCP tools) ──
+    oc_reply = await _try_openclaw(messages, model, raw_token)
+    if oc_reply:
+        ms = round((time.perf_counter() - t0) * 1000)
+        _flush_tool_logs(db, current_user.id, payload.session_id, model)
+        _log_turn(
+            db, current_user.id, payload.message, _reply_for_user(oc_reply),
+            payload.session_id, payload.context_id,
+            {"model": model, "mode": "openclaw", "duration_ms": ms},
+        )
+        db.commit()
+        return JSONResponse(
+            content=ChatResponse(reply=_reply_for_user(oc_reply)).model_dump(),
+            headers={"X-Duration-Ms": str(ms)},
+        )
+
+    # ── No LLM path available ──
+    if not cfg:
+        detail = (
+            f"模型 {model} 的 API Key 未配置。"
+            "请在「系统配置」中添加对应的 API Key。"
+        )
+    else:
+        detail = "LLM 服务暂时不可用，请稍后重试。"
+    raise HTTPException(status_code=503, detail=detail)
+
+
+# ── Stream endpoint (SSE progress) ─────────────────────────────────
+
+async def _chat_stream_events(
+    payload: ChatRequest,
+    raw_token: str,
+    current_user: User,
+    db: Session,
+    request: Optional[Request] = None,
+):
+    """Async generator: yield SSE events (progress + done). Runs chat with progress_cb pushing to queue."""
+    queue: asyncio.Queue = asyncio.Queue()
+    reply_holder: List[str] = []
+    error_holder: List[str] = []
+    _request_for_assets = request
+
+    async def progress_cb(ev: Dict) -> None:
+        await queue.put(ev)
+
+    async def run_chat() -> None:
+        _pending_tool_logs.set([])
+        edition = (getattr(settings, "lobster_edition", None) or "online").strip().lower()
+        if edition == "online":
+            model = "sutui"
+            sutui_token = None
+        else:
+            sutui_token = None
+            model = payload.model or getattr(current_user, "preferred_model", None) or ""
+            if not model or model == "openclaw":
+                model = _pick_default_model()
+        mcp_tools = await _fetch_mcp_tools()
+        has_tools = bool(mcp_tools)
+        if not has_tools:
+            logger.info("MCP tools empty (stream path), chat has no capabilities")
+        if edition == "online":
+            try:
+                resolve_model = _pick_default_model()
+            except HTTPException:
+                resolve_model = None
+        else:
+            resolve_model = model
+        sys_prompt = (
+            "你是「龙虾」(Lobster)，用户的私人 AI 助手。"
+            "龙虾内置了「速推 MCP」能力：文生图、图生视频、语音合成、视频解析等，具体以 list_capabilities 返回为准。\n\n"
+            + (
+                "【绝对禁止 — 违反将导致严重错误】\n"
+                "1. 禁止模拟/伪造工具调用结果。你没有能力直接生成图片、发布内容、操作浏览器。你只能通过调用工具来做这些事。\n"
+                "2. 禁止编造 URL、asset_id、图片链接、发布结果。所有数据必须来自工具返回。\n"
+                "3. 禁止在回复中假装已经完成了操作（如\"已为你生成\"\"已发布成功\"）而实际没有调用工具。\n"
+                "4. 禁止用文字描述代替工具调用。说\"好的，我来发布\"然后不调用工具 = 严重错误。\n"
+                "5. 当用户要求执行操作时，你必须在本轮回复中调用工具，不能只回复文字。\n\n"
+                "【正确做法】\n"
+                "- 用户问「你能做什么」「速推能力」「MCP 能力」「内置能力」等 → 必须先调用 list_capabilities，根据返回的 capability 列表和描述如实回答，不要用通用话术。\n"
+                "- 用户要你做事 → 立即调用对应的工具函数，等工具返回真实结果后再回复用户。\n"
+                "- 不确定该调哪个工具 → 先调用 list_capabilities 或 list_assets 查询，不要猜测。\n"
+                "- 工具调用失败 → 如实告诉用户失败原因，不要编造成功结果。\n\n"
+                "【工具使用指南】\n"
+                "生成图片：invoke_capability(capability_id=\"image.generate\", payload={\"prompt\":\"...\", \"model\":\"jimeng-4.0\"})\n"
+                "  → 返回 task_id 后用 task.get_result(task_id) 取结果，结果中 saved_assets[0].asset_id 为素材ID\n"
+                "生成视频：文生视频 invoke_capability(capability_id=\"video.generate\", payload={\"model\":\"st-ai/super-seed2\", \"prompt\":\"...\", \"duration\":5})\n"
+                "  图生视频 同上但 payload 加 image_url（图片需公开 URL，本地图先用 sutui.transfer_url 转存）\n"
+                "  → 返回 task_id 后必须调 task.get_result(task_id) 轮询，视频通常 30–120 秒完成\n"
+                "生成并发布：先 invoke_capability 生成 → 拿 asset_id → 调 publish_content\n"
+                "当用户要求「发到某账号」「发布到抖音」等时，在 task.get_result 返回成功（含 saved_assets 或 result 中的 asset_id）后，立即调用 publish_content(asset_id, account_nickname, ...)，无需等用户再次确认或点击。\n"
+                "【发布约束】\n"
+                "- 发布必须由你调用 publish_content 等工具完成，不得要求用户「点加号」「到发布页」「准备好后告诉我」等手动操作。\n"
+                "- task.get_result 返回成功且用户要求发布时，必须**在同一轮**紧接着调用 publish_content（或先 list_publish_accounts 再 publish_content），禁止只回复「视频已生成，现在去发布」「让我检查某账号是否存在」等文字而不调用工具；若需确认账号，先调 list_publish_accounts，拿到结果后立即调 publish_content。\n"
+                "- 用户说「用某素材生成视频并发布到某账号」时：发布时 asset_id 必须用 task.get_result 返回的 saved_assets 中的 ID（本次生成的视频），不得用用户提供的垫图/输入素材 ID。\n"
+                "- 用户说「用生成的」「发刚才生成的」「用这个生成的素材」时：即指上一轮 task.get_result 已返回结果中的 saved_assets[0].asset_id，直接调用 publish_content(该 asset_id, account_nickname, ...)，不要再次调用 video.generate 或 task.get_result。\n"
+                "- 若 invoke_capability 或 task.get_result 返回错误/失败，必须明确告知用户「本次生成失败」及原因，不得用其他素材或历史结果冒充本次生成成功；只有当前 task.get_result 明确返回成功且含 saved_assets 时，才可回复「视频已生成」并继续发布。失败后禁止自行重试或再生成一个别的视频，只把失败原因提示给用户即可。\n"
+                "发布：publish_content(asset_id, account_nickname, title, description, tags)\n"
+                "打开浏览器：open_account_browser(account_nickname=\"xxx\")\n"
+                "检查登录：check_account_login(account_nickname=\"xxx\")\n"
+                "查素材：list_assets  查账号：list_publish_accounts\n"
+                if has_tools
+                else (
+                    "\n【当前无可用工具】能力服务(MCP 端口 8001)未就绪。"
+                    "若用户要求生成图片、视频、发布等，请回复：当前无法使用速推能力，请确认 (1) 已用 start.bat 或 start_headless.bat 启动完整服务（含 MCP）；(2) 已使用速推账号登录或配置算力账号。"
+                    "可访问 http://本机IP:8000/api/health 查看 mcp.reachable 与 mcp.tools_count。\n\n"
+                )
+            )
+            + "回答使用中文，简洁友好。"
+            + " 当用户发送新的短消息（如问候、新问题）时，请直接针对该新消息简短回复，不要重复或延续上一条长回复的内容。"
+        )
+        messages = [{"role": "system", "content": sys_prompt}]
+        for m in (payload.history or []):
+            if m.role in ("user", "assistant") and (m.content or "").strip():
+                content = m.content.strip()
+                if len(content) > MAX_HISTORY_MESSAGE_CHARS:
+                    content = (
+                        content[: MAX_HISTORY_MESSAGE_CHARS // 2].rstrip()
+                        + "\n\n...(上条内容已省略，请根据用户新消息直接回复。)"
+                    )
+                messages.append({"role": m.role, "content": content})
+        if len(messages) > MAX_HISTORY + 1:
+            messages = [messages[0]] + messages[-MAX_HISTORY:]
+        messages.append({"role": "user", "content": _build_user_content_with_attachments(payload, _request_for_assets, db=db, user_id=current_user.id)})
+
+        cfg = _resolve_config(resolve_model) if resolve_model else None
+        try:
+            if cfg:
+                if cfg["provider"] == "anthropic":
+                    reply = await _chat_anthropic(
+                        messages, cfg, mcp_tools, raw_token,
+                        sutui_token=sutui_token,
+                        progress_cb=progress_cb,
+                    )
+                else:
+                    reply = await _chat_openai(
+                        messages, cfg, mcp_tools, raw_token,
+                        sutui_token=sutui_token,
+                        progress_cb=progress_cb,
+                    )
+                reply_holder.append(reply)
+                _flush_tool_logs(db, current_user.id, payload.session_id, model)
+                _log_turn(
+                    db, current_user.id, payload.message, _reply_for_user(reply),
+                    payload.session_id, payload.context_id,
+                    {"model": model, "mode": "direct", "tools": len(mcp_tools)},
+                )
+                db.commit()
+            else:
+                oc_reply = await _try_openclaw(messages, model, raw_token)
+                if oc_reply:
+                    reply_holder.append(oc_reply)
+                    _flush_tool_logs(db, current_user.id, payload.session_id, model)
+                    _log_turn(
+                        db, current_user.id, payload.message, _reply_for_user(oc_reply),
+                        payload.session_id, payload.context_id,
+                        {"model": model, "mode": "openclaw"},
+                    )
+                    db.commit()
+                else:
+                    error_holder.append("LLM 服务暂时不可用")
+        except HTTPException as e:
+            error_holder.append(e.detail or str(e))
+        except Exception as e:
+            logger.exception("chat/stream run_chat error")
+            error_holder.append(str(e))
+        final_reply = reply_holder[0] if reply_holder else ""
+        final_error = error_holder[0] if error_holder else None
+        if final_error:
+            final_reply = f"错误：{final_error}"
+        else:
+            final_reply = _reply_for_user(final_reply)
+        await queue.put({"type": "done", "reply": final_reply, "error": final_error})
+
+    task = asyncio.create_task(run_chat())
+    try:
+        while True:
+            try:
+                ev = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                yield f"data: {json.dumps({'type': 'heartbeat'}, ensure_ascii=False)}\n\n"
+                continue
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            if ev.get("type") == "done":
+                break
+    finally:
+        await task
+
+
+@router.post("/chat/stream", summary="智能对话（流式返回思考/工具进度）")
+async def chat_stream_endpoint(
+    request: Request,
+    payload: ChatRequest,
+    raw_token: str = Depends(oauth2_scheme),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Stream SSE events: tool_start, tool_end, then done with reply. Frontend can show progress in chat."""
+    return StreamingResponse(
+        _chat_stream_events(payload, raw_token, current_user, db, request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── Chat history ──────────────────────────────────────────────────
+
+@router.get("/chat/history", summary="会话历史")
+def list_chat_history(
+    context_id: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(ChatTurnLog).filter(ChatTurnLog.user_id == current_user.id)
+    if context_id:
+        q = q.filter(ChatTurnLog.context_id == context_id)
+    rows = (
+        q.order_by(ChatTurnLog.created_at.desc())
+        .offset(max(offset, 0))
+        .limit(min(max(limit, 1), 500))
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "session_id": r.session_id,
+            "context_id": r.context_id,
+            "user_message": r.user_message,
+            "assistant_reply": r.assistant_reply,
+            "meta": r.meta,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+        }
+        for r in rows
+    ]
+
+
+# ── Tool call logs (生产记录) ─────────────────────────────────────
+
+@router.get("/api/tool-logs", summary="MCP 工具调用记录")
+def list_tool_logs(
+    tool_name: Optional[str] = None,
+    success_only: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(ToolCallLog).filter(ToolCallLog.user_id == current_user.id)
+    if tool_name:
+        q = q.filter(ToolCallLog.tool_name == tool_name)
+    if success_only:
+        q = q.filter(ToolCallLog.success.is_(True))
+    total = q.count()
+    rows = (
+        q.order_by(ToolCallLog.created_at.desc())
+        .offset(max(offset, 0))
+        .limit(min(max(limit, 1), 200))
+        .all()
+    )
+    return {
+        "total": total,
+        "items": [
+            {
+                "id": r.id,
+                "tool_name": r.tool_name,
+                "arguments": r.arguments,
+                "result_text": r.result_text[:2000] if r.result_text else None,
+                "result_urls": r.result_urls.split(",") if r.result_urls else [],
+                "success": r.success,
+                "latency_ms": r.latency_ms,
+                "session_id": r.session_id,
+                "model": r.model,
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/api/tool-logs/stats", summary="工具调用统计")
+def tool_log_stats(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from sqlalchemy import Integer as SaInt, func
+    rows = (
+        db.query(
+            ToolCallLog.tool_name,
+            func.count(ToolCallLog.id).label("count"),
+            func.sum(ToolCallLog.success.is_(True).cast(SaInt)).label("success_count"),
+        )
+        .filter(ToolCallLog.user_id == current_user.id)
+        .group_by(ToolCallLog.tool_name)
+        .all()
+    )
+    return [
+        {"tool_name": r.tool_name, "count": r.count, "success_count": r.success_count or 0}
+        for r in rows
+    ]
+
+
+# ── 生产记录：仅速推能力调用 + 模型对话，无重复 ─────────────────────────────
+
+def _production_records_merged(
+    current_user: User,
+    db: Session,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """合并 CapabilityCallLog（速推生成）与 ChatTurnLog（模型调用），按时间倒序，无重复。"""
+    cap_rows = (
+        db.query(CapabilityCallLog)
+        .filter(CapabilityCallLog.user_id == current_user.id)
+        .order_by(CapabilityCallLog.created_at.desc())
+        .limit(150)
+        .all()
+    )
+    turn_rows = (
+        db.query(ChatTurnLog)
+        .filter(ChatTurnLog.user_id == current_user.id)
+        .order_by(ChatTurnLog.created_at.desc())
+        .limit(150)
+        .all()
+    )
+    merged = []
+    for r in cap_rows:
+        merged.append({
+            "type": "capability",
+            "id": f"c{r.id}",
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "capability_id": r.capability_id,
+            "success": r.success,
+            "latency_ms": r.latency_ms,
+            "error_message": (r.error_message or "")[:500] if r.error_message else None,
+            "status": r.status,
+        })
+    for r in turn_rows:
+        merged.append({
+            "type": "model",
+            "id": f"t{r.id}",
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "user_message": (r.user_message or "")[:300],
+            "assistant_reply": (r.assistant_reply or "")[:500],
+        })
+    merged.sort(key=lambda x: x["created_at"], reverse=True)
+    total = len(merged)
+    page = merged[offset : offset + limit]
+    return {"total": total, "items": page}
+
+
+@router.get("/api/production/records", summary="生产记录（仅速推能力+模型对话）")
+def list_production_records(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """仅返回：速推能力调用（CapabilityCallLog）、模型对话轮次（ChatTurnLog）。可刷新看进度，无重复。"""
+    return _production_records_merged(current_user=current_user, db=db, limit=min(max(limit, 1), 100), offset=max(offset, 0))
+
+
+@router.post("/api/production/refresh-pending", summary="刷新待处理（兼容）")
+def production_refresh_pending(current_user: User = Depends(get_current_user)):
+    """兼容旧前端，无实际操作，返回成功。"""
+    return {"ok": True}

@@ -1,0 +1,41 @@
+# 与 lobster 一致：密钥与本地配置
+.env
+*.local
+sutui_config.json
+openclaw/.env
+upstream_urls.json
+custom_configs.json
+models_config.json
+
+# 数据库与运行时
+*.db
+*.db-journal
+*.log
+logs/
+backend.log
+mcp.log
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.so
+
+# Node（可选）
+node_modules/
+
+# 运行时
+browser_data/
+browser_chromium/
+assets/
+installed_packages.json
+mcp/capability_catalog.local.json
+
+# 系统/编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

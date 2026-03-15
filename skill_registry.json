@@ -1,0 +1,123 @@
+{
+  "packages": {
+    "douyin_publish": {
+      "name": "发抖音",
+      "description": "一键将生成的视频/图文发布到抖音。两种扣费方式：按次扣 10 积分/次，或付费解锁本技能后免费使用。",
+      "type": "builtin",
+      "unlock_price_yuan": 148,
+      "status": "available",
+      "capabilities": {},
+      "tags": ["publish", "douyin", "video"]
+    },
+    "sutui_mcp": {
+      "name": "速推 MCP",
+      "description": "图片生成、视频解析、语音合成、模型搜索等 AI 创作能力",
+      "type": "upstream_mcp",
+      "config": {
+        "upstream_name": "sutui",
+        "upstream_url_env": "CAPABILITY_SUTUI_MCP_URL",
+        "upstream_url_default": "https://mcp.sutui.cc/mcp"
+      },
+      "capabilities": {
+        "image.generate": {
+          "description": "生成图片（统一能力入口）",
+          "upstream": "sutui",
+          "upstream_tool": "generate",
+          "enabled": true,
+          "is_default": true,
+          "arg_schema": {
+            "type": "object",
+            "properties": {
+              "prompt": {"type": "string", "description": "生成提示词"},
+              "model": {"type": "string", "description": "可选，模型名"},
+              "size": {"type": "string", "description": "可选，图像尺寸"}
+            },
+            "required": ["prompt"]
+          }
+        },
+        "task.get_result": {
+          "description": "查询任务结果（统一能力入口）",
+          "upstream": "sutui",
+          "upstream_tool": "get_result",
+          "enabled": true,
+          "is_default": true,
+          "arg_schema": {
+            "type": "object",
+            "properties": {
+              "task_id": {"type": "string", "description": "任务 ID"}
+            },
+            "required": ["task_id"]
+          }
+        },
+        "sutui.search_models": {
+          "description": "搜索速推可用模型与参数",
+          "upstream": "sutui",
+          "upstream_tool": "search_models",
+          "enabled": true,
+          "is_default": false,
+          "arg_schema": {
+            "type": "object",
+            "properties": {
+              "query": {"type": "string"},
+              "category": {"type": "string", "enum": ["image", "video", "audio", "all"]}
+            }
+          }
+        },
+        "sutui.speak": {
+          "description": "语音合成和音色管理",
+          "upstream": "sutui",
+          "upstream_tool": "speak",
+          "enabled": true,
+          "is_default": false,
+          "arg_schema": {
+            "type": "object",
+            "properties": {
+              "action": {"type": "string", "enum": ["synthesize", "list_voices"], "default": "synthesize"},
+              "text": {"type": "string"},
+              "voice_id": {"type": "string"}
+            }
+          }
+        },
+        "sutui.parse_video": {
+          "description": "解析视频分享链接并获取下载地址",
+          "upstream": "sutui",
+          "upstream_tool": "parse_video",
+          "enabled": true,
+          "is_default": false,
+          "arg_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"]
+          }
+        },
+        "sutui.guide": {
+          "description": "获取速推模型教程与最佳实践",
+          "upstream": "sutui",
+          "upstream_tool": "guide",
+          "enabled": true,
+          "is_default": false,
+          "arg_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}}
+          }
+        },
+        "sutui.transfer_url": {
+          "description": "转存外部媒体 URL 到 CDN",
+          "upstream": "sutui",
+          "upstream_tool": "transfer_url",
+          "enabled": true,
+          "is_default": false,
+          "arg_schema": {
+            "type": "object",
+            "properties": {
+              "url": {"type": "string"},
+              "type": {"type": "string", "enum": ["image", "audio"], "default": "image"}
+            },
+            "required": ["url"]
+          }
+        }
+      },
+      "tags": ["image", "video", "audio", "ai"]
+    }
+  }
+}
