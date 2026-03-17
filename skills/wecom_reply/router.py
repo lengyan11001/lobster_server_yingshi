@@ -88,7 +88,9 @@ class WXBizMsgCrypt:
         return self._signature(self.token, timestamp, nonce, msg_encrypt) == msg_signature
 
     def decrypt(self, msg_encrypt_b64: str) -> str:
-        b64 = (msg_encrypt_b64 or "").strip()
+        # 去除全部空白（含换行），避免长密文被截断或解码错
+        b64 = "".join((msg_encrypt_b64 or "").split())
+        b64 = b64.strip()
         while len(b64) % 4:
             b64 += "="
         aes_msg = self._b64decode(b64)
