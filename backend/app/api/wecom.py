@@ -300,9 +300,8 @@ async def wecom_callback_post(
         )
         db.add(pending)
         db.commit()
-        # 返回占位回复（用户稍后通过应用消息收到真实回复）
-        placeholder = "收到，正在处理。"
-        reply_xml = _build_reply_xml(from_user, to_user, placeholder)
+        # 不主动回复，仅入队；用户通过「拉取并回复」由 AI 生成并发送应用消息
+        reply_xml = _build_reply_xml(from_user, to_user, "")
         reply_encrypt = crypt.encrypt(reply_xml)
         reply_nonce = "".join(random.choices(string.ascii_letters + string.digits, k=16))
         reply_ts = str(int(time.time()))
@@ -343,6 +342,7 @@ def wecom_pending(
     _auth: bool = Depends(_check_forward_secret),
     db: Session = Depends(get_db),
 ):
+    logger.info("[WeCom] GET pending callback_path=%s limit=%s", callback_path, limit)
     q = (
         db.query(WecomPendingMessage, WecomConfig.callback_path)
         .join(WecomConfig, WecomPendingMessage.wecom_config_id == WecomConfig.id)
@@ -374,6 +374,7 @@ async def wecom_submit_reply(
     _auth: bool = Depends(_check_forward_secret),
     db: Session = Depends(get_db),
 ):
+    logger.info("[WeCom] POST submit-reply message_id=%s", body.message_id)
     row = db.query(WecomPendingMessage).filter(
         WecomPendingMessage.id == body.message_id,
         WecomPendingMessage.status == "pending",
