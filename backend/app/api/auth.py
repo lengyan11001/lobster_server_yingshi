@@ -1,8 +1,11 @@
+import base64
 import hashlib
 import json
 import logging
+import secrets
+import time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Dict, Optional
 from urllib.parse import quote
 
 import bcrypt
@@ -300,7 +303,7 @@ def _exchange_jwt_for_apikey(jwt_token: str) -> str:
     return key
 
 
-# ── 自建微信登录（不用速推）────────────────────────────────────────────────
+# ── 自建微信登录（小程序码 + 轮询，流程类似速推）────────────────────────────────
 
 def _use_own_wechat_login() -> bool:
     """是否启用自建微信登录（配置了 wechat_app_id + wechat_app_secret）。"""
@@ -309,17 +312,146 @@ def _use_own_wechat_login() -> bool:
     return bool(app_id and secret)
 
 
-@router.get("/wechat-login-url", summary="自建微信：获取扫码登录授权 URL")
+# 小程序码扫码登录：scene_id -> token，5 分钟有效
+_miniprogram_scene_store: Dict[str, Dict[str, Any]] = {}
+_SCENE_TTL = 300  # 5 min
+
+# 微信 access_token 缓存（2h 有效，提前 5min 刷新）
+_wechat_access_token_cache: Dict[str, Any] = {"token": None, "expires_at": 0.0}
+
+
+def _get_wechat_access_token() -> str:
+    """获取小程序 access_token（用于生成小程序码）。"""
+    now = time.time()
+    if _wechat_access_token_cache["token"] and _wechat_access_token_cache["expires_at"] > now + 300:
+        return _wechat_access_token_cache["token"]
+    app_id = (getattr(settings, "wechat_app_id", None) or "").strip()
+    app_secret = (getattr(settings, "wechat_app_secret", None) or "").strip()
+    if not app_id or not app_secret:
+        raise ValueError("未配置 wechat_app_id/wechat_app_secret")
+    with httpx.Client(timeout=10.0) as client:
+        r = client.get(
+            "https://api.weixin.qq.com/cgi-bin/token",
+            params={"grant_type": "client_credential", "appid": app_id, "secret": app_secret},
+        )
+    data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    if data.get("errcode") or not data.get("access_token"):
+        raise ValueError(data.get("errmsg") or "获取 access_token 失败")
+    token = (data.get("access_token") or "").strip()
+    expires_in = int(data.get("expires_in") or 7200)
+    _wechat_access_token_cache["token"] = token
+    _wechat_access_token_cache["expires_at"] = now + expires_in
+    return token
+
+
+@router.get("/wechat-login-url", summary="自建微信：获取小程序码（二维码）与 scene_id，前端轮询登录状态")
 def get_wechat_login_url(request: Request):
-    """返回微信开放平台网站应用扫码授权 URL。回调地址用 PUBLIC_BASE_URL，未配则用本机 IP:PORT。"""
+    """生成小程序码，返回 scene_id 与二维码 base64。前端展示二维码并轮询 /auth/wechat-miniprogram-login-status?scene_id=。"""
     if not _use_own_wechat_login():
         raise HTTPException(status_code=400, detail="未配置自建微信登录（wechat_app_id/wechat_app_secret）")
+    scene_id = secrets.token_hex(8)  # 16 字符，符合微信 scene 32 字限制
+    try:
+        access_token = _get_wechat_access_token()
+    except ValueError as e:
+        logger.warning("wechat access_token: %s", e)
+        raise HTTPException(status_code=502, detail=str(e))
+    body: Dict[str, Any] = {"scene": scene_id, "width": 280}
+    page = (getattr(settings, "wechat_miniprogram_page", None) or "").strip()
+    if page:
+        body["page"] = page
+    with httpx.Client(timeout=15.0) as client:
+        r = client.post(
+            f"https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={access_token}",
+            json=body,
+        )
+    if r.headers.get("content-type", "").startswith("application/json"):
+        err = r.json()
+        logger.warning("getwxacodeunlimit err: %s", err)
+        errmsg = err.get("errmsg") or "生成小程序码失败"
+        if "page" in (errmsg or "").lower():
+            errmsg = "invalid page：请在服务器 .env 中设置 WECHAT_MINIPROGRAM_PAGE 为小程序真实首页路径（在小程序项目 app.json 的 pages 里查看，如 pages/index/index）"
+        raise HTTPException(status_code=502, detail=errmsg)
+    img_b64 = base64.b64encode(r.content).decode("ascii")
+    _miniprogram_scene_store[scene_id] = {"token": None, "expires_at": time.time() + _SCENE_TTL}
+    return {"login_type": "miniprogram", "scene_id": scene_id, "qr_base64": img_b64}
+
+
+@router.get("/wechat-miniprogram-login-status", summary="轮询：扫码后是否已登录，已登录返回 access_token")
+def wechat_miniprogram_login_status(scene_id: Optional[str] = None):
+    """前端轮询。若该 scene_id 已在小程序内完成登录，返回 status=ok 与 access_token。"""
+    if not scene_id or not scene_id.strip():
+        raise HTTPException(status_code=400, detail="缺少 scene_id")
+    scene_id = scene_id.strip()
+    entry = _miniprogram_scene_store.get(scene_id)
+    if not entry:
+        return {"status": "waiting"}
+    if entry["expires_at"] < time.time():
+        _miniprogram_scene_store.pop(scene_id, None)
+        return {"status": "waiting"}
+    if not entry.get("token"):
+        return {"status": "waiting"}
+    token = entry["token"]
+    _miniprogram_scene_store.pop(scene_id, None)
+    return {"status": "ok", "access_token": token}
+
+
+class WechatMiniprogramLoginBody(BaseModel):
+    code: str
+    scene_id: str
+
+
+@router.post("/wechat-miniprogram-login", summary="小程序内调用：code + scene_id 换 openid，绑定 scene 并返回 Token")
+def wechat_miniprogram_login(body: WechatMiniprogramLoginBody, db: Session = Depends(get_db)):
+    """用户扫码进入小程序后，小程序带 scene，调 wx.login 得 code，再调此接口。后端用 code 换 openid，查/建用户，把 token 绑定到 scene_id，网页轮询即可拿到 token 完成登录。"""
+    if not _use_own_wechat_login():
+        raise HTTPException(status_code=400, detail="未配置小程序（wechat_app_id/wechat_app_secret）")
+    js_code = (body.code or "").strip()
+    scene_id = (body.scene_id or "").strip()
+    if not js_code:
+        raise HTTPException(status_code=400, detail="缺少 code")
+    if not scene_id:
+        raise HTTPException(status_code=400, detail="缺少 scene_id")
     app_id = (getattr(settings, "wechat_app_id", None) or "").strip()
-    base = get_effective_public_base_url()
-    redirect_uri = quote(f"{base}/auth/wechat-callback", safe="")
-    state = "lobster"
-    url = f"https://open.weixin.qq.com/connect/qrconnect?appid={app_id}&redirect_uri={redirect_uri}&response_type=code&scope=snsapi_login&state={state}"
-    return {"login_url": url}
+    app_secret = (getattr(settings, "wechat_app_secret", None) or "").strip()
+    with httpx.Client(timeout=10.0) as client:
+        r = client.get(
+            "https://api.weixin.qq.com/sns/jscode2session",
+            params={
+                "appid": app_id,
+                "secret": app_secret,
+                "js_code": js_code,
+                "grant_type": "authorization_code",
+            },
+        )
+    data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    if data.get("errcode"):
+        errmsg = data.get("errmsg") or "小程序登录失败"
+        logger.warning("jscode2session err: %s", data)
+        raise HTTPException(status_code=400, detail=errmsg)
+    openid = (data.get("openid") or "").strip()
+    if not openid:
+        raise HTTPException(status_code=400, detail="未获取到 openid")
+    user = db.query(User).filter(User.wechat_openid == openid).first()
+    if not user:
+        email = f"wx_{openid[:16]}@wechat.lobster.local"
+        if db.query(User).filter(User.email == email).first():
+            email = f"wx_{openid}@wechat.lobster.local"
+        user = User(
+            email=email,
+            hashed_password=get_password_hash(f"wechat-{openid}"),
+            credits=0,
+            role="user",
+            preferred_model="sutui",
+            wechat_openid=openid,
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    access_token = create_access_token(data={"sub": str(user.id)})
+    entry = _miniprogram_scene_store.get(scene_id)
+    if entry and entry["expires_at"] > time.time():
+        entry["token"] = access_token
+    return Token(access_token=access_token, token_type="bearer")
 
 
 @router.get("/wechat-callback", summary="自建微信：扫码登录回调")

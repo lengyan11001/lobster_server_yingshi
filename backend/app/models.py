@@ -126,6 +126,38 @@ class PublishAccount(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class WecomConfig(Base):
+    """企业微信应用配置：支持多应用，每应用一个回调 path，用于验签与加解密。"""
+    __tablename__ = "wecom_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, default="默认应用")
+    callback_path: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    token: Mapped[str] = mapped_column(String(255), nullable=False)
+    encoding_aes_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    corp_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    """应用 secret，用于获取 access_token 并调用「发送应用消息」接口（轮询模式下推送回复）。"""
+    secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    product_knowledge: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class WecomPendingMessage(Base):
+    """待处理消息队列：回调解密后入队，本地轮询拉取并提交回复后由云端调用企微发送接口推送。"""
+    __tablename__ = "wecom_pending_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    wecom_config_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    from_user: Mapped[str] = mapped_column(String(128), nullable=False)
+    to_user: Mapped[str] = mapped_column(String(128), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    msg_type: Mapped[str] = mapped_column(String(32), nullable=False, default="text")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)  # pending, replied, failed
+    reply_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PublishTask(Base):
     __tablename__ = "publish_tasks"
 

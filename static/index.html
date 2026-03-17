@@ -213,6 +213,21 @@
             </div>
           </div>
 
+          <!-- 企业微信配置（由技能卡片「配置」进入） -->
+          <div id="content-wecom-config" class="content-block" style="display:none;">
+            <div class="card">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:0.75rem;">
+                <h3 style="margin:0;">企业微信配置</h3>
+                <button type="button" id="wecomConfigBackBtn" class="btn btn-ghost btn-sm">← 返回技能商店</button>
+              </div>
+              <p style="font-size:0.85rem;color:var(--text-muted);margin-top:0.35rem;">配置多个企业微信应用，将回调 URL 填入企业微信后台即可接收消息并自动回复。部署在服务器时请确保该 URL 可从公网访问，建议使用 HTTPS。</p>
+              <div style="margin-top:1rem;">
+                <button type="button" id="wecomConfigAddBtn" class="btn btn-primary btn-sm">+ 添加配置</button>
+              </div>
+              <div id="wecomConfigList" class="skill-store-grid" style="margin-top:0.75rem;"></div>
+            </div>
+          </div>
+
           <!-- Billing / 消费记录 + 速推充值 -->
           <div id="content-billing" class="content-block">
             <div class="card">
@@ -450,6 +465,43 @@
     </div>
   </div>
 
+  <!-- 企业微信配置 添加/编辑 弹窗 -->
+  <div id="wecomConfigModal" class="modal-mask">
+    <div class="modal" style="max-width:520px;">
+      <h4 style="margin:0 0 0.75rem 0;font-size:1.05rem;" id="wecomConfigModalTitle">添加企业微信配置</h4>
+      <p style="font-size:0.8rem;color:var(--text-muted);margin:0 0 1rem 0;">从企业微信后台获取 Token、EncodingAESKey，填好后将生成的回调 URL 填入企微后台。</p>
+      <div class="modal-field">
+        <label>应用名称</label>
+        <input type="text" id="wecomConfigName" placeholder="默认应用">
+      </div>
+      <div class="modal-field">
+        <label>Token</label>
+        <input type="text" id="wecomConfigToken" placeholder="企业微信后台配置的 Token">
+      </div>
+      <div class="modal-field">
+        <label>EncodingAESKey</label>
+        <input type="text" id="wecomConfigAesKey" placeholder="43 位密钥，企微后台可获取">
+      </div>
+      <div class="modal-field">
+        <label>CorpID <span style="font-weight:normal;color:var(--text-muted);font-size:0.8rem;">(必填，用于发送应用消息)</span></label>
+        <input type="text" id="wecomConfigCorpId" placeholder="企业 ID">
+      </div>
+      <div class="modal-field">
+        <label>应用 Secret <span style="font-weight:normal;color:var(--text-muted);font-size:0.8rem;">(用于获取 access_token 并发送回复给用户)</span></label>
+        <input type="text" id="wecomConfigSecret" placeholder="企业微信应用 Secret">
+      </div>
+      <div class="modal-field">
+        <label>产品/知识库说明 <span style="font-weight:normal;color:var(--text-muted);font-size:0.8rem;">(可选)</span></label>
+        <textarea id="wecomConfigProductKnowledge" rows="3" placeholder="可填写产品介绍或知识库内容，将作为系统提示附加给 AI" style="resize:vertical;min-height:60px;"></textarea>
+      </div>
+      <div id="wecomConfigModalMsg" class="msg" style="display:none;margin-top:0.5rem;"></div>
+      <div class="btns" style="justify-content:flex-end;">
+        <button type="button" class="btn btn-ghost" id="wecomConfigModalCancel">取消</button>
+        <button type="button" class="btn btn-primary" id="wecomConfigModalSave">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Add MCP Modal -->
   <div id="addMcpModal" class="modal-mask">
     <div class="modal" style="max-width:440px;">
@@ -522,6 +574,7 @@
 
   <script src="/static/js/app.js"></script>
   <script src="/static/js/chat.js"></script>
+  <script src="/static/js/wecom-config.js"></script>
   <script src="/static/js/skill.js"></script>
   <script src="/static/js/publish.js"></script>
   <script src="/static/js/production.js"></script>

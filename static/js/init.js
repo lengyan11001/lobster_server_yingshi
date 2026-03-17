@@ -210,6 +210,7 @@ function loadDashboard() {
       document.getElementById('dashboard').classList.add('visible');
       var heroEl = document.getElementById('pageHero');
       if (heroEl) heroEl.style.display = 'none';
+      if (typeof window._applyWecomConfigHash === 'function') window._applyWecomConfigHash();
       loadModelSelector(d.preferred_model);
       initChatSessions();
       var accNav = document.querySelector('.nav-left-item[data-view="consumption-accounts"]');
@@ -717,5 +718,14 @@ function loadLogsView() {
     });
   ensureLogsBindings();
 }
+
+(function initWecomConfigHash() {
+  function applyHash() {
+    var hash = (location.hash || '').replace(/^#/, '');
+    if (hash === 'wecom-config' && typeof showWecomConfigView === 'function') showWecomConfigView();
+  }
+  window.addEventListener('hashchange', applyHash);
+  window._applyWecomConfigHash = applyHash;
+})();
 
 if (token) loadDashboard();

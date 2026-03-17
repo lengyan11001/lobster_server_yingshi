@@ -71,6 +71,16 @@ function loadSkillStore() {
         var html = _renderXSkillCard();
         html += packages.map(function(pkg) {
           if (pkg.id === 'sutui_mcp') return '';
+        if (pkg.id === 'wecom_reply') {
+          var tags = (pkg.tags || []).map(function(t) { return '<span class="tag">' + escapeHtml(t) + '</span>'; }).join('');
+          var capCount = pkg.capabilities_count ? ' · ' + pkg.capabilities_count + ' 个能力' : '';
+          return '<div class="skill-store-card wecom-reply-card" style="cursor:pointer;" data-platform="wecom">' +
+            '<div class="card-label">' + escapeHtml(pkg.type || 'skill') + ' <span class="badge-installed">可配置</span></div>' +
+            '<div class="card-value">' + escapeHtml(pkg.name || pkg.id) + '</div>' +
+            '<div class="card-desc">' + escapeHtml(pkg.description || '') + capCount + '</div>' +
+            '<div class="card-tags">' + tags + '</div>' +
+            '<div class="card-actions"><button type="button" class="btn btn-primary btn-sm wecom-config-entry-btn">配置</button></div></div>';
+        }
         var statusBadge = '';
         var actionBtn = '';
         var priceYuan = pkg.unlock_price_yuan;
@@ -96,10 +106,34 @@ function loadSkillStore() {
           '<div class="card-actions">' + actionBtn + '</div></div>';
       }).join('');
         el.innerHTML = html;
+        _bindWecomConfigEntry();
         _bindInstallUninstall(el);
         _bindXSkillConfigBtn();
       })
       .catch(function() { el.innerHTML = '<p class="msg err">加载失败</p>'; });
+  });
+}
+
+// ── 企业微信配置入口 ─────────────────────────────────────────────────
+
+function _bindWecomConfigEntry() {
+  document.querySelectorAll('.wecom-reply-card').forEach(function(card) {
+    card.addEventListener('click', function(e) {
+      if (e.target.closest('.card-actions')) return;
+      if (typeof showWecomConfigView === 'function') {
+        location.hash = 'wecom-config';
+        showWecomConfigView();
+      }
+    });
+  });
+  document.querySelectorAll('.wecom-config-entry-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      if (typeof showWecomConfigView === 'function') {
+        location.hash = 'wecom-config';
+        showWecomConfigView();
+      }
+    });
   });
 }
 

@@ -22,6 +22,13 @@ from .api.mcp_registry import router as mcp_registry_router
 from .api.assets import router as assets_router
 from .api.publish import router as publish_router
 from .api.logs_api import router as logs_router
+try:
+    from .api.wecom import router as wecom_router
+except Exception as e:
+    if "Crypto" in str(e) or "pycryptodome" in str(e).lower() or "wecom_reply" in str(e):
+        wecom_router = None
+    else:
+        raise
 from .core.config import settings
 from .db import Base, engine, SessionLocal
 from . import models  # noqa: F401
@@ -117,11 +124,26 @@ def _migrate_user_wechat_openid():
         logger.warning("Migration wechat_openid skipped: %s", e)
 
 
+def _migrate_wecom_config_secret():
+    """Add secret column to wecom_configs if missing (用于轮询模式下发送应用消息)."""
+    from sqlalchemy import text
+    try:
+        with engine.connect() as conn:
+            r = conn.execute(text("PRAGMA table_info(wecom_configs)"))
+            cols = [row[1] for row in r]
+            if "secret" not in cols:
+                conn.execute(text("ALTER TABLE wecom_configs ADD COLUMN secret VARCHAR(255)"))
+                conn.commit()
+    except Exception as e:
+        logger.warning("Migration wecom_configs.secret skipped: %s", e)
+
+
 def create_app() -> FastAPI:
     logger.info("[启动] create_app 开始")
     Base.metadata.create_all(bind=engine)
     _migrate_user_sutui_token()
     _migrate_user_wechat_openid()
+    _migrate_wecom_config_secret()
     _ensure_default_user()
     _seed_capability_catalog()
     _auto_start_openclaw()
@@ -165,6 +187,10 @@ def create_app() -> FastAPI:
     app.include_router(assets_router, prefix="")
     app.include_router(publish_router, prefix="")
     app.include_router(logs_router, prefix="")
+    if wecom_router is not None:
+        app.include_router(wecom_router, prefix="")
+    else:
+        logger.warning("企业微信回复未加载：缺少 pycryptodome 或 skills.wecom_reply")
 
     assets_dir = Path(__file__).resolve().parent.parent.parent / "assets"
     assets_dir.mkdir(exist_ok=True)

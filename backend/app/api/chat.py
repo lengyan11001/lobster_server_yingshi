@@ -753,6 +753,43 @@ async def _try_openclaw(
     return None
 
 
+async def get_reply_for_channel(
+    user_message: str,
+    session_id: str = "",
+    system_prompt_extra: str = "",
+) -> str:
+    """供企业微信等渠道回调使用：仅文本入、文本出。优先直连 LLM，无配置时走 OpenClaw，保证本地盒子仅配 OpenClaw 也能回复。"""
+    if not (user_message or "").strip():
+        return "收到。"
+    model = ""
+    try:
+        model = _pick_default_model()
+    except HTTPException:
+        model = "openclaw"
+    cfg = _resolve_config(model) if model else None
+    sys = (
+        "你是企业微信客服助手。根据用户消息简短、友好地回复。使用中文。"
+        + (("\n" + system_prompt_extra.strip()) if system_prompt_extra else "")
+    )
+    messages: List[Dict[str, str]] = [
+        {"role": "system", "content": sys},
+        {"role": "user", "content": (user_message or "").strip()},
+    ]
+    if cfg:
+        try:
+            reply = await _chat_openai(messages, cfg, [], "", sutui_token=None)
+            return (reply or "").strip() or "收到。"
+        except HTTPException:
+            return "服务暂时不可用，请稍后再试。"
+        except Exception as e:
+            logger.exception("[渠道回复] chat 异常: %s", e)
+            return "处理时遇到问题，请稍后再试。"
+    oc_reply = await _try_openclaw(messages, model or "openclaw", "")
+    if oc_reply:
+        return (oc_reply or "").strip() or "收到。"
+    return "抱歉，当前未配置对话模型或 OpenClaw，无法回复。"
+
+
 # ── Chat turn logging ─────────────────────────────────────────────
 
 def _flush_tool_logs(db: Session, uid: int, session_id: Optional[str], model: Optional[str]):

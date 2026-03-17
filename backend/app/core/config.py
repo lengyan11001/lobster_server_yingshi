@@ -43,9 +43,11 @@ class Settings(BaseSettings):
     sutui_online_model_self_config: bool = True
     """为 False 时仅提供 API，不挂载前端静态页与 /；online 客户端用本地页面访问本服务时设为 false。"""
     serve_frontend: bool = True
-    # 自建微信登录（不用速推）：开放平台网站应用 appid/secret，配置后登录页展示微信扫码
+    # 自建微信登录（不用速推）：小程序 appid/secret，配置后登录页展示小程序码扫码
     wechat_app_id: Optional[str] = None
     wechat_app_secret: Optional[str] = None
+    """小程序码跳转的页面路径，如 pages/index/index，扫码后打开该页并带 scene"""
+    wechat_miniprogram_page: Optional[str] = None
     # 自建微信支付（不用速推）：商户号、APIv3 密钥，配置后充值可走微信 Native 扫码
     wechat_mch_id: Optional[str] = None
     wechat_pay_apiv3_key: Optional[str] = None
@@ -56,6 +58,8 @@ class Settings(BaseSettings):
     openclaw_gateway_url: Optional[str] = None
     openclaw_gateway_token: Optional[str] = None
     openclaw_agent_id: str = "main"
+    """本地轮询拉取/提交回复时的鉴权：请求头 X-Forward-Secret 需与此一致。不设则不做校验（仅内网或隧道时建议设置）。"""
+    wecom_forward_secret: Optional[str] = None
     capability_sutui_mcp_url: Optional[str] = None
     capability_upstream_urls_json: Optional[str] = None
     reddit_comment2video_backend_url: Optional[str] = None

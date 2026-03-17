@@ -9,6 +9,14 @@
       "capabilities": {},
       "tags": ["publish", "douyin", "video"]
     },
+    "wecom_reply": {
+      "name": "企业微信自动回复",
+      "description": "接收企业微信消息，由 AI 自动生成回复。配置回调 URL 与 Token 后，5 秒内被动回复用户。",
+      "type": "builtin",
+      "status": "available",
+      "capabilities": {},
+      "tags": ["wecom", "chat", "reply"]
+    },
     "sutui_mcp": {
       "name": "速推 MCP",
       "description": "图片生成、视频解析、语音合成、模型搜索等 AI 创作能力",
