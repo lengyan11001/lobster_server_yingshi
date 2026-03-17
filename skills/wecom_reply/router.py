@@ -88,7 +88,10 @@ class WXBizMsgCrypt:
         return self._signature(self.token, timestamp, nonce, msg_encrypt) == msg_signature
 
     def decrypt(self, msg_encrypt_b64: str) -> str:
-        aes_msg = self._b64decode(msg_encrypt_b64)
+        b64 = (msg_encrypt_b64 or "").strip()
+        while len(b64) % 4:
+            b64 += "="
+        aes_msg = self._b64decode(b64)
         iv = self.aes_key[:16]
         cipher = AES.new(self.aes_key, AES.MODE_CBC, iv)
         rand_msg = unpad(cipher.decrypt(aes_msg), AES.block_size)

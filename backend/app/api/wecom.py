@@ -7,6 +7,7 @@ import string
 import time
 import xml.etree.ElementTree as ET
 from typing import Optional
+from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -230,12 +231,14 @@ async def wecom_callback_verify(
     cfg = _find_config_by_path(db, callback_path)
     if not cfg:
         return PlainTextResponse("config not found", status_code=404)
+    # 企微文档：echostr 必须是 urldecode 后的值，再去除首尾空白
+    echostr_decoded = (unquote(echostr) if echostr else "").strip()
     try:
         crypt = WXBizMsgCrypt(cfg.token, cfg.encoding_aes_key, cfg.corp_id or "default")
-        if not crypt.verify_signature(msg_signature, timestamp, nonce, echostr):
+        if not crypt.verify_signature(msg_signature, timestamp, nonce, echostr_decoded):
             logger.warning("[WeCom] GET 验签失败 path=%s", callback_path)
             return PlainTextResponse("invalid signature", status_code=400)
-        plain = crypt.decrypt(echostr)
+        plain = crypt.decrypt(echostr_decoded)
         return PlainTextResponse(plain)
     except Exception as e:
         logger.exception("[WeCom] GET 解密失败 path=%s: %s", callback_path, e)
