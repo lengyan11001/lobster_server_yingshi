@@ -53,6 +53,8 @@ class WecomConfigCreate(BaseModel):
     corp_id: str = ""
     secret: Optional[str] = None  # 用于获取 access_token、发送应用消息（轮询模式）
     product_knowledge: Optional[str] = None
+    """可选。与企微/本地已使用的路径一致时填此项，否则云端随机生成。"""
+    callback_path: Optional[str] = None
 
 
 class WecomConfigUpdate(BaseModel):
@@ -107,12 +109,19 @@ def create_wecom_config(
         WXBizMsgCrypt(body.token.strip(), key, body.corp_id or "default")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"EncodingAESKey 无效: {e}")
-    for _ in range(5):
-        path = _random_callback_path()
-        if db.query(WecomConfig).filter(WecomConfig.callback_path == path).first() is None:
-            break
+    path = (body.callback_path or "").strip()
+    if path:
+        if not all(c.isalnum() for c in path) or len(path) < 6 or len(path) > 64:
+            raise HTTPException(status_code=400, detail="callback_path 需为 6～64 位字母数字")
+        if db.query(WecomConfig).filter(WecomConfig.callback_path == path).first() is not None:
+            raise HTTPException(status_code=400, detail="该 callback_path 已存在")
     else:
-        raise HTTPException(status_code=500, detail="生成 callback_path 冲突")
+        for _ in range(5):
+            path = _random_callback_path()
+            if db.query(WecomConfig).filter(WecomConfig.callback_path == path).first() is None:
+                break
+        else:
+            raise HTTPException(status_code=500, detail="生成 callback_path 冲突")
     row = WecomConfig(
         user_id=current_user.id,
         name=(body.name or "默认应用").strip() or "默认应用",
