@@ -497,7 +497,8 @@ def wechat_callback(
             },
         )
     try:
-        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        # 微信可能返回 text/plain，不依赖 Content-Type，直接解析 body
+        data = r.json() if (r.text and r.text.strip()) else {}
     except Exception:
         data = {}
     openid = (data.get("openid") or "").strip()
