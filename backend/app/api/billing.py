@@ -158,6 +158,34 @@ def get_recharge_packages(current_user: User = Depends(get_current_user)):
     return {"packages": pricing.get("credit_packages", _DEFAULT_CREDIT_PACKAGES)}
 
 
+@router.get("/api/recharge/my-orders", summary="当前用户充值订单列表（消费记录用）")
+def get_my_recharge_orders(
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(RechargeOrder)
+        .filter(RechargeOrder.user_id == current_user.id)
+        .order_by(RechargeOrder.id.desc())
+        .limit(min(max(limit, 1), 200))
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "out_trade_no": r.out_trade_no,
+            "amount_yuan": r.amount_yuan,
+            "amount_fen": r.amount_fen,
+            "credits": r.credits,
+            "status": r.status,
+            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "paid_at": r.paid_at.isoformat() if r.paid_at else "",
+        }
+        for r in rows
+    ]
+
+
 class RechargeCreateBody(BaseModel):
     package_index: Optional[int] = None
     price_yuan: Optional[int] = None

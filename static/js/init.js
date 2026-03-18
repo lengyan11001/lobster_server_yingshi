@@ -615,30 +615,49 @@ function loadBillingView() {
     var rechargeBlock = document.getElementById('rechargeBlock');
     if (rechargeBlock) rechargeBlock.style.display = 'none';
   }
-  fetch(API_BASE + '/capabilities/my-call-logs?limit=100', { headers: authHeaders() })
-    .then(function(r) { return r.json(); })
-    .then(function(logs) {
-      if (!listEl) return;
-      if (!Array.isArray(logs) || logs.length === 0) {
-        listEl.innerHTML = '<p class="meta" style="padding:1rem;">暂无调用记录。</p>';
-        return;
+  var rechargeListEl = document.getElementById('billingRechargeList');
+  Promise.all([
+    fetch(API_BASE + '/api/recharge/my-orders?limit=50', { headers: authHeaders() }).then(function(r) { return r.ok ? r.json() : []; }).catch(function() { return []; }),
+    fetch(API_BASE + '/capabilities/my-call-logs?limit=100', { headers: authHeaders() }).then(function(r) { return r.json(); }).catch(function() { return []; })
+  ]).then(function(res) {
+    var orders = Array.isArray(res[0]) ? res[0] : [];
+    var logs = Array.isArray(res[1]) ? res[1] : [];
+    if (rechargeListEl) {
+      if (orders.length === 0) {
+        rechargeListEl.innerHTML = '';
+      } else {
+        var rh = '<h4 style="margin:0 0 0.5rem 0;font-size:0.95rem;">充值记录</h4>';
+        rh += '<table style="width:100%;border-collapse:collapse;font-size:0.82rem;"><thead><tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:0.5rem;">时间</th><th style="text-align:left;padding:0.5rem;">订单号</th><th style="text-align:right;padding:0.5rem;">金额</th><th style="text-align:right;padding:0.5rem;">积分</th><th style="text-align:left;padding:0.5rem;">状态</th></tr></thead><tbody>';
+        orders.forEach(function(o) {
+          var amt = (o.amount_fen && o.amount_fen > 0) ? (o.amount_fen / 100).toFixed(2) + ' 元' : (o.amount_yuan || 0) + ' 元';
+          var time = (o.paid_at || o.created_at || '').replace('T', ' ').slice(0, 19);
+          var st = o.status === 'paid' ? '已支付' : (o.status === 'cancelled' ? '已取消' : '待支付');
+          rh += '<tr style="border-bottom:1px solid rgba(255,255,255,0.06);"><td style="padding:0.5rem;">' + escapeHtml(time) + '</td><td style="padding:0.5rem;">' + escapeHtml(o.out_trade_no || '-') + '</td><td style="padding:0.5rem;text-align:right;">' + amt + '</td><td style="padding:0.5rem;text-align:right;">' + (o.credits != null ? o.credits : '-') + '</td><td style="padding:0.5rem;">' + escapeHtml(st) + '</td></tr>';
+        });
+        rh += '</tbody></table>';
+        rechargeListEl.innerHTML = rh;
       }
-      var html = '<table style="width:100%;border-collapse:collapse;font-size:0.82rem;">';
-      html += '<thead><tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:0.5rem;">时间</th><th style="text-align:left;padding:0.5rem;">能力</th><th style="text-align:left;padding:0.5rem;">结果</th><th style="text-align:right;padding:0.5rem;">耗时</th></tr></thead><tbody>';
-      logs.forEach(function(r) {
-        var time = (r.created_at || '').replace('T', ' ').slice(0, 19);
-        var cap = (r.capability_id || '-');
-        var ok = r.success ? '成功' : '失败';
-        var err = (r.error_message || '').slice(0, 80);
-        var lat = r.latency_ms != null ? r.latency_ms + ' ms' : '-';
-        html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.06);"><td style="padding:0.5rem;">' + escapeHtml(time) + '</td><td style="padding:0.5rem;">' + escapeHtml(cap) + '</td><td style="padding:0.5rem;">' + escapeHtml(ok) + (err ? ' ' + escapeHtml(err) : '') + '</td><td style="padding:0.5rem;text-align:right;">' + lat + '</td></tr>';
-      });
-      html += '</tbody></table>';
-      listEl.innerHTML = html;
-    })
-    .catch(function() {
-      if (listEl) listEl.innerHTML = '<p class="meta" style="padding:1rem;">加载失败。</p>';
+    }
+    if (!listEl) return;
+    if (logs.length === 0) {
+      listEl.innerHTML = '<h4 style="margin:0 0 0.5rem 0;font-size:0.95rem;">能力调用记录</h4><p class="meta" style="padding:1rem;">暂无调用记录。</p>';
+      return;
+    }
+    var html = '<h4 style="margin:0 0 0.5rem 0;font-size:0.95rem;">能力调用记录</h4><table style="width:100%;border-collapse:collapse;font-size:0.82rem;">';
+    html += '<thead><tr style="border-bottom:1px solid var(--border);"><th style="text-align:left;padding:0.5rem;">时间</th><th style="text-align:left;padding:0.5rem;">能力</th><th style="text-align:left;padding:0.5rem;">结果</th><th style="text-align:right;padding:0.5rem;">耗时</th></tr></thead><tbody>';
+    logs.forEach(function(r) {
+      var time = (r.created_at || '').replace('T', ' ').slice(0, 19);
+      var cap = (r.capability_id || '-');
+      var ok = r.success ? '成功' : '失败';
+      var err = (r.error_message || '').slice(0, 80);
+      var lat = r.latency_ms != null ? r.latency_ms + ' ms' : '-';
+      html += '<tr style="border-bottom:1px solid rgba(255,255,255,0.06);"><td style="padding:0.5rem;">' + escapeHtml(time) + '</td><td style="padding:0.5rem;">' + escapeHtml(cap) + '</td><td style="padding:0.5rem;">' + escapeHtml(ok) + (err ? ' ' + escapeHtml(err) : '') + '</td><td style="padding:0.5rem;text-align:right;">' + lat + '</td></tr>';
     });
+    html += '</tbody></table>';
+    listEl.innerHTML = html;
+  }).catch(function() {
+    if (listEl) listEl.innerHTML = '<p class="meta" style="padding:1rem;">加载失败。</p>';
+  });
   if (refreshBtn) refreshBtn.onclick = loadBillingView;
 }
 
