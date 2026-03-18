@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     wechat_oa_secret: Optional[str] = None
     """服务号回调根地址，不填则用 public_base_url 或 request.base_url"""
     wechat_oa_base_url: Optional[str] = None
+    """扫码成功后跳转的前端地址（带 ?token= 自动登录）。不填则用 wechat_oa_base_url，需该地址提供带 ?token= 逻辑的前端"""
+    wechat_oa_frontend_url: Optional[str] = None
     """服务号消息推送：服务器配置里的 Token（GET 验证用）"""
     wechat_oa_token: Optional[str] = None
     """服务号消息推送：EncodingAESKey（明文模式可不参与解密）"""

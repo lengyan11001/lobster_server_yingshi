@@ -530,10 +530,16 @@ def wechat_callback(
         db.commit()
         db.refresh(user)
     access_token = create_access_token(data={"sub": str(user.id)})
-    base = _wechat_oa_base_url(request) if _use_wechat_oa_login() else get_effective_public_base_url()
-    base = (base or "").rstrip("/") or str(request.base_url).rstrip("/")
-    # 跳转到本服务的 wechat-success 页，避免跳到 8003 根路径导致 404
-    return RedirectResponse(url=f"{base}/auth/wechat-success?token={access_token}", status_code=302)
+    # 跳转到前端地址并带 token，前端通过 ?token= 自动登录（见 init.js applyTokenFromUrl）
+    front_base = (getattr(settings, "wechat_oa_frontend_url", None) or "").strip().rstrip("/")
+    if not front_base and _use_wechat_oa_login():
+        front_base = (_wechat_oa_base_url(request) or "").rstrip("/")
+    if not front_base:
+        front_base = (get_effective_public_base_url() or str(request.base_url)).rstrip("/")
+    from urllib.parse import urlparse
+    has_query = bool(urlparse(front_base).query)
+    redirect_url = f"{front_base}{'&' if has_query else '?'}token={quote(access_token, safe='')}"
+    return RedirectResponse(url=redirect_url, status_code=302)
 
 
 @router.get("/wechat-success", summary="自建微信：登录成功页（展示 Token，供本地盒子用户复制）")
