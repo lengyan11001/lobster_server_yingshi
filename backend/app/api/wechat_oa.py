@@ -26,13 +26,16 @@ def wechat_verify(
     """微信服务器验证：token+timestamp+nonce 字典序排序后拼接做 SHA1，与 signature 一致则原样返回 echostr。"""
     token = _get_token()
     if not token:
+        logger.warning("[api/wechat] GET 验证失败: 未配置 WECHAT_OA_TOKEN")
         return PlainTextResponse("", status_code=403)
     lst = sorted([token, timestamp, nonce])
     s = "".join(lst)
     h = hashlib.sha1(s.encode("utf-8")).hexdigest()
     if h != signature:
+        logger.warning("[api/wechat] GET 验证失败: signature 不匹配 (token 与公众平台填写是否一致?)")
         return PlainTextResponse("", status_code=403)
-    return PlainTextResponse(echostr)
+    logger.info("[api/wechat] GET 验证成功, 返回 echostr")
+    return PlainTextResponse(echostr or "")
 
 
 @router.post("/api/wechat", summary="服务号服务器配置：接收消息（明文模式）")
