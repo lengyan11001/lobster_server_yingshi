@@ -102,16 +102,14 @@ class WXBizMsgCrypt:
         iv = self.aes_key[:16]
         cipher = AES.new(self.aes_key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(aes_msg)
-        # 与企微官方库一致：用最后一字节表示 padding 长度并切除；若为 0 则按 0-padding 处理（明文已为块对齐）
+        # 用最后一字节表示 padding 长度并切除；若为 0 或 >16 则视为明文已块对齐、无 PKCS7（最后一字节为内容）
         if len(decrypted) < 16 + 4:
             raise ValueError("解密后长度不足")
         pad_len = decrypted[-1]
-        if pad_len == 0:
-            rand_msg = decrypted
-        elif 1 <= pad_len <= 16:
+        if 1 <= pad_len <= 16:
             rand_msg = decrypted[:-pad_len]
         else:
-            raise ValueError("解密后 padding 非法")
+            rand_msg = decrypted
         if len(rand_msg) < 16 + 4:
             raise ValueError("解密后长度不足")
         msg_len = int.from_bytes(rand_msg[16:20], "big")
