@@ -94,16 +94,24 @@ class WXBizMsgCrypt:
         while len(b64) % 4:
             b64 += "="
         aes_msg = self._b64decode(b64)
+        # 定位解密失败：密文长度需为 16 的倍数，否则解密结果无效
+        logger.info(
+            "[WeCom] decrypt 密文长度 raw=%d b64_after=%d cipher_bytes=%d cipher_mod16=%d",
+            len(msg_encrypt_b64 or ""), len(b64), len(aes_msg), len(aes_msg) % 16,
+        )
         iv = self.aes_key[:16]
         cipher = AES.new(self.aes_key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(aes_msg)
-        # 与企微官方库一致：用最后一字节表示 padding 长度并切除，避免 PyCryptodome unpad 对长消息校验过严
-        if len(decrypted) < 16 + 4 + 1:
+        # 与企微官方库一致：用最后一字节表示 padding 长度并切除；若为 0 则按 0-padding 处理（明文已为块对齐）
+        if len(decrypted) < 16 + 4:
             raise ValueError("解密后长度不足")
         pad_len = decrypted[-1]
-        if not (1 <= pad_len <= 16):
+        if pad_len == 0:
+            rand_msg = decrypted
+        elif 1 <= pad_len <= 16:
+            rand_msg = decrypted[:-pad_len]
+        else:
             raise ValueError("解密后 padding 非法")
-        rand_msg = decrypted[:-pad_len]
         if len(rand_msg) < 16 + 4:
             raise ValueError("解密后长度不足")
         msg_len = int.from_bytes(rand_msg[16:20], "big")
