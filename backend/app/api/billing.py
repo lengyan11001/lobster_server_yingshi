@@ -398,7 +398,10 @@ async def wechat_pay_notify(request: Request, db: Session = Depends(get_db)):
         private_key = key_path.read_text(encoding="utf-8")
     except Exception:
         return PlainTextResponse("fail", status_code=500)
-    apiv3_key = (getattr(settings, "wechat_pay_apiv3_key", None) or "").strip()[:32]
+    apiv3_key_raw = (getattr(settings, "wechat_pay_apiv3_key", None) or "").strip()
+    if len(apiv3_key_raw) != 32:
+        logger.warning("wechat_notify WECHAT_PAY_APIV3_KEY len=%s (must be 32), callback decrypt may fail", len(apiv3_key_raw))
+    apiv3_key = apiv3_key_raw[:32]
     public_key_path_raw = (getattr(settings, "wechat_pay_public_key_path", None) or "").strip()
     public_key_id = (getattr(settings, "wechat_pay_public_key_id", None) or "").strip()
     public_key_content = None
@@ -410,6 +413,8 @@ async def wechat_pay_notify(request: Request, db: Session = Depends(get_db)):
             public_key_content = pub_path.read_text(encoding="utf-8").strip()
         except Exception:
             pass
+    if not public_key_content or not public_key_id:
+        logger.warning("wechat_notify WECHAT_PAY_PUBLIC_KEY_PATH/ID not set, callback verify may need platform cert")
     try:
         from wechatpayv3 import WeChatPay, WeChatPayType
         kwargs = dict(
@@ -426,7 +431,13 @@ async def wechat_pay_notify(request: Request, db: Session = Depends(get_db)):
         wxpay = WeChatPay(**kwargs)
         result = wxpay.callback(headers, raw.decode("utf-8") if isinstance(raw, bytes) else raw)
     except Exception as e:
-        logger.warning("wechat_notify callback verify failed: %s", e)
+        import traceback
+        wechat_headers = {k: v[:80] + "..." if len(str(v)) > 80 else v for k, v in headers.items() if "wechat" in k.lower() or "signature" in k.lower()}
+        logger.warning(
+            "wechat_notify callback verify failed: %s (type=%s) wechat_headers_keys=%s",
+            e, type(e).__name__, list(wechat_headers.keys()),
+        )
+        logger.debug("wechat_notify verify traceback: %s", traceback.format_exc())
         return PlainTextResponse("fail", status_code=400)
     event_type = result.get("event_type") if isinstance(result, dict) else None
     logger.info("wechat_notify decoded event_type=%s result_keys=%s", event_type, list(result.keys()) if isinstance(result, dict) else None)
