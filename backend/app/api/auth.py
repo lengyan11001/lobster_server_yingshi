@@ -378,31 +378,12 @@ def get_wechat_login_url(request: Request):
         return {"login_url": url}
     if not _use_own_wechat_login():
         raise HTTPException(status_code=400, detail="未配置自建微信登录（wechat_oa_app_id/wechat_oa_secret 或 wechat_app_id/wechat_app_secret）")
-    scene_id = secrets.token_hex(8)  # 16 字符，符合微信 scene 32 字限制
-    try:
-        access_token = _get_wechat_access_token()
-    except ValueError as e:
-        logger.warning("wechat access_token: %s", e)
-        raise HTTPException(status_code=502, detail=str(e))
-    body: Dict[str, Any] = {"scene": scene_id, "width": 280}
-    page = (getattr(settings, "wechat_miniprogram_page", None) or "").strip()
-    if page:
-        body["page"] = page
-    with httpx.Client(timeout=15.0) as client:
-        r = client.post(
-            f"https://api.weixin.qq.com/wxa/getwxacodeunlimit?access_token={access_token}",
-            json=body,
-        )
-    if r.headers.get("content-type", "").startswith("application/json"):
-        err = r.json()
-        logger.warning("getwxacodeunlimit err: %s", err)
-        errmsg = err.get("errmsg") or "生成小程序码失败"
-        if "page" in (errmsg or "").lower():
-            errmsg = "invalid page：请在服务器 .env 中设置 WECHAT_MINIPROGRAM_PAGE 为小程序真实首页路径（在小程序项目 app.json 的 pages 里查看，如 pages/index/index）"
-        raise HTTPException(status_code=502, detail=errmsg)
-    img_b64 = base64.b64encode(r.content).decode("ascii")
-    _miniprogram_scene_store[scene_id] = {"token": None, "expires_at": time.time() + _SCENE_TTL}
-    return {"login_type": "miniprogram", "scene_id": scene_id, "qr_base64": img_b64}
+    # 前端仅支持服务号 login_url；未配服务号时直接报错，避免返回小程序码导致「未返回链接」
+    logger.warning("[wechat-login-url] 未配置服务号，请设置 WECHAT_OA_APP_ID、WECHAT_OA_SECRET")
+    raise HTTPException(
+        status_code=503,
+        detail="请在服务器 .env 中配置服务号：WECHAT_OA_APP_ID、WECHAT_OA_SECRET、WECHAT_OA_BASE_URL（公众平台 基本配置 里获取 AppID/AppSecret）",
+    )
 
 
 @router.get("/wechat-miniprogram-login-status", summary="轮询：扫码后是否已登录，已登录返回 access_token")
