@@ -532,7 +532,8 @@ def wechat_callback(
     access_token = create_access_token(data={"sub": str(user.id)})
     base = _wechat_oa_base_url(request) if _use_wechat_oa_login() else get_effective_public_base_url()
     base = (base or "").rstrip("/") or str(request.base_url).rstrip("/")
-    return RedirectResponse(url=f"{base}/?token={access_token}", status_code=302)
+    # 跳转到本服务的 wechat-success 页，避免跳到 8003 根路径导致 404
+    return RedirectResponse(url=f"{base}/auth/wechat-success?token={access_token}", status_code=302)
 
 
 @router.get("/wechat-success", summary="自建微信：登录成功页（展示 Token，供本地盒子用户复制）")
