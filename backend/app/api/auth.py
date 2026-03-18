@@ -482,6 +482,9 @@ def wechat_callback(
         app_secret = (getattr(settings, "wechat_app_secret", None) or "").strip()
     else:
         raise HTTPException(status_code=400, detail="未配置自建微信登录")
+    # 与授权时一致的 redirect_uri，换 token 时部分场景要求一致
+    base = _wechat_oa_base_url(request) if _use_wechat_oa_login() else (get_effective_public_base_url() or str(request.base_url)).rstrip("/")
+    redirect_uri = f"{base.rstrip('/')}/auth/wechat-callback"
     with httpx.Client(timeout=10.0) as client:
         r = client.get(
             "https://api.weixin.qq.com/sns/oauth2/access_token",
@@ -490,14 +493,25 @@ def wechat_callback(
                 "secret": app_secret,
                 "code": code.strip(),
                 "grant_type": "authorization_code",
+                "redirect_uri": redirect_uri,
             },
         )
-    data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    except Exception:
+        data = {}
     openid = (data.get("openid") or "").strip()
     if not openid:
-        err = data.get("errmsg") or data.get("error_description") or "微信授权失败"
-        logger.warning("wechat_callback no openid: %s", data)
-        raise HTTPException(status_code=400, detail=err)
+        errcode = data.get("errcode", "")
+        errmsg = data.get("errmsg") or data.get("error_description") or ""
+        err = (errmsg or "微信授权失败").strip()
+        logger.warning(
+            "wechat_callback no openid: status=%s body=%s redirect_uri=%s",
+            r.status_code, r.text[:500] if r.text else "", redirect_uri,
+        )
+        # 返回可读错误，避免前端编码乱码；常见 errcode 40029=code无效/已用 43101=redirect_uri 不一致
+        detail = f"errcode={errcode}: {err}" if errcode else err
+        raise HTTPException(status_code=400, detail=detail)
     user = db.query(User).filter(User.wechat_openid == openid).first()
     if not user:
         email = f"wx_{openid[:16]}@wechat.lobster.local"
