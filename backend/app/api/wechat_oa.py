@@ -3,7 +3,7 @@ import hashlib
 import logging
 import xml.etree.ElementTree as ET
 
-from fastapi import Request
+from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse, Response
 
 from ..core.config import settings
