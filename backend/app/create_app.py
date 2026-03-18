@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.health import router as health_router
@@ -254,18 +254,10 @@ def create_app() -> FastAPI:
     assets_dir.mkdir(exist_ok=True)
     app.mount("/media", StaticFiles(directory=str(assets_dir)), name="media")
 
-    if getattr(settings, "serve_frontend", True):
-        static_dir = Path(__file__).resolve().parent.parent.parent / "static"
-        if static_dir.exists():
-            app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
-
-            @app.get("/", include_in_schema=False)
-            def index():
-                return FileResponse(static_dir / "index.html")
-    else:
-        @app.get("/", include_in_schema=False)
-        def index():
-            return JSONResponse(content={"message": "Lobster API only. Use the online client to access."})
+    # 前端由 lobster_online 提供，本服务仅 API；根路径返回说明
+    @app.get("/", include_in_schema=False)
+    def index():
+        return JSONResponse(content={"message": "Lobster API. Use the online client (lobster_online) to access the UI."})
 
     logger.info("[启动] create_app 完成")
     return app

@@ -41,8 +41,8 @@ class Settings(BaseSettings):
     sutui_recharge_url: Optional[str] = None
     """是否允许 online 用户自配模型 Key；False 时统一走速推服务端模型（仅 online 使用）"""
     sutui_online_model_self_config: bool = True
-    """为 False 时仅提供 API，不挂载前端静态页与 /；online 客户端用本地页面访问本服务时设为 false。"""
-    serve_frontend: bool = True
+    """已废弃：前端由 lobster_online 提供，本服务仅 API，不再挂载 /static 与前端页。保留项以免旧 .env 报错。"""
+    serve_frontend: bool = False
     # 自建微信登录（不用速推）：小程序 appid/secret，配置后登录页展示小程序码扫码
     wechat_app_id: Optional[str] = None
     wechat_app_secret: Optional[str] = None
