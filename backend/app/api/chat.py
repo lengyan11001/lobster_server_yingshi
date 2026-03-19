@@ -543,7 +543,7 @@ def _log_task_result_structure(d: Dict[str, Any], raw: str) -> None:
         res_keys = list(res.keys()) if isinstance(res, dict) else None
         inner = res.get("result") if isinstance(res, dict) else None
         inner_keys = list(inner.keys()) if isinstance(inner, dict) else None
-        content = (inner.get("content") or (res.get("content") if isinstance(res, dict) else None) or []
+        content = (inner.get("content") if isinstance(inner, dict) else None) or (res.get("content") if isinstance(res, dict) else None) or []
         content_len = len(content) if isinstance(content, list) else 0
         first_text = ""
         if isinstance(content, list) and content and isinstance(content[0], dict):
