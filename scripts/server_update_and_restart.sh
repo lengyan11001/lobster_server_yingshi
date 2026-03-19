@@ -8,11 +8,23 @@ echo "[更新] 拉取 origin main ..."
 git fetch origin main
 git pull origin main
 
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files --type=service | grep -q lobster-backend; then
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files --type=service 2>/dev/null | grep -q lobster-backend; then
   echo "[重启] systemctl restart lobster-backend lobster-mcp ..."
   sudo systemctl restart lobster-backend lobster-mcp
   sudo systemctl status lobster-backend lobster-mcp --no-pager || true
   echo "[完成] 服务已重启"
 else
-  echo "[提示] 未检测到 systemd 或 lobster-backend.service，请手动重启 Backend 与 MCP（如 ./scripts/server_start.sh 或重启对应进程）"
+  echo "[重启] 无 systemd，结束旧进程并后台启动 MCP + Backend ..."
+  export PYTHONPATH="$ROOT"
+  [ -f .env ] && set -a && . ./.env && set +a
+  PY="$ROOT/.venv/bin/python"
+  pkill -f "backend.run" 2>/dev/null || true
+  pkill -f "mcp --port 8001" 2>/dev/null || true
+  pkill -f "python -m mcp" 2>/dev/null || true
+  sleep 2
+  nohup "$PY" -m mcp --port "${MCP_PORT:-8001}" >> mcp.log 2>&1 &
+  sleep 1
+  nohup "$PY" -m backend.run >> backend.log 2>&1 &
+  sleep 2
+  echo "[完成] MCP 与 Backend 已后台启动，日志: mcp.log / backend.log"
 fi
