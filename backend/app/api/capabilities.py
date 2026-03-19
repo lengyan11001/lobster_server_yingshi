@@ -72,8 +72,9 @@ class RecordCallIn(BaseModel):
     source: str = "mcp_invoke"
     chat_session_id: Optional[str] = None
     chat_context_id: Optional[str] = None
-    """若由 pre-deduct 已扣过，传本次扣费数，避免重复扣。"""
+    """若由 pre-deduct 已扣过，传本次扣费数；pre_deduct_applied=True 时不在本接口再次减余额。"""
     credits_charged: Optional[int] = None
+    pre_deduct_applied: bool = False
 
 
 class PreDeductIn(BaseModel):
@@ -141,7 +142,20 @@ def record_call(
     cap = db.query(CapabilityConfig).filter(CapabilityConfig.capability_id == body.capability_id).first()
     unit_credits = int(cap.unit_credits or 0) if cap else 0
     credits_charged = body.credits_charged if body.credits_charged is not None else 0
-    if credits_charged == 0 and _should_deduct_credits() and unit_credits > 0:
+    pre_applied = bool(getattr(body, "pre_deduct_applied", False))
+
+    if credits_charged > 0 and _should_deduct_credits():
+        if pre_applied:
+            pass
+        else:
+            db.refresh(current_user)
+            if (current_user.credits or 0) < credits_charged:
+                raise HTTPException(
+                    status_code=402,
+                    detail=f"积分不足：本次需 {credits_charged} 积分（速推返回消耗），当前余额 {current_user.credits or 0}。请先充值。",
+                )
+            current_user.credits = (current_user.credits or 0) - credits_charged
+    elif credits_charged == 0 and _should_deduct_credits() and unit_credits > 0:
         db.refresh(current_user)
         if (current_user.credits or 0) < unit_credits:
             raise HTTPException(

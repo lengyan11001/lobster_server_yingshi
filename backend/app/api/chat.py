@@ -257,41 +257,6 @@ async def get_customer_service_reply(
     return "抱歉，当前未配置对话模型，无法回复。"
 
 
-def _extract_credits_used_from_mcp_result(result_text: str) -> int:
-    """从 MCP/速推返回的 JSON 文本中解析本次消耗积分；无则返回 0。"""
-    if not (result_text or "").strip():
-        return 0
-    try:
-        raw = result_text.strip()
-        if raw.startswith("{"):
-            d = json.loads(raw)
-        else:
-            d = {}
-            for line in raw.split("\n"):
-                line = line.strip()
-                if line.startswith("{"):
-                    d = json.loads(line)
-                    break
-        for key in ("credits_used", "credits_charged", "cost", "credits"):
-            v = d.get(key)
-            if v is not None and isinstance(v, (int, float)) and v >= 0:
-                return int(v)
-        content = d.get("result", {}).get("content") if isinstance(d.get("result"), dict) else d.get("content")
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    t = (item.get("text") or "").strip()
-                    if t.startswith("{"):
-                        inner = json.loads(t)
-                        for key in ("credits_used", "credits_charged", "cost", "credits"):
-                            v = inner.get(key) if isinstance(inner, dict) else None
-                            if v is not None and isinstance(v, (int, float)) and v >= 0:
-                                return int(v)
-    except Exception:
-        pass
-    return 0
-
-
 async def _exec_tool_with_balance(
     name: str,
     args: Dict,
@@ -308,17 +273,7 @@ async def _exec_tool_with_balance(
         if user and (user.credits or 0) <= 0:
             return "积分不足：当前余额为 0，无法使用速推能力。请先充值。"
     res = await _exec_tool(name, args, token, sutui_token, progress_cb)
-    if name == "invoke_capability" and db is not None and user_id is not None:
-        credits_used = _extract_credits_used_from_mcp_result(res)
-        if credits_used > 0:
-            user = db.query(User).filter(User.id == user_id).first()
-            if user:
-                user.credits = (user.credits or 0) - credits_used
-                db.commit()
-                logger.info(
-                    "[CHAT] 速推扣积分 user_id=%s capability_id=%s credits_used=%s balance_after=%s",
-                    user_id, cap, credits_used, user.credits,
-                )
+    # 积分扣减统一由 MCP → POST /capabilities/record-call 完成（含速推返回动态 credits_used）
     return res
 
 

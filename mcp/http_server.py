@@ -278,7 +278,8 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]
 
 
 def _redact_sensitive(value: Any) -> Any:
-    blocked_keys = {"api_key", "apikey", "token", "balance", "points", "credits", "account_id"}
+    # 不把 credits/credits_used 等整棵删掉：速推返回里含本次消耗，供计费解析；余额类仍用 balance/points 脱敏
+    blocked_keys = {"api_key", "apikey", "token", "balance", "points", "account_id"}
     if isinstance(value, dict):
         out: Dict[str, Any] = {}
         for k, v in value.items():
@@ -354,8 +355,97 @@ def _parse_sse_or_json(resp: httpx.Response) -> Dict[str, Any]:
     return resp.json()
 
 
-async def _call_upstream_mcp_tool(server_url: str, tool_name: str, arguments: Dict[str, Any],
-                                   upstream_name: str = "", sutui_token: Optional[str] = None) -> Dict[str, Any]:
+_SUTUI_UPSTREAM_LOG_MAX = 500_000
+
+
+def _dict_looks_like_account_balance(d: dict) -> bool:
+    """含余额语义时，避免把字段名 credits 误当作「本次消耗」。"""
+    kl = {str(k).lower() for k in d}
+    return bool(kl & {"balance", "remaining", "remaining_credits", "total_balance", "available", "points"})
+
+
+def _extract_sutui_credits_used(obj: Any, _depth: int = 0) -> int:
+    """从速推 MCP JSON-RPC 整棵响应里解析本次消耗积分（动态扣费）。取遍历到的最大正整数，避免嵌套重复偏小。"""
+    if _depth > 42:
+        return 0
+    best = 0
+    if isinstance(obj, dict):
+        balance_shape = _dict_looks_like_account_balance(obj)
+        for k, v in obj.items():
+            lk = str(k).lower()
+            # price：xskill 官方 REST 创建任务返回里表示本次消耗积分（见 xskill-ai/scripts/xskill_api.py run_task）
+            if lk in (
+                "credits_used",
+                "credits_charged",
+                "credit_cost",
+                "consumed_credits",
+                "usage_credits",
+                "cost",
+                "price",
+            ):
+                if isinstance(v, (int, float)) and v > 0:
+                    best = max(best, int(v))
+            elif lk == "credits" and isinstance(v, (int, float)) and v > 0 and not balance_shape:
+                best = max(best, int(v))
+            elif isinstance(v, (dict, list)):
+                best = max(best, _extract_sutui_credits_used(v, _depth + 1))
+            elif isinstance(v, str):
+                s = v.strip()
+                if s.startswith("{"):
+                    try:
+                        best = max(best, _extract_sutui_credits_used(json.loads(s), _depth + 1))
+                    except Exception:
+                        pass
+    elif isinstance(obj, list):
+        for it in obj:
+            best = max(best, _extract_sutui_credits_used(it, _depth + 1))
+    return best
+
+
+def _sutui_phase_label(tool_name: str) -> str:
+    """说明速推 MCP 工具与扣费阶段关系（具体以返回 JSON 为准）。"""
+    if tool_name == "generate":
+        return "创建任务|submit(generate)：提交文生图/视频任务，速推可能在此步扣积分或仅返回 task_id"
+    if tool_name == "get_result":
+        return "查询结果|poll(get_result)：轮询任务状态，速推可能在此步扣积分或返回成品 URL"
+    return f"upstream_tool={tool_name}"
+
+
+def _log_sutui_upstream_full_response(
+    upstream_name: str,
+    tool_name: str,
+    lobster_capability_id: str,
+    out: Any,
+) -> None:
+    """打印速推上游完整 JSON，便于对照「创建 vs 查询」哪一步出现积分字段。"""
+    if upstream_name != "sutui":
+        return
+    try:
+        parsed = _extract_sutui_credits_used(out) if isinstance(out, dict) else 0
+        raw = json.dumps(out, ensure_ascii=False, default=str)
+        total_len = len(raw)
+        if total_len > _SUTUI_UPSTREAM_LOG_MAX:
+            raw = raw[:_SUTUI_UPSTREAM_LOG_MAX] + f"\n... [已截断，原始总长 {total_len} 字符，可在 mcp/http_server.py 调大 _SUTUI_UPSTREAM_LOG_MAX]"
+        logger.info(
+            "[速推完整响应] %s | tool=%s | lobster_capability=%s | 计费解析credits=%s\n%s",
+            _sutui_phase_label(tool_name),
+            tool_name,
+            lobster_capability_id or "(无)",
+            parsed,
+            raw,
+        )
+    except Exception as ex:
+        logger.warning("[速推完整响应] 序列化失败 tool=%s: %s", tool_name, ex)
+
+
+async def _call_upstream_mcp_tool(
+    server_url: str,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    upstream_name: str = "",
+    sutui_token: Optional[str] = None,
+    lobster_capability_id: str = "",
+) -> Dict[str, Any]:
     auth_headers: Dict[str, str] = {
         "Accept": "application/json, text/event-stream",
     }
@@ -413,14 +503,34 @@ async def _call_upstream_mcp_tool(server_url: str, tool_name: str, arguments: Di
             return {"error": {"message": f"上游工具调用失败: {exc}"}}
 
         if r.status_code >= 400:
-            logger.warning("[MCP] 上游返回 HTTP %s tool=%s: %s", r.status_code, tool_name, r.text[:200])
+            err_body = (r.text or "")[:_SUTUI_UPSTREAM_LOG_MAX]
+            if upstream_name == "sutui":
+                logger.warning(
+                    "[速推完整响应] HTTP错误 phase=%s tool=%s lobster_capability=%s status=%s body=\n%s",
+                    _sutui_phase_label(tool_name),
+                    tool_name,
+                    lobster_capability_id or "(无)",
+                    r.status_code,
+                    err_body,
+                )
+            else:
+                logger.warning("[MCP] 上游返回 HTTP %s tool=%s: %s", r.status_code, tool_name, r.text[:200])
             return {"error": {"message": f"上游工具调用返回 HTTP {r.status_code}: {r.text[:300]}"}}
         try:
             out = _parse_sse_or_json(r)
             logger.info("[MCP] 上游调用完成 tool=%s status=%s", tool_name, r.status_code)
+            _log_sutui_upstream_full_response(upstream_name, tool_name, lobster_capability_id, out)
             return out
         except Exception as e:
             logger.warning("[MCP] 上游响应解析失败 tool=%s: %s", tool_name, e)
+            if upstream_name == "sutui":
+                logger.warning(
+                    "[速推完整响应] 解析失败 tool=%s lobster_capability=%s status=%s body=\n%s",
+                    tool_name,
+                    lobster_capability_id or "(无)",
+                    r.status_code,
+                    (r.text or "")[:_SUTUI_UPSTREAM_LOG_MAX],
+                )
             return {"error": {"message": f"上游返回无法解析的响应: status={r.status_code}, body={r.text[:200]}"}}
 
 
@@ -464,7 +574,7 @@ def _is_task_still_in_progress(upstream_resp: Any) -> bool:
 
 async def _record_call(token: Optional[str], capability_id: str, success: bool, latency_ms: Optional[int],
                        request_payload: Dict, response_payload: Optional[Dict], error_message: Optional[str],
-                       credits_charged: Optional[int] = None) -> None:
+                       credits_charged: Optional[int] = None, pre_deduct_applied: bool = False) -> None:
     if not token:
         return
     body = {
@@ -472,6 +582,7 @@ async def _record_call(token: Optional[str], capability_id: str, success: bool, 
         "request_payload": request_payload, "response_payload": response_payload,
         "error_message": (error_message or "")[:1000] or None, "source": "mcp_invoke",
         "chat_context_id": capability_id,
+        "pre_deduct_applied": pre_deduct_applied,
     }
     if credits_charged is not None:
         body["credits_charged"] = credits_charged
@@ -614,7 +725,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             upstream_url = upstream_urls.get(upstream_name, "").strip()
             if not upstream_url:
                 return [{"type": "text", "text": f"未配置上游网关: {upstream_name}，请在 .env 或技能商店中配置"}], True
-            credits_charged = 0
+            pre_deduct_amount = 0
             if token:
                 try:
                     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -627,13 +738,20 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         detail = (pre_r.json() or {}).get("detail", "积分不足")
                         return [{"type": "text", "text": f"积分不足，无法调用能力。{detail}"}], True
                     if pre_r.status_code == 200:
-                        credits_charged = (pre_r.json() or {}).get("credits_charged") or 0
+                        pre_deduct_amount = (pre_r.json() or {}).get("credits_charged") or 0
                 except Exception:
                     pass
             sutui_token = (request.headers.get("X-Sutui-Token") or "").strip() or None if request else None
             t0 = time.perf_counter()
             logger.info("[MCP] invoke_capability capability_id=%s upstream=%s", capability_id, upstream_name)
-            upstream_resp = await _call_upstream_mcp_tool(upstream_url, upstream_tool, payload, upstream_name=upstream_name, sutui_token=sutui_token)
+            upstream_resp = await _call_upstream_mcp_tool(
+                upstream_url,
+                upstream_tool,
+                payload,
+                upstream_name=upstream_name,
+                sutui_token=sutui_token,
+                lobster_capability_id=capability_id,
+            )
             # task.get_result: 不再在此处轮询，由 backend chat 每 15s 轮询并写回对话
             latency_ms = int((time.perf_counter() - t0) * 1000)
             upstream_error = ""
@@ -641,19 +759,39 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 err_obj = upstream_resp.get("error")
                 if isinstance(err_obj, dict):
                     upstream_error = str(err_obj.get("message") or "")[:500]
-            if upstream_error and credits_charged > 0 and token:
+            if upstream_error and pre_deduct_amount > 0 and token:
                 try:
                     async with httpx.AsyncClient(timeout=10.0) as client:
                         await client.post(
                             f"{BASE_URL}/capabilities/refund",
-                            json={"capability_id": capability_id, "credits": credits_charged},
+                            json={"capability_id": capability_id, "credits": pre_deduct_amount},
                             headers=_backend_headers(token),
                         )
                 except Exception:
                     pass
-            await _record_call(token, capability_id, not bool(upstream_error), latency_ms, payload, upstream_resp if isinstance(upstream_resp, dict) else {}, upstream_error or None, credits_charged=credits_charged if credits_charged else None)
+            actual_used = 0
+            if isinstance(upstream_resp, dict) and not upstream_error:
+                actual_used = _extract_sutui_credits_used(upstream_resp)
+            if pre_deduct_amount > 0:
+                bill_credits = pre_deduct_amount
+                pre_applied_flag = True
+            else:
+                bill_credits = actual_used
+                pre_applied_flag = False
+            logger.info(
+                "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s bill=%s pre_applied=%s",
+                capability_id, pre_deduct_amount, actual_used, bill_credits, pre_applied_flag,
+            )
+            await _record_call(
+                token, capability_id, not bool(upstream_error), latency_ms, payload,
+                upstream_resp if isinstance(upstream_resp, dict) else {}, upstream_error or None,
+                credits_charged=(bill_credits if bill_credits > 0 else None),
+                pre_deduct_applied=pre_applied_flag,
+            )
             logger.info("[MCP] invoke_capability 完成 capability_id=%s latency_ms=%s ok=%s", capability_id, latency_ms, not bool(upstream_error))
             data: Dict[str, Any] = {"capability_id": capability_id, "result": _redact_sensitive(upstream_resp)}
+            if bill_credits > 0:
+                data["credits_used"] = bill_credits
 
             if not upstream_error:
                 saved = await _auto_save_generated_assets(upstream_resp, capability_id, payload, token)
