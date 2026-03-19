@@ -523,44 +523,113 @@ def _extract_media_type_from_task_result(result_text: str) -> str:
     return "video"
 
 
+def _normalize_saved_asset_item(x: Dict[str, Any]) -> Dict[str, Any]:
+    """归一化单条 saved_asset：asset_id / url / media_type。"""
+    url = (
+        x.get("url") or x.get("file_path") or x.get("path") or x.get("file_url") or x.get("image_url") or ""
+    ).strip()
+    return {
+        "asset_id": (x.get("asset_id") or "").strip(),
+        "url": url,
+        "media_type": (x.get("media_type") or "").strip().lower() or "image",
+    }
+
+
+def _log_task_result_structure(d: Dict[str, Any], raw: str) -> None:
+    """打印 task.get_result 解析到的数据结构，便于下次直接看到上游返回格式。"""
+    try:
+        top_keys = list(d.keys()) if isinstance(d, dict) else []
+        res = d.get("result")
+        res_keys = list(res.keys()) if isinstance(res, dict) else None
+        inner = res.get("result") if isinstance(res, dict) else None
+        inner_keys = list(inner.keys()) if isinstance(inner, dict) else None
+        content = (inner.get("content") or (res.get("content") if isinstance(res, dict) else None) or []
+        content_len = len(content) if isinstance(content, list) else 0
+        first_text = ""
+        if isinstance(content, list) and content and isinstance(content[0], dict):
+            first_text = (content[0].get("text") or "")[:500]
+        logger.info(
+            "[素材] task.get_result 数据结构 keys=%s result_keys=%s result.result_keys=%s content_len=%s first_text_preview=%s",
+            top_keys,
+            res_keys,
+            inner_keys,
+            content_len,
+            first_text[:300] + "..." if len(first_text) > 300 else first_text or "(无)",
+        )
+    except Exception:
+        pass
+
+
 def _extract_saved_assets_from_task_result(result_text: str) -> List[Dict[str, Any]]:
-    """从 task.get_result 返回的 JSON 中解析 saved_assets 列表，供前端展示。路径同 _extract_media_type_from_task_result。"""
+    """从 task.get_result 返回的 JSON 中解析 saved_assets 列表，供前端展示。支持 MCP 包装、上游 result.result.content[].text 及多层级 result。"""
     if not result_text or not result_text.strip():
         return []
     raw = (result_text or "").strip()
+
+    def to_list(obj: Any) -> List[Dict[str, Any]]:
+        if not isinstance(obj, list) or not obj:
+            return []
+        out = []
+        for x in obj:
+            if not isinstance(x, dict):
+                continue
+            item = _normalize_saved_asset_item(x)
+            if item.get("asset_id") or item.get("url"):
+                out.append(item)
+        return out
+
     try:
         d = json.loads(raw) if raw.startswith("{") else {}
+        if not d:
+            return []
+
+        # 打印结构便于下次对照解析
+        _log_task_result_structure(d, raw)
+
+        # 1) 顶层或 result 下直接有 saved_assets（MCP 或上游）
         saved = d.get("saved_assets") or (d.get("result") or {}).get("saved_assets")
         if isinstance(saved, list) and saved:
-            return [
-                {
-                    "asset_id": (x.get("asset_id") or "").strip(),
-                    "url": (x.get("url") or x.get("file_path") or x.get("path") or "").strip(),
-                    "media_type": (x.get("media_type") or "").strip().lower() or "image",
-                }
-                for x in saved
-                if isinstance(x, dict)
-            ]
+            out = to_list(saved)
+            if out:
+                return out
+
+        # 2) 从 result.result.content[].text 等嵌套 JSON 里找 saved_assets
         upstream = d.get("result")
         if isinstance(upstream, dict):
-            inner_result = upstream.get("result")
-            if isinstance(inner_result, dict):
-                content = inner_result.get("content") or []
-                if content and isinstance(content[0], dict):
-                    t = (content[0].get("text") or "").strip()
-                    if t.startswith("{"):
+            # 2a) result.result.content[0].text
+            inner = upstream.get("result")
+            if isinstance(inner, dict):
+                for content in (inner.get("content") or [])[:5]:
+                    if not isinstance(content, dict):
+                        continue
+                    t = (content.get("text") or "").strip()
+                    if not t.startswith("{"):
+                        continue
+                    try:
                         obj = json.loads(t)
-                        saved = obj.get("saved_assets") or []
+                        saved = obj.get("saved_assets") or (obj.get("result") or {}).get("saved_assets")
                         if isinstance(saved, list) and saved:
-                            return [
-                                {
-                                    "asset_id": (x.get("asset_id") or "").strip(),
-                                    "url": (x.get("url") or x.get("file_path") or x.get("path") or "").strip(),
-                                    "media_type": (x.get("media_type") or "").strip().lower() or "image",
-                                }
-                                for x in saved
-                                if isinstance(x, dict)
-                            ]
+                            out = to_list(saved)
+                            if out:
+                                return out
+                    except Exception:
+                        pass
+            # 2b) result.content[0].text（上游直接 content）
+            for content in (upstream.get("content") or [])[:5]:
+                if not isinstance(content, dict):
+                    continue
+                t = (content.get("text") or "").strip()
+                if not t.startswith("{"):
+                    continue
+                try:
+                    obj = json.loads(t)
+                    saved = obj.get("saved_assets") or (obj.get("result") or {}).get("saved_assets")
+                    if isinstance(saved, list) and saved:
+                        out = to_list(saved)
+                        if out:
+                            return out
+                except Exception:
+                    pass
     except Exception:
         pass
     return []
