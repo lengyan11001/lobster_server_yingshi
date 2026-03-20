@@ -720,11 +720,13 @@ def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
             out["image_urls"] = [image_url]
         return out
 
-    # 其他图片模型：原样传，但保证 prompt 存在
+    # 其他图片模型：原样传，但保证 prompt 存在，保留所有参数
     out = dict(payload)
     if "model" not in out:
         out["model"] = model
-    out["prompt"] = prompt
+    if not out.get("prompt"):
+        out["prompt"] = prompt
+    # 确保所有用户传入的参数都被保留（包括 image_size, aspect_ratio, num_images, n 等）
     return out
 
 
@@ -810,7 +812,7 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     valid_ratios = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
     ratio_ok = aspect_ratio in valid_ratios
 
-    # st-ai/super-seed2：ratio, filePaths, functionMode（保留 backend 注入的多图 filePaths）
+    # st-ai/super-seed2：ratio, filePaths, functionMode（保留 backend 注入的多图 filePaths），保留其他参数
     if "super-seed2" in model or "st-ai/super-seed2" == model:
         out: Dict[str, Any] = {
             "model": model,
@@ -820,9 +822,13 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
             "duration": int(duration) if duration is not None else 5,
         }
         out["filePaths"] = list(fp) if fp else ([first_url] if first_url else [])
+        # 保留用户传入的其他参数（如 resolution, audio, seed, negative_prompt 等）
+        for k in ["resolution", "audio", "seed", "negative_prompt"]:
+            if k in payload:
+                out[k] = payload[k]
         return out
 
-    # wan/v2.6/*：duration 为字符串，i2v 用 image_url，t2v 用 aspect_ratio
+    # wan/v2.6/*：duration 为字符串，i2v 用 image_url，t2v 用 aspect_ratio，保留其他参数
     if "wan/v2.6" in model or "wan/" in model:
         out = {"model": model, "prompt": prompt, "duration": str(int(duration) if duration is not None else 5)}
         if "image-to-video" in model and first_url:
@@ -831,22 +837,34 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
             out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
         if payload.get("resolution"):
             out["resolution"] = str(payload.get("resolution", "1080p"))
+        # 保留用户传入的其他参数（如 audio, seed, negative_prompt 等）
+        for k in ["audio", "seed", "negative_prompt"]:
+            if k in payload:
+                out[k] = payload[k]
         return out
 
-    # fal-ai/minimax/hailuo*：prompt, image_url（i2v）
+    # fal-ai/minimax/hailuo*：prompt, image_url（i2v），保留其他参数
     if "hailuo" in model or "minimax" in model:
         out = {"model": model, "prompt": prompt}
         if first_url:
             out["image_url"] = first_url
+        # 保留用户传入的其他参数（如 aspect_ratio, duration, resolution 等）
+        for k in ["aspect_ratio", "duration", "resolution", "audio", "seed", "negative_prompt"]:
+            if k in payload:
+                out[k] = payload[k]
         return out
 
-    # fal-ai/vidu/q3/*：i2v 必填 image_url，t2v 无 image_url；duration(int)
+    # fal-ai/vidu/q3/*：i2v 必填 image_url，t2v 无 image_url；duration(int)，保留其他参数
     if "vidu" in model:
         out = {"model": model, "prompt": prompt or "", "duration": int(duration) if duration is not None else 5}
         if "image-to-video" in model and first_url:
             out["image_url"] = first_url
         if payload.get("resolution"):
             out["resolution"] = str(payload.get("resolution", "720p"))
+        # 保留用户传入的其他参数（如 aspect_ratio, audio, seed, negative_prompt 等）
+        for k in ["aspect_ratio", "audio", "seed", "negative_prompt"]:
+            if k in payload:
+                out[k] = payload[k]
         return out
 
     # fal-ai/bytedance/seedance/v1/* 和 v1.5/*：i2v 必填 image_url，duration 字符串, aspect_ratio
@@ -884,6 +902,10 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
             options.update(payload.get("options"))
         if options:
             out["options"] = options
+        # 保留用户传入的其他顶层参数（如 audio, negative_prompt 等，如果模型支持）
+        for k in ["audio", "negative_prompt"]:
+            if k in payload and k not in out:
+                out[k] = payload[k]
         return out
 
     # Sora 2 系列（sora-2/pub, sora-2/vip, sora-2/pro）：通用格式，i2v 用 image_url，t2v 用 aspect_ratio
@@ -1017,9 +1039,9 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     if not first_url and "aspect_ratio" not in out and aspect_ratio:
         out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
     
-    # 如果没有 duration，添加默认值
-    if "duration" not in out and duration is not None:
-        out["duration"] = duration
+    # 注意：对于未特殊处理的模型，不自动添加 duration 默认值
+    # 让上游 API 处理，如果上游需要 duration，会在返回的 Schema 中说明
+    # 这样可以避免某些模型不接受 duration 参数的情况
     
     return out
 
