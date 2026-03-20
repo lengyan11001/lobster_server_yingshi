@@ -480,7 +480,7 @@ def _sutui_get_result_is_terminal_failure(resp: Any) -> bool:
         return True
     if _is_task_still_in_progress(resp):
         return False
-    raw = json.dumps(resp, ensure_ascii=False).lower()
+    raw = json.dumps(_sanitize_for_json(resp), ensure_ascii=False).lower()
     if '"status":"failed"' in raw or '"status": "failed"' in raw:
         return True
     if '"status":"error"' in raw or '"status": "error"' in raw:
@@ -497,7 +497,7 @@ def _sutui_get_result_is_terminal_success(resp: Any) -> bool:
         return False
     if _is_task_still_in_progress(resp):
         return False
-    raw = json.dumps(resp, ensure_ascii=False).lower()
+    raw = json.dumps(_sanitize_for_json(resp), ensure_ascii=False).lower()
     if '"status":"completed"' in raw or '"status": "completed"' in raw:
         return True
     if '"status":"success"' in raw or '"status": "success"' in raw:
@@ -543,6 +543,56 @@ def _log_sutui_upstream_full_response(
         logger.warning("[速推完整响应] 序列化失败 tool=%s: %s", tool_name, ex)
 
 
+async def _call_upstream_sutui_tasks_rest(
+    api_base: str,
+    tool_name: str,
+    arguments: Dict[str, Any],
+    token: str,
+) -> Dict[str, Any]:
+    """经 xskill 官方 REST `/api/v3/tasks/create` 与 `/api/v3/tasks/query` 调用，避免 MCP HTTP 在部分模型上返回 Decimal 序列化错误（-32603）。"""
+    if not isinstance(arguments, dict):
+        arguments = {}
+    arguments = _sanitize_for_json(arguments)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        if tool_name == "generate":
+            model = (arguments.get("model") or "").strip()
+            if not model:
+                return {"error": {"message": "generate 缺少 model"}}
+            params = {k: v for k, v in arguments.items() if k != "model"}
+            body = {"model": model, "params": params, "channel": None}
+            r = await client.post(f"{api_base}/api/v3/tasks/create", json=body, headers=headers)
+        elif tool_name == "get_result":
+            task_id = (arguments.get("task_id") or "").strip()
+            if not task_id:
+                return {"error": {"message": "get_result 缺少 task_id"}}
+            body = {"task_id": task_id}
+            r = await client.post(f"{api_base}/api/v3/tasks/query", json=body, headers=headers)
+        else:
+            return {"error": {"message": f"REST 上游未实现工具: {tool_name}"}}
+
+        if r.status_code >= 400:
+            return {"error": {"message": f"上游 REST HTTP {r.status_code}: {(r.text or '')[:800]}"}}
+        try:
+            payload = r.json()
+        except Exception as e:
+            return {"error": {"message": f"上游 REST 非 JSON: {e}"}}
+        if not isinstance(payload, dict):
+            return {"error": {"message": "上游 REST 返回非对象"}}
+        code = payload.get("code")
+        if code is not None and int(code) != 200:
+            msg = payload.get("message") or payload.get("msg") or str(payload)
+            return {"error": {"message": f"上游业务错误: {msg}"}}
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            return {"error": {"message": f"上游 REST 无 data 对象: {str(payload)[:500]}"}}
+        return _sanitize_for_json(data)
+
+
 async def _call_upstream_mcp_tool(
     server_url: str,
     tool_name: str,
@@ -558,10 +608,13 @@ async def _call_upstream_mcp_tool(
         token = (sutui_token or "").strip()
         if not token:
             token = await _next_sutui_token()
-        if token:
-            auth_headers["Authorization"] = f"Bearer {token}"
-        else:
+        if not token:
             return {"error": {"message": "xskill/速推 Token 未配置。请在服务器配置 SUTUI_SERVER_TOKEN 或 SUTUI_SERVER_TOKENS（逗号分隔多个，负载均衡）。"}}
+        auth_headers["Authorization"] = f"Bearer {token}"
+        # 实测 xskill MCP HTTP 在 generate 返回体序列化时抛 Decimal 错误；create/query 走 REST 稳定
+        if tool_name in ("generate", "get_result"):
+            api_base = os.environ.get("SUTUI_API_BASE", "https://api.xskill.ai").rstrip("/")
+            return await _call_upstream_sutui_tasks_rest(api_base, tool_name, arguments, token)
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         init_body = {
