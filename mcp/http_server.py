@@ -1156,6 +1156,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 logger.info("[MCP] 模型名称映射: %s -> %s", original_model, normalized_model)
             
             # 检测并转存内部图片 URL 到公开 CDN（图生视频/图生图需要）
+            temp_ids_to_register = []  # 在外部作用域定义，用于后续注册
             if capability_id in ("image.generate", "video.generate") and isinstance(payload, dict):
                 # 收集所有可能的图片 URL（从 image_url、filePaths、media_files）
                 urls_to_check = []
@@ -1174,6 +1175,22 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     for idx, mf in enumerate(media_files):
                         if isinstance(mf, str) and mf.strip():
                             urls_to_check.append((f"media_files[{idx}]", mf.strip()))
+                
+                # 提取临时文件ID并注册（用于任务完成后清理）
+                for url_key, url_value in urls_to_check:
+                    if "/api/assets/temp/" in url_value:
+                        try:
+                            from urllib.parse import urlparse
+                            parsed = urlparse(url_value)
+                            path_parts = parsed.path.split("/")
+                            if "temp" in path_parts:
+                                temp_idx = path_parts.index("temp")
+                                if temp_idx + 1 < len(path_parts):
+                                    temp_id = path_parts[temp_idx + 1].split("?")[0]
+                                    if temp_id.startswith("temp_"):
+                                        temp_ids_to_register.append(temp_id)
+                        except Exception:
+                            pass
                 
                 # 对每个 URL 进行检测和转存
                 for url_key, url_value in urls_to_check:
@@ -1398,6 +1415,21 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     pass
 
             poll_task_id = (payload.get("task_id") or payload.get("taskId") or "").strip()
+            
+            # 如果是video.generate调用，从响应中提取task_id并注册临时文件
+            if capability_id == "video.generate" and isinstance(upstream_resp, dict):
+                # 从响应中提取task_id
+                generated_task_id = _extract_task_id_from_sutui_response(upstream_resp)
+                if generated_task_id and temp_ids_to_register:
+                    try:
+                        from backend.app.api.assets import register_temp_file_for_task
+                        for temp_id in temp_ids_to_register:
+                            register_temp_file_for_task(generated_task_id, temp_id)
+                            logger.info("[临时文件] 注册 task_id=%s temp_id=%s", generated_task_id, temp_id)
+                    except Exception as e:
+                        logger.debug("[临时文件] 注册失败 error=%s", e)
+                # 清空临时ID列表，避免重复注册
+                temp_ids_to_register.clear()
             # get_result 终态失败：创建任务时已扣的积分退回龙虾用户（速推侧失败退款时与本机余额对齐）
             if (
                 token
@@ -1432,7 +1464,14 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             ):
                 dropped = _pop_task_billed_credits(poll_task_id)
                 if dropped > 0:
-                    logger.info("[MCP] 任务成功，清除创建扣费缓存 task_id=%s billed_was=%s", poll_task_id, dropped)
+                            logger.info("[MCP] 任务成功，清除创建扣费缓存 task_id=%s billed_was=%s", poll_task_id, dropped)
+                    # 任务完成，清理临时文件
+                    if poll_task_id:
+                        try:
+                            from backend.app.api.assets import cleanup_temp_files_for_task
+                            cleanup_temp_files_for_task(poll_task_id)
+                        except Exception as e:
+                            logger.debug("[临时文件] 清理失败 task_id=%s error=%s", poll_task_id, e)
 
             actual_used = 0
             if isinstance(upstream_resp, dict) and not upstream_error:

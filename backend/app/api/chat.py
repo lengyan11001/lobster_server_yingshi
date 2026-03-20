@@ -414,6 +414,14 @@ async def _exec_tool(
         ev_end["in_progress"] = _is_task_result_in_progress(result_text)
         if not ev_end.get("in_progress"):
             ev_end["media_type"] = _extract_media_type_from_task_result(result_text)
+            # 任务完成，清理临时文件
+            task_id = _extract_task_id_from_result(result_text)
+            if task_id:
+                try:
+                    from backend.app.api.assets import cleanup_temp_files_for_task
+                    cleanup_temp_files_for_task(task_id)
+                except Exception as e:
+                    logger.debug("[临时文件] 清理失败 task_id=%s error=%s", task_id, e)
         logger.info(
             "[进度] task.get_result 单次返回 in_progress=%s status=%s",
             ev_end.get("in_progress"),

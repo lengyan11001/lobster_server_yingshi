@@ -27,10 +27,15 @@ router = APIRouter()
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 ASSETS_DIR = _BASE_DIR / "assets"
 ASSETS_DIR.mkdir(exist_ok=True)
+TEMP_ASSETS_DIR = _BASE_DIR / "temp_assets"  # 临时文件目录（用于无TOS时的中转）
+TEMP_ASSETS_DIR.mkdir(exist_ok=True)
 _CUSTOM_CONFIGS_FILE = _BASE_DIR / "custom_configs.json"
 
 # 带签名的临时访问：用于会话里上传的图/视频生成可被速推拉取的 URL
 _ASSET_FILE_EXPIRY_SEC = 600  # 10 分钟
+
+# 临时文件跟踪：task_id -> [temp_file_paths]，用于任务完成后清理
+_temp_files_by_task: dict[str, list[Path]] = {}
 
 
 def _get_tos_config() -> Optional[dict]:
@@ -284,6 +289,116 @@ async def upload_asset(
     db.add(asset)
     db.commit()
     return {"asset_id": aid, "filename": fname_or_key, "media_type": mtype, "file_size": fsize}
+
+
+# ── Temporary file upload (for clients without TOS) ───────────────
+
+class TempUploadResponse(BaseModel):
+    temp_id: str
+    public_url: str
+
+
+@router.post("/api/assets/upload-temp", summary="上传临时文件（无TOS时使用）")
+async def upload_temp_file(
+    file: UploadFile = File(...),
+    request: Request = None,
+    current_user: User = Depends(get_current_user),
+):
+    """接收客户端上传的临时文件，返回可访问的URL。这些文件将在视频生成任务完成后自动删除。"""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, detail="文件为空")
+    
+    # 生成临时文件ID
+    temp_id = f"temp_{uuid.uuid4().hex[:16]}"
+    name = file.filename or "upload"
+    ext = Path(name).suffix or ".bin"
+    temp_filename = f"{temp_id}{ext}"
+    temp_path = TEMP_ASSETS_DIR / temp_filename
+    
+    # 保存临时文件
+    temp_path.write_bytes(data)
+    logger.info("[临时文件] 上传成功 temp_id=%s filename=%s size=%d", temp_id, temp_filename, len(data))
+    
+    # 生成可访问的URL
+    from ..core.config import get_settings
+    settings = get_settings()
+    base = (getattr(settings, "public_base_url", None) or "").strip().rstrip("/")
+    if not base and request:
+        try:
+            base = str((request.base_url or "").rstrip("/"))
+        except Exception:
+            pass
+    if not base:
+        base = "http://47.120.39.220:8000"  # 服务器公网地址（默认值）
+    expiry_ts = int(time.time()) + _ASSET_FILE_EXPIRY_SEC
+    public_url = f"{base}/api/assets/temp/{temp_id}?token={_asset_file_token(temp_id, expiry_ts)}&expiry={expiry_ts}"
+    
+    return TempUploadResponse(temp_id=temp_id, public_url=public_url)
+
+
+@router.get("/api/assets/temp/{temp_id}", summary="访问临时文件")
+async def get_temp_file(
+    temp_id: str,
+    token: str = Query(...),
+    expiry: int = Query(...),
+):
+    """提供临时文件的访问接口，带签名验证。"""
+    # 验证token
+    expected_token = _asset_file_token(temp_id, expiry)
+    if not hmac.compare_digest(token, expected_token):
+        raise HTTPException(403, detail="无效的token")
+    
+    # 检查过期
+    if int(time.time()) > expiry:
+        raise HTTPException(403, detail="URL已过期")
+    
+    # 查找临时文件
+    temp_files = list(TEMP_ASSETS_DIR.glob(f"{temp_id}.*"))
+    if not temp_files:
+        raise HTTPException(404, detail="临时文件不存在或已删除")
+    
+    temp_path = temp_files[0]
+    if not temp_path.exists():
+        raise HTTPException(404, detail="临时文件不存在")
+    
+    return FileResponse(
+        temp_path,
+        media_type="application/octet-stream",
+        filename=temp_path.name,
+    )
+
+
+def register_temp_file_for_task(task_id: str, temp_id: str):
+    """注册临时文件与任务ID的关联，用于任务完成后清理。"""
+    if task_id not in _temp_files_by_task:
+        _temp_files_by_task[task_id] = []
+    
+    # 查找临时文件路径
+    temp_files = list(TEMP_ASSETS_DIR.glob(f"{temp_id}.*"))
+    if temp_files:
+        _temp_files_by_task[task_id].append(temp_files[0])
+        logger.info("[临时文件] 注册 task_id=%s temp_id=%s path=%s", task_id, temp_id, temp_files[0])
+
+
+def cleanup_temp_files_for_task(task_id: str):
+    """清理指定任务关联的临时文件。"""
+    if task_id not in _temp_files_by_task:
+        return
+    
+    deleted_count = 0
+    for temp_path in _temp_files_by_task[task_id]:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+                deleted_count += 1
+                logger.info("[临时文件] 已删除 task_id=%s path=%s", task_id, temp_path)
+        except Exception as e:
+            logger.warning("[临时文件] 删除失败 task_id=%s path=%s error=%s", task_id, temp_path, e)
+    
+    del _temp_files_by_task[task_id]
+    if deleted_count > 0:
+        logger.info("[临时文件] 任务完成清理 task_id=%s 删除文件数=%d", task_id, deleted_count)
 
 
 # ── List / search ─────────────────────────────────────────────────
