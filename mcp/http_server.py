@@ -1145,12 +1145,16 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     pass
             sutui_token = (request.headers.get("X-Sutui-Token") or "").strip() or None if request else None
             # 规范化 payload：根据 capability_id 调用相应的规范化函数
+            original_model = payload.get("model") if isinstance(payload, dict) else None
             if capability_id == "image.generate":
                 payload = _normalize_image_generate_payload(payload)
             elif capability_id == "video.generate":
                 payload = _normalize_video_generate_payload(payload)
+            normalized_model = payload.get("model") if isinstance(payload, dict) else None
+            if original_model != normalized_model:
+                logger.info("[MCP] 模型名称映射: %s -> %s", original_model, normalized_model)
             t0 = time.perf_counter()
-            logger.info("[MCP] invoke_capability capability_id=%s upstream=%s", capability_id, upstream_name)
+            logger.info("[MCP] invoke_capability capability_id=%s upstream=%s model=%s", capability_id, upstream_name, normalized_model or original_model or "(无)")
             upstream_resp = await _call_upstream_mcp_tool(
                 upstream_url,
                 upstream_tool,
