@@ -680,6 +680,324 @@ async def _record_call(token: Optional[str], capability_id: str, success: bool, 
 _MEDIA_URL_RE = re.compile(r'https?://[^\s"\'<>\)\]]+\.(?:jpg|jpeg|png|webp|gif|mp4|webm|mov)', re.IGNORECASE)
 
 
+def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    按图片模型把「统一 payload」转成该模型 API 需要的参数，并保证用户输入的 prompt 原样传入。
+    """
+    if not payload or not isinstance(payload, dict):
+        return payload
+    model = (payload.get("model") or "").strip()
+    prompt = (payload.get("prompt") or "").strip()
+    image_url = (payload.get("image_url") or "").strip()
+    image_size = (payload.get("image_size") or "").strip()
+    num_images = payload.get("num_images", payload.get("n", 1))
+    if isinstance(num_images, (int, float)):
+        num_images = max(1, int(num_images))
+
+    # jimeng-4.0 / jimeng-4.5：prompt 必填，image_url 可选，n
+    if "jimeng-" in model:
+        out: Dict[str, Any] = {"model": model, "prompt": prompt, "n": num_images}
+        if image_url:
+            out["image_url"] = image_url
+        return out
+
+    # fal-ai/flux-2/flash：prompt, image_urls 数组（图生图）, image_size, num_images
+    if "flux-2/flash" in model or "flux-2" in model:
+        out = {"model": model, "prompt": prompt, "image_size": image_size or "landscape_4_3", "num_images": num_images}
+        if image_url:
+            out["image_urls"] = [image_url]
+        return out
+
+    # fal-ai/bytedance/seedream/*：prompt, image_size, num_images
+    if "seedream" in model:
+        return {"model": model, "prompt": prompt, "image_size": image_size or "auto_2K", "num_images": num_images}
+
+    # fal-ai/nano-banana-pro、nano-banana-2：prompt, image_urls 数组（可选）, aspect_ratio, num_images
+    if "nano-banana" in model:
+        out = {"model": model, "prompt": prompt, "aspect_ratio": (payload.get("aspect_ratio") or "1:1").strip(), "num_images": num_images}
+        if image_url:
+            out["image_urls"] = [image_url]
+        return out
+
+    # 其他图片模型：原样传，但保证 prompt 存在
+    out = dict(payload)
+    if "model" not in out:
+        out["model"] = model
+    out["prompt"] = prompt
+    return out
+
+
+def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    按视频模型把「统一 payload」转成该模型 API 需要的参数，与 lobster 对齐：支持 backend 注入的 filePaths/media_files。
+    """
+    if not payload or not isinstance(payload, dict):
+        return payload
+    model = (payload.get("model") or "").strip()
+    prompt = (payload.get("prompt") or "").strip()
+    fp = payload.get("filePaths") or []
+    image_url = (payload.get("image_url") or "").strip()
+    mf = payload.get("media_files") or []
+    
+    # 模型名称到标准 ID 的映射（将界面展示名转换为速推/xskill 标准模型 ID）
+    # 注意：这里只处理常见的展示名，标准 ID 格式（如 fal-ai/xxx）直接透传
+    model_lower = model.lower()
+    has_image = bool(fp) or bool(image_url) or bool(mf)
+    
+    if "/" not in model or not model.startswith(("fal-ai/", "st-ai/", "wan/", "jimeng-", "openai/", "anthropic/", "google/", "xai/")):
+        # 可能是展示名，尝试映射到标准模型 ID
+        if "sora" in model_lower and ("2" in model or "pub" in model_lower or "vip" in model_lower or "pro" in model_lower):
+            # Sora 2 系列：根据是否有图片决定是 i2v 还是 t2v
+            if "pub" in model_lower:
+                model = "fal-ai/sora-2/image-to-video" if has_image else "fal-ai/sora-2/text-to-video"
+            elif "vip" in model_lower:
+                model = "fal-ai/sora-2/vip/image-to-video" if has_image else "fal-ai/sora-2/vip/text-to-video"
+            elif "pro" in model_lower:
+                model = "fal-ai/sora-2/pro/image-to-video" if has_image else "fal-ai/sora-2/pro/text-to-video"
+            else:
+                # 默认 Sora 2
+                model = "fal-ai/sora-2/image-to-video" if has_image else "fal-ai/sora-2/text-to-video"
+        elif "seedance" in model_lower or ("seed" in model_lower and "seedream" not in model_lower):
+            if "2" in model or "2.0" in model:
+                model = "st-ai/super-seed2"
+            elif "1.5" in model:
+                # Seedance 1.5 需要根据 task_type 判断
+                if "text" in model_lower or "t2v" in model_lower:
+                    model = "fal-ai/bytedance/seedance/v1.5/pro/text-to-video"
+                else:
+                    model = "fal-ai/bytedance/seedance/v1.5/pro/image-to-video" if has_image else "fal-ai/bytedance/seedance/v1.5/pro/text-to-video"
+            elif "1" in model and "1.5" not in model:
+                if "fast" in model_lower:
+                    model = "fal-ai/bytedance/seedance/v1/pro/fast/image-to-video" if has_image else "fal-ai/bytedance/seedance/v1/pro/fast/text-to-video"
+                elif "lite" in model_lower:
+                    if "reference" in model_lower or "ref" in model_lower:
+                        model = "fal-ai/bytedance/seedance/v1/lite/reference-to-video"
+                    else:
+                        model = "fal-ai/bytedance/seedance/v1/lite/image-to-video" if has_image else "fal-ai/bytedance/seedance/v1/lite/text-to-video"
+                else:
+                    model = "fal-ai/bytedance/seedance/v1/pro/image-to-video" if has_image else "fal-ai/bytedance/seedance/v1/pro/text-to-video"
+        elif "kling" in model_lower:
+            if "o3" in model_lower and "pro" in model_lower:
+                model = "fal-ai/kling-video/o3/pro/image-to-video" if has_image else "fal-ai/kling-video/o3/pro/text-to-video"
+            elif "o3" in model_lower:
+                model = "fal-ai/kling-video/o3/image-to-video" if has_image else "fal-ai/kling-video/o3/text-to-video"
+            else:
+                model = "fal-ai/kling-video/image-to-video" if has_image else "fal-ai/kling-video/text-to-video"
+        elif "wan" in model_lower or "万" in model:
+            if "2.6" in model or "v2.6" in model_lower:
+                model = "wan/v2.6/image-to-video" if has_image else "wan/v2.6/text-to-video"
+            else:
+                model = "wan/v2.6/image-to-video" if has_image else "wan/v2.6/text-to-video"
+        elif "veo" in model_lower:
+            if "3.1" in model:
+                model = "google/veo-3.1/image-to-video" if has_image else "google/veo-3.1/text-to-video"
+            else:
+                model = "google/veo-3.1/image-to-video" if has_image else "google/veo-3.1/text-to-video"
+        elif "grok" in model_lower:
+            model = "xai/grok-imagine-video/image-to-video" if has_image else "xai/grok-imagine-video/text-to-video"
+        # 注意：即梦主要是图片模型，视频模型较少，这里先不处理
+    
+    # 更新 model_lower 以反映映射后的模型 ID
+    model_lower = model.lower()
+    first_url = (str(fp[0]) if fp else "") or image_url or (str(mf[0]) if mf else "")
+    if not first_url and image_url:
+        first_url = image_url
+    aspect_ratio = (payload.get("aspect_ratio") or "16:9").strip()
+    duration = payload.get("duration")
+    if duration is None:
+        duration = 5
+    valid_ratios = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
+    ratio_ok = aspect_ratio in valid_ratios
+
+    # st-ai/super-seed2：ratio, filePaths, functionMode（保留 backend 注入的多图 filePaths）
+    if "super-seed2" in model or "st-ai/super-seed2" == model:
+        out: Dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "functionMode": "first_last_frames",
+            "ratio": aspect_ratio if ratio_ok else "16:9",
+            "duration": int(duration) if duration is not None else 5,
+        }
+        out["filePaths"] = list(fp) if fp else ([first_url] if first_url else [])
+        return out
+
+    # wan/v2.6/*：duration 为字符串，i2v 用 image_url，t2v 用 aspect_ratio
+    if "wan/v2.6" in model or "wan/" in model:
+        out = {"model": model, "prompt": prompt, "duration": str(int(duration) if duration is not None else 5)}
+        if "image-to-video" in model and first_url:
+            out["image_url"] = first_url
+        if "text-to-video" in model or not first_url:
+            out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
+        if payload.get("resolution"):
+            out["resolution"] = str(payload.get("resolution", "1080p"))
+        return out
+
+    # fal-ai/minimax/hailuo*：prompt, image_url（i2v）
+    if "hailuo" in model or "minimax" in model:
+        out = {"model": model, "prompt": prompt}
+        if first_url:
+            out["image_url"] = first_url
+        return out
+
+    # fal-ai/vidu/q3/*：i2v 必填 image_url，t2v 无 image_url；duration(int)
+    if "vidu" in model:
+        out = {"model": model, "prompt": prompt or "", "duration": int(duration) if duration is not None else 5}
+        if "image-to-video" in model and first_url:
+            out["image_url"] = first_url
+        if payload.get("resolution"):
+            out["resolution"] = str(payload.get("resolution", "720p"))
+        return out
+
+    # fal-ai/bytedance/seedance/v1/* 和 v1.5/*：i2v 必填 image_url，duration 字符串, aspect_ratio
+    # 注意：v1 和 v1.5 使用 options 对象包裹额外参数（resolution, generate_audio, camera_fixed, seed, end_image_url 等）
+    if "seedance/v1" in model or "/seedance/v1/" in model or "seedance/v1.5" in model or "/seedance/v1.5/" in model:
+        out = {
+            "model": model,
+            "prompt": prompt,
+            "duration": str(int(duration) if duration is not None else 5),
+        }
+        # aspect_ratio 在顶层（v1.5 和 v1 都支持）
+        if aspect_ratio and ratio_ok:
+            out["aspect_ratio"] = aspect_ratio
+        # image_url 在顶层（i2v 时）
+        if "image-to-video" in model and first_url:
+            out["image_url"] = first_url
+        # 额外参数放入 options 对象（根据 xskill 文档）
+        options: Dict[str, Any] = {}
+        if payload.get("resolution"):
+            options["resolution"] = str(payload.get("resolution", "720p"))
+        if payload.get("generate_audio") is not None:
+            options["generate_audio"] = bool(payload.get("generate_audio"))
+        if payload.get("camera_fixed") is not None:
+            options["camera_fixed"] = bool(payload.get("camera_fixed"))
+        if payload.get("seed") is not None:
+            options["seed"] = int(payload.get("seed"))
+        if payload.get("end_image_url"):
+            options["end_image_url"] = str(payload.get("end_image_url"))
+        if payload.get("reference_image_urls"):
+            options["reference_image_urls"] = payload.get("reference_image_urls")
+        if payload.get("enable_safety_checker") is not None:
+            options["enable_safety_checker"] = bool(payload.get("enable_safety_checker"))
+        # 合并用户传入的 options（如果有）
+        if payload.get("options") and isinstance(payload.get("options"), dict):
+            options.update(payload.get("options"))
+        if options:
+            out["options"] = options
+        return out
+
+    # Sora 2 系列（sora-2/pub, sora-2/vip, sora-2/pro）：通用格式，i2v 用 image_url，t2v 用 aspect_ratio
+    if "sora-2" in model.lower() or "sora" in model.lower():
+        out = {"model": model, "prompt": prompt}
+        if first_url:
+            out["image_url"] = first_url
+        if not first_url and aspect_ratio:
+            out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
+        if duration is not None:
+            out["duration"] = int(duration)
+        # 保留用户传入的其他参数（如 resolution 等）
+        for k in ["resolution", "audio", "seed", "negative_prompt"]:
+            if k in payload:
+                out[k] = payload[k]
+        return out
+
+    # Kling 系列（kling-video, kling-o3）：i2v 用 image_url，支持 duration 和 resolution
+    if "kling" in model.lower():
+        out = {"model": model, "prompt": prompt}
+        if first_url:
+            out["image_url"] = first_url
+        # 文生视频时，如果没有 aspect_ratio，添加默认值
+        if not first_url and "aspect_ratio" not in payload and aspect_ratio:
+            out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
+        if duration is not None:
+            out["duration"] = int(duration)
+        if payload.get("resolution"):
+            out["resolution"] = str(payload.get("resolution", "1080p"))
+        # 保留其他参数
+        for k in ["audio", "seed", "negative_prompt", "aspect_ratio"]:
+            if k in payload:
+                out[k] = payload[k]
+        return out
+
+    # Veo 3.1 系列：i2v 用 image_url，支持 duration 和 resolution
+    if "veo" in model.lower():
+        out = {"model": model, "prompt": prompt}
+        if first_url:
+            out["image_url"] = first_url
+        # 文生视频时，如果没有 aspect_ratio，添加默认值
+        if not first_url and "aspect_ratio" not in payload and aspect_ratio:
+            out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
+        if duration is not None:
+            out["duration"] = int(duration)
+        if payload.get("resolution"):
+            out["resolution"] = str(payload.get("resolution", "1080p"))
+        # 保留其他参数
+        for k in ["audio", "seed", "negative_prompt", "aspect_ratio"]:
+            if k in payload:
+                out[k] = payload[k]
+        return out
+
+    # Grok Imagine Video：i2v 用 image_url，支持 duration
+    if "grok" in model.lower():
+        out = {"model": model, "prompt": prompt}
+        if first_url:
+            out["image_url"] = first_url
+        # 文生视频时，如果没有 aspect_ratio，添加默认值
+        if not first_url and "aspect_ratio" not in payload and aspect_ratio:
+            out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
+        if duration is not None:
+            out["duration"] = int(duration)
+        # 保留其他参数
+        for k in ["audio", "seed", "negative_prompt", "aspect_ratio", "resolution"]:
+            if k in payload:
+                out[k] = payload[k]
+        return out
+
+    # 即梦系列（jimeng）：i2v 用 image_url，支持 duration
+    if "jimeng" in model.lower() or "即梦" in model:
+        out = {"model": model, "prompt": prompt}
+        if first_url:
+            out["image_url"] = first_url
+        # 文生视频时，如果没有 aspect_ratio，添加默认值
+        if not first_url and "aspect_ratio" not in payload and aspect_ratio:
+            out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
+        if duration is not None:
+            out["duration"] = int(duration)
+        # 保留用户传入的 aspect_ratio 或其他参数
+        if aspect_ratio and ratio_ok and "aspect_ratio" not in out:
+            out["aspect_ratio"] = aspect_ratio
+        for k in ["resolution", "audio", "seed", "negative_prompt", "aspect_ratio"]:
+            if k in payload:
+                out[k] = payload[k]
+        return out
+
+    # 其他视频模型：通用处理，确保基本参数正确传递
+    # 1. 图生视频（有 image_url/filePaths/media_files）：传递 image_url
+    # 2. 文生视频（无图片）：传递 aspect_ratio
+    # 3. 保留所有用户传入的参数，不做过滤
+    out = dict(payload)
+    if "model" not in out:
+        out["model"] = model
+    if "prompt" not in out or not out.get("prompt"):
+        out["prompt"] = prompt
+    
+    # 统一处理图片 URL：优先使用 backend 注入的 filePaths/media_files
+    if first_url and "image_url" not in out:
+        out["image_url"] = first_url
+    elif first_url:
+        # 如果已有 image_url 但 backend 注入了新的，优先用新的
+        out["image_url"] = first_url
+    
+    # 文生视频时，如果没有 aspect_ratio，添加默认值
+    if not first_url and "aspect_ratio" not in out and aspect_ratio:
+        out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
+    
+    # 如果没有 duration，添加默认值
+    if "duration" not in out and duration is not None:
+        out["duration"] = duration
+    
+    return out
+
+
 async def _auto_save_generated_assets(
     upstream_resp: Any, capability_id: str, payload: Dict, token: Optional[str],
 ) -> List[Dict[str, str]]:
@@ -826,6 +1144,11 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 except Exception:
                     pass
             sutui_token = (request.headers.get("X-Sutui-Token") or "").strip() or None if request else None
+            # 规范化 payload：根据 capability_id 调用相应的规范化函数
+            if capability_id == "image.generate":
+                payload = _normalize_image_generate_payload(payload)
+            elif capability_id == "video.generate":
+                payload = _normalize_video_generate_payload(payload)
             t0 = time.perf_counter()
             logger.info("[MCP] invoke_capability capability_id=%s upstream=%s", capability_id, upstream_name)
             upstream_resp = await _call_upstream_mcp_tool(
