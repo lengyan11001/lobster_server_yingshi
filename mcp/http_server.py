@@ -920,6 +920,7 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         return out
 
     # Veo 3.1 系列：i2v 用 image_url，支持 duration 和 resolution
+    # duration 必须是字符串格式：'4s', '6s' 或 '8s'
     if "veo" in model.lower():
         out = {"model": model, "prompt": prompt}
         if first_url:
@@ -927,8 +928,32 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         # 文生视频时，如果没有 aspect_ratio，添加默认值
         if not first_url and "aspect_ratio" not in payload and aspect_ratio:
             out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
+        # Veo 3.1 的 duration 必须是 '4s', '6s' 或 '8s' 格式
         if duration is not None:
-            out["duration"] = int(duration)
+            # 如果已经是字符串格式（如 '4s'），直接使用
+            if isinstance(duration, str) and duration.endswith('s'):
+                dur_str = duration.lower()
+                if dur_str in ('4s', '6s', '8s'):
+                    out["duration"] = dur_str
+                else:
+                    # 无效格式，使用默认值 '6s'
+                    out["duration"] = "6s"
+            else:
+                # 如果是数字，映射到最接近的有效值
+                try:
+                    dur_num = int(duration) if isinstance(duration, (int, float)) else int(str(duration).replace('s', ''))
+                    if dur_num <= 4:
+                        out["duration"] = "4s"
+                    elif dur_num <= 6:
+                        out["duration"] = "6s"
+                    else:
+                        out["duration"] = "8s"
+                except (ValueError, TypeError):
+                    # 无法解析，使用默认值
+                    out["duration"] = "6s"
+        else:
+            # 没有提供 duration，使用默认值 '6s'
+            out["duration"] = "6s"
         if payload.get("resolution"):
             out["resolution"] = str(payload.get("resolution", "1080p"))
         # 保留其他参数
