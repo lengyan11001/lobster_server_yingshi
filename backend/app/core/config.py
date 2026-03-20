@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     openclaw_gateway_url: Optional[str] = None
     openclaw_gateway_token: Optional[str] = None
     openclaw_agent_id: str = "main"
+    """启动时是否尝试在本机拉起 OpenClaw Gateway（需 node + openclaw.mjs）。纯 API 的 Linux 服务器无此文件时可设 false，避免无意义日志。"""
+    openclaw_autostart: bool = True
     """本地轮询拉取/提交回复时的鉴权：请求头 X-Forward-Secret 需与此一致。不设则不做校验（仅内网或隧道时建议设置）。"""
     wecom_forward_secret: Optional[str] = None
     capability_sutui_mcp_url: Optional[str] = None

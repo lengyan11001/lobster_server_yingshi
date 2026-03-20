@@ -80,9 +80,23 @@ def _seed_capability_catalog():
 
 
 def _auto_start_openclaw():
-    """Start OpenClaw Gateway if it's not already running."""
+    """Start OpenClaw Gateway if it's not already running (仅当本机存在 node + openclaw.mjs，与 lobster_online 完整包一致)。"""
     try:
-        from .api.openclaw_config import _find_openclaw_pid, _restart_openclaw_gateway
+        if not getattr(settings, "openclaw_autostart", True):
+            logger.info("OpenClaw 自动启动已关闭（OPENCLAW_AUTOSTART=false）")
+            return
+        from .api.openclaw_config import (
+            _find_openclaw_entry,
+            _find_openclaw_pid,
+            _restart_openclaw_gateway,
+        )
+        # 在线版 API 服务器通常不部署 OpenClaw/Node，不应打 WARNING
+        if not _find_openclaw_entry():
+            logger.info(
+                "OpenClaw 未随本服务部署（无 node 或可执行的 openclaw.mjs），跳过自动启动；"
+                "对话走直连 LLM，工具与生成能力走 MCP（如 8001）。"
+            )
+            return
         if not _find_openclaw_pid():
             logger.info("OpenClaw Gateway not detected, auto-starting...")
             ok = _restart_openclaw_gateway()
