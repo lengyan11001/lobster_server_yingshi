@@ -7,11 +7,12 @@ from typing import Optional
 
 import httpx
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .auth import get_current_user
+from .installation_slots import ensure_installation_slot, installation_slots_enabled, parse_installation_id_strict
 from ..db import get_db
 from ..models import Asset, CapabilityCallLog, PublishAccount, PublishTask, SkillUnlock, User
 
@@ -66,11 +67,21 @@ class AddAccountReq(BaseModel):
 def list_accounts(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
     rows = db.query(PublishAccount).filter(
         PublishAccount.user_id == current_user.id,
     ).order_by(PublishAccount.created_at.desc()).all()
-    can_add_more = len(rows) < 1 or _user_has_add_more_accounts_unlock(db, current_user.id)
+    n = len(rows)
+    if n < 1:
+        can_add_more = True
+    elif _user_has_add_more_accounts_unlock(db, current_user.id):
+        if installation_slots_enabled():
+            iid = parse_installation_id_strict(x_installation_id)
+            ensure_installation_slot(db, current_user.id, iid)
+        can_add_more = True
+    else:
+        can_add_more = False
     return {
         "accounts": [
             {
@@ -98,6 +109,7 @@ def add_account(
     body: AddAccountReq,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
     if body.platform not in SUPPORTED_PLATFORMS:
         raise HTTPException(400, detail=f"不支持的平台: {body.platform}")
@@ -115,6 +127,10 @@ def add_account(
                 "amount_credits": 1000,
             },
         )
+
+    if existing_count >= 1 and installation_slots_enabled():
+        iid = parse_installation_id_strict(x_installation_id)
+        ensure_installation_slot(db, current_user.id, iid)
 
     profile_dir = BROWSER_DATA_DIR / f"{body.platform}_{body.nickname}"
     profile_dir.mkdir(parents=True, exist_ok=True)

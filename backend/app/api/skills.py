@@ -14,6 +14,7 @@ from ..core.config import settings
 from ..db import get_db
 from .auth import get_current_user
 from ..models import CapabilityConfig, SkillUnlock, SkillUnlockOrder, User
+from .installation_slots import ensure_installation_slot, installation_slots_enabled, parse_installation_id_strict
 
 router = APIRouter()
 
@@ -93,15 +94,28 @@ def _capability_to_package_map() -> dict:
     return out
 
 
-def user_can_use_capability(db: Session, user_id: int, capability_id: str) -> bool:
-    """该用户是否可使用此能力：若能力属于需付费解锁的技能包，则必须已解锁。"""
+def user_can_use_capability(
+    db: Session,
+    user_id: int,
+    capability_id: str,
+    installation_id: Optional[str] = None,
+) -> bool:
+    """该用户是否可使用此能力：若能力属于需付费解锁的技能包，则必须已解锁；在线版还需登记当前 installation_id（由路由先 parse_installation_id_strict）。"""
     cap_map = _capability_to_package_map()
     pkg_info = cap_map.get(capability_id)
     if not pkg_info:
         return True  # 不属付费包，可用
     package_id, _ = pkg_info
     unlocked = _user_unlocked_package_ids(db, user_id)
-    return package_id in unlocked
+    if package_id not in unlocked:
+        return False
+    if not installation_slots_enabled():
+        return True
+    iid = (installation_id or "").strip()
+    if not iid:
+        return False
+    ensure_installation_slot(db, user_id, iid)
+    return True
 
 
 def _package_capabilities_already_in_catalog(db: Session, pkg: dict) -> bool:
@@ -173,11 +187,15 @@ def publish_add_account_eligible(
     existing_local_count: int = 0,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
     """浏览器每次点击「添加账号」前先请求本接口（走公网 API_BASE）。existing_local_count 为当前本机已有账号数，由前端传入。"""
     if existing_local_count < 1:
         return {"allowed": True}
     if _user_has_add_more_publish_accounts_unlock(db, current_user.id):
+        if installation_slots_enabled():
+            iid = parse_installation_id_strict(x_installation_id)
+            ensure_installation_slot(db, current_user.id, iid)
         return {"allowed": True}
     reg = _load_registry()
     pkg = (reg.get("packages") or {}).get(ADD_MORE_PUBLISH_ACCOUNTS_PACKAGE_ID) or {}
@@ -208,9 +226,13 @@ def _user_has_wecom_reply_unlock(db: Session, user_id: int) -> bool:
 def wecom_config_eligible(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
     """企微配置存在本机；点击卡片或进入配置页前由浏览器调本接口（走 API_BASE）。"""
     if _user_has_wecom_reply_unlock(db, current_user.id):
+        if installation_slots_enabled():
+            iid = parse_installation_id_strict(x_installation_id)
+            ensure_installation_slot(db, current_user.id, iid)
         return {"allowed": True}
     reg = _load_registry()
     pkg = (reg.get("packages") or {}).get(WECOM_REPLY_PACKAGE_ID) or {}
@@ -383,6 +405,7 @@ def unlock_by_credits(
     body: UnlockByCreditsRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
     registry = _load_registry()
     packages = registry.get("packages", {})
@@ -395,6 +418,9 @@ def unlock_by_credits(
     need = int(need)
     unlocked = _user_unlocked_package_ids(db, current_user.id)
     if body.package_id in unlocked:
+        if installation_slots_enabled():
+            iid = parse_installation_id_strict(x_installation_id)
+            ensure_installation_slot(db, current_user.id, iid)
         return {"ok": True, "message": f"已解锁 {package.get('name', body.package_id)}", "already_unlocked": True}
     db.refresh(current_user)
     if (current_user.credits or 0) < need:
@@ -404,6 +430,9 @@ def unlock_by_credits(
         )
     current_user.credits = (current_user.credits or 0) - need
     db.add(SkillUnlock(user_id=current_user.id, package_id=body.package_id))
+    if installation_slots_enabled():
+        iid = parse_installation_id_strict(x_installation_id)
+        ensure_installation_slot(db, current_user.id, iid)
     db.commit()
     return {"ok": True, "message": f"已用 {need} 积分解锁 {package.get('name', body.package_id)}", "credits_deducted": need}
 

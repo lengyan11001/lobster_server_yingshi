@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -211,6 +211,19 @@ class RechargeOrder(Base):
     # 审计：微信回调中的实付金额(分)、微信交易号，用于校验与对账
     callback_amount_fen: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     wechat_transaction_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+
+
+class UserInstallation(Base):
+    """在线版：同一账号最多绑定 3 个安装身份（installation_id），LRU 顶掉最久未访问。"""
+
+    __tablename__ = "user_installations"
+    __table_args__ = (UniqueConstraint("user_id", "installation_id", name="uq_user_installation"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    installation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class SkillUnlock(Base):

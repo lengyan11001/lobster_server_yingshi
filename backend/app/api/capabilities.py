@@ -1,7 +1,7 @@
 """Capabilities: list available capabilities and call logs；调用时按 unit_credits 扣积分（与速推同扣）。付费技能仅已解锁用户可用。"""
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -9,9 +9,17 @@ from ..core.config import settings
 from ..db import get_db
 from .auth import get_current_user
 from ..models import CapabilityCallLog, CapabilityConfig, User
+from .installation_slots import installation_slots_enabled, parse_installation_id_strict
 from .skills import user_can_use_capability
 
 router = APIRouter()
+
+
+def _installation_id_for_capability_checks(x_installation_id: Optional[str]) -> Optional[str]:
+    """在线版槽位开启时校验并返回 installation_id；否则返回 None。"""
+    if not installation_slots_enabled():
+        return None
+    return parse_installation_id_strict(x_installation_id)
 
 
 def _should_deduct_credits() -> bool:
@@ -24,11 +32,13 @@ def _should_deduct_credits() -> bool:
 def list_available(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
+    iid = _installation_id_for_capability_checks(x_installation_id)
     rows = db.query(CapabilityConfig).filter(CapabilityConfig.enabled.is_(True)).order_by(CapabilityConfig.capability_id).all()
     out = []
     for r in rows:
-        if not user_can_use_capability(db, current_user.id, r.capability_id):
+        if not user_can_use_capability(db, current_user.id, r.capability_id, iid):
             continue
         out.append({
             "capability_id": r.capability_id,
@@ -86,8 +96,10 @@ def pre_deduct(
     body: PreDeductIn,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
-    if not user_can_use_capability(db, current_user.id, body.capability_id):
+    iid = _installation_id_for_capability_checks(x_installation_id)
+    if not user_can_use_capability(db, current_user.id, body.capability_id, iid):
         raise HTTPException(
             status_code=403,
             detail="该能力属于付费技能，请先在技能商店付费解锁后再使用。",
@@ -133,8 +145,10 @@ def record_call(
     body: RecordCallIn,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
-    if not user_can_use_capability(db, current_user.id, body.capability_id):
+    iid = _installation_id_for_capability_checks(x_installation_id)
+    if not user_can_use_capability(db, current_user.id, body.capability_id, iid):
         raise HTTPException(
             status_code=403,
             detail="该能力属于付费技能，请先在技能商店付费解锁后再使用。",

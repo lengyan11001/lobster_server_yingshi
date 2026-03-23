@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .auth import get_current_user
+from .installation_slots import ensure_installation_slot, installation_slots_enabled, parse_installation_id_strict
 from ..core.config import settings
 from ..db import get_db
 from ..models import User, WecomConfig, WecomPendingMessage, SkillUnlock
@@ -72,8 +73,9 @@ def list_wecom_configs(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
-    _require_wecom_unlock(db, current_user.id)
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
     rows = db.query(WecomConfig).filter(WecomConfig.user_id == current_user.id).order_by(WecomConfig.id).all()
     base = (settings.public_base_url or "").strip().rstrip("/")
     if not base:
@@ -100,8 +102,9 @@ def create_wecom_config(
     body: WecomConfigCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
-    _require_wecom_unlock(db, current_user.id)
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
     WXBizMsgCrypt, _, _ = _get_crypt_and_helpers()
     if not WXBizMsgCrypt:
         raise HTTPException(status_code=503, detail="企业微信能力未加载（请安装 pycryptodome）")
@@ -152,8 +155,9 @@ def get_wecom_config(
     config_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
-    _require_wecom_unlock(db, current_user.id)
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
     row = db.query(WecomConfig).filter(WecomConfig.id == config_id, WecomConfig.user_id == current_user.id).first()
     if not row:
         raise HTTPException(status_code=404, detail="配置不存在")
@@ -173,8 +177,9 @@ def update_wecom_config(
     body: WecomConfigUpdate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
-    _require_wecom_unlock(db, current_user.id)
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
     row = db.query(WecomConfig).filter(WecomConfig.id == config_id, WecomConfig.user_id == current_user.id).first()
     if not row:
         raise HTTPException(status_code=404, detail="配置不存在")
@@ -203,8 +208,9 @@ def delete_wecom_config(
     config_id: int,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
-    _require_wecom_unlock(db, current_user.id)
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
     row = db.query(WecomConfig).filter(WecomConfig.id == config_id, WecomConfig.user_id == current_user.id).first()
     if not row:
         raise HTTPException(status_code=404, detail="配置不存在")
@@ -386,7 +392,11 @@ def wecom_pending(
 WECOM_REPLY_PACKAGE_ID = "wecom_reply"
 
 
-def _require_wecom_unlock(db: Session, user_id: int) -> None:
+def _require_wecom_unlock(
+    db: Session,
+    user_id: int,
+    x_installation_id: Optional[str],
+) -> None:
     """未解锁企业微信时不可进入配置页，抛 402。"""
     if db.query(SkillUnlock).filter(
         SkillUnlock.user_id == user_id,
@@ -396,6 +406,9 @@ def _require_wecom_unlock(db: Session, user_id: int) -> None:
             status_code=402,
             detail="请先在技能商店用 1000 积分解锁「企业微信自动回复」后再使用配置页。",
         )
+    if installation_slots_enabled():
+        iid = parse_installation_id_strict(x_installation_id)
+        ensure_installation_slot(db, user_id, iid)
 
 
 @router.post("/api/wecom/submit-reply", summary="本地提交回复，云端代发企微应用消息")
