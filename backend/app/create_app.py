@@ -27,6 +27,7 @@ from .api.assets import router as assets_router
 from .api.logs_api import router as logs_router
 from .api.wechat_oa import router as wechat_oa_router
 from .api.messenger import router as messenger_router
+from .api.privacy_policy import router as privacy_policy_router
 try:
     from .api.wecom import router as wecom_router
 except Exception as e:
@@ -246,6 +247,7 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
     app.include_router(health_router, prefix="")
+    app.include_router(privacy_policy_router, prefix="")
     app.include_router(auth_router, prefix="/auth")
     app.include_router(capabilities_router, prefix="")
     app.include_router(skills_router, prefix="")
