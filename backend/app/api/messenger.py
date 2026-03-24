@@ -14,11 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from .auth import get_current_user
+from .auth import get_messenger_user_id
 from .chat import get_reply_for_channel
 from ..core.config import settings
 from ..db import get_db
-from ..models import MessengerConfig, User
+from ..models import MessengerConfig
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -85,12 +85,12 @@ def _public_base(request) -> str:
 @router.get("/api/messenger/configs", summary="Messenger 配置列表")
 def list_messenger_configs(
     request: Request,
-    current_user: User = Depends(get_current_user),
+    user_id: int = Depends(get_messenger_user_id),
     db: Session = Depends(get_db),
 ):
     rows = (
         db.query(MessengerConfig)
-        .filter(MessengerConfig.user_id == current_user.id)
+        .filter(MessengerConfig.user_id == user_id)
         .order_by(MessengerConfig.id)
         .all()
     )
@@ -117,7 +117,7 @@ def list_messenger_configs(
 def create_messenger_config(
     body: MessengerConfigCreate,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    user_id: int = Depends(get_messenger_user_id),
     db: Session = Depends(get_db),
 ):
     path = (body.callback_path or "").strip()
@@ -134,7 +134,7 @@ def create_messenger_config(
         else:
             raise HTTPException(status_code=500, detail="生成 callback_path 冲突")
     row = MessengerConfig(
-        user_id=current_user.id,
+        user_id=user_id,
         name=(body.name or "Messenger").strip() or "Messenger",
         callback_path=path,
         verify_token=body.verify_token.strip(),
@@ -159,11 +159,11 @@ def create_messenger_config(
 @router.get("/api/messenger/configs/{config_id:int}", summary="单条配置（含敏感字段，仅编辑）")
 def get_messenger_config(
     config_id: int,
-    current_user: User = Depends(get_current_user),
+    user_id: int = Depends(get_messenger_user_id),
     db: Session = Depends(get_db),
 ):
     row = db.query(MessengerConfig).filter(
-        MessengerConfig.id == config_id, MessengerConfig.user_id == current_user.id
+        MessengerConfig.id == config_id, MessengerConfig.user_id == user_id
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="配置不存在")
@@ -183,11 +183,11 @@ def get_messenger_config(
 def update_messenger_config(
     config_id: int,
     body: MessengerConfigUpdate,
-    current_user: User = Depends(get_current_user),
+    user_id: int = Depends(get_messenger_user_id),
     db: Session = Depends(get_db),
 ):
     row = db.query(MessengerConfig).filter(
-        MessengerConfig.id == config_id, MessengerConfig.user_id == current_user.id
+        MessengerConfig.id == config_id, MessengerConfig.user_id == user_id
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="配置不存在")
@@ -211,11 +211,11 @@ def update_messenger_config(
 @router.delete("/api/messenger/configs/{config_id:int}", summary="删除 Messenger 配置")
 def delete_messenger_config(
     config_id: int,
-    current_user: User = Depends(get_current_user),
+    user_id: int = Depends(get_messenger_user_id),
     db: Session = Depends(get_db),
 ):
     row = db.query(MessengerConfig).filter(
-        MessengerConfig.id == config_id, MessengerConfig.user_id == current_user.id
+        MessengerConfig.id == config_id, MessengerConfig.user_id == user_id
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="配置不存在")

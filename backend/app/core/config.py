@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     capability_sutui_mcp_url: Optional[str] = None
     capability_upstream_urls_json: Optional[str] = None
     reddit_comment2video_backend_url: Optional[str] = None
+    # 预留：大陆 API 转发 Messenger CRUD 至海外（未实现 HTTP 转发时勿依赖）
+    messenger_upstream_url: Optional[str] = None
+    # 海外实例：与大陆共用 SECRET_KEY 时，库中无 users 行仍信任 JWT sub 作为 messenger_configs.user_id
+    messenger_trust_jwt_without_user: bool = False
 
     class Config:
         env_file = ".env"

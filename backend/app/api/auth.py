@@ -121,6 +121,30 @@ async def get_current_user(
     return user
 
 
+async def get_messenger_user_id(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+) -> int:
+    """Messenger 多应用 CRUD：默认与 get_current_user 相同；海外机可设 messenger_trust_jwt_without_user=true，
+    在库中无对应 users 行时仍采纳 JWT 的 sub（需与登录签发方共用 SECRET_KEY）。"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="无法验证凭证",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        user_id = int(payload.get("sub"))
+    except (JWTError, ValueError, TypeError):
+        raise credentials_exception
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is not None:
+        return user_id
+    if getattr(settings, "messenger_trust_jwt_without_user", False):
+        return user_id
+    raise credentials_exception
+
+
 @router.post("/login", response_model=Token, summary="登录（表单含验证码，传输请使用 HTTPS）")
 async def login(request: Request, db: Session = Depends(get_db)):
     form = await request.form()

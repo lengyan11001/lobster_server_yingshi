@@ -8,7 +8,7 @@
 
 ### 浏览器带登录态调海外 CRUD 时
 
-大陆颁发的 JWT 要在海外校验通过，且能解析到同一用户，需同时满足：**`SECRET_KEY` 与大陆一致** + **`users` 等账号数据与大陆一致**（典型做法：**共用 MySQL**，或海外只读同步用户表；**不能**两机各一套 SQLite 却共用 JWT）。若暂不具备共用库，可仅在海外用独立账号做联调。
+大陆颁发的 JWT 要在海外校验通过，且能解析到同一用户，需同时满足：**`SECRET_KEY` 与大陆一致** + **`users` 等账号数据与大陆一致**（典型做法：**共用 MySQL**，或海外只读同步用户表；**不能**两机各一套 SQLite 却共用 JWT）。若暂不具备共用库，可在**海外** `.env` 设置 **`MESSENGER_TRUST_JWT_WITHOUT_USER=true`**（并保证 **`SECRET_KEY` 与大陆签发 JWT 时一致**），则海外库中即使没有对应 `users` 行，仍用 JWT 的 `sub` 作为 `messenger_configs.user_id`。**仅部署在海外实例；大陆实例保持默认 `false`。**
 
 ## 一、能力侧要点
 
@@ -47,7 +47,8 @@
 | 变量 | 说明 |
 |------|------|
 | `PUBLIC_BASE_URL` | 与对外访问一致，如 `http://lobster-server.icu:8000` 或 `https://lobster-server.icu`（配好 Nginx 后）。用于拼接返回前端的 `webhook_url`。 |
-| `SECRET_KEY` | 与需验证 JWT 的环境一致（多机共用用户时与大陆相同）。 |
+| `SECRET_KEY` | 与大陆签发登录 JWT 时**一致**（使用 `MESSENGER_TRUST_JWT_WITHOUT_USER` 时必填）。 |
+| `MESSENGER_TRUST_JWT_WITHOUT_USER` | 海外建议 `true`（大陆登录 + 海外无用户行时）；大陆 **`false`**。 |
 
 **不再**使用全局 `MESSENGER_PAGE_ACCESS_TOKEN` 作为业务主路径；多应用均以数据库 `messenger_configs` 为准。
 
