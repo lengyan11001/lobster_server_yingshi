@@ -1,12 +1,19 @@
 # Messenger 多应用配置说明
 
-## 一、架构要点
+## 总架构（与「全站迁海外」无关）
+
+- **登录、注册、验证码、`/auth/me`、积分、充值、技能商店列表、企微等**：仍走**原大陆 lobster_server**（在线版里的 **`API_BASE`** / `lobster_api_base`，与过去一致）。
+- **仅需要出海的少数能力**（当前为 **Messenger**：配置 CRUD + Webhook 回调）：在线版把 **`MESSENGER_API_BASE`** 单独指向**海外机**即可；**不需要**把整站用户迁到海外。
+- **Webhook**：由 Meta 直连海外 URL，与浏览器无关；**发消息**也在海外进程内完成。
+
+### 浏览器带登录态调海外 CRUD 时
+
+大陆颁发的 JWT 要在海外校验通过，且能解析到同一用户，需同时满足：**`SECRET_KEY` 与大陆一致** + **`users` 等账号数据与大陆一致**（典型做法：**共用 MySQL**，或海外只读同步用户表；**不能**两机各一套 SQLite 却共用 JWT）。若暂不具备共用库，可仅在海外用独立账号做联调。
+
+## 一、能力侧要点
 
 - **Webhook、Graph API** 仅部署在**可访问 Meta 的海外机**（如 `lobster-server.icu`）。
-- **在线客户端**左侧 **「Messenger」** 仅将 CRUD 请求发到 **`MESSENGER_API_BASE`**（默认 `http://lobster-server.icu:8000`），与大陆登录 `API_BASE` 分离。
-- **JWT**：浏览器携带的 `Authorization: Bearer` 必须在海外实例上可验证，且 **`users` 表能解析出同一用户**。常见做法：
-  - **海外单独测**：直接在海外 lobster_server **注册账号**登录后配置；或
-  - **生产**：大陆与海外 **共用 MySQL** + **相同 `SECRET_KEY`**（见 `.env`）。
+- **在线客户端**里 **「Messenger」** 与技能卡里 **「Facebook Messenger 客服」** 的 CRUD 请求只发往 **`MESSENGER_API_BASE`**，与 **`API_BASE`** 分离。
 
 ## 二、配置项总表（按条「应用」填写）
 
