@@ -1,20 +1,20 @@
 # 龙虾 · 服务器部署包
 
-本目录为**仅用于云服务器部署**的代码子集，由 `lobster` 源码目录同步生成。
+本目录为**仅用于云服务器部署**的代码子集，与 **`lobster_online/`** 本机完整包、**`lobster-server/`** 云端 API 分工协作。
 
-- **本地开发 / 打 online 版**：在 **`lobster/`** 目录进行。
+- **本地开发 / 打 online 版**：在 **`lobster_online/`** 目录进行（本工作区**无**顶层 `lobster/` 目录）。
 - **服务器部署**：使用本目录 **`lobster-server/`**。Git 拉取后在此目录执行安装与启动即可。
 
 ## 如何更新本目录（在开发机执行）
 
-在 `lobster` 项目根目录执行：
+若你的仓库提供从 `lobster_online` 同步到 `lobster-server` 的脚本，在**对应仓库根目录**执行（示例；以仓库内实际脚本为准）：
 
 ```bash
-cd lobster
+# 示例：若存在 scripts/build_server_package.sh
 ./scripts/build_server_package.sh
 ```
 
-会将当前 `lobster` 中运行服务所需文件同步到同级的 `lobster-server/`（或你指定的目标目录）。
+会将运行服务所需文件同步到 **`lobster-server/`**（或你指定的目标目录）。
 
 ## 云服务器快速启动
 

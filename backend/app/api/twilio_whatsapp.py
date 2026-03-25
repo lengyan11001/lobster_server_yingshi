@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 from xml.sax.saxutils import escape
@@ -66,20 +65,40 @@ def effective_account_sid() -> str:
 
 
 def effective_signature_url(request: Request) -> str:
+    """签名校验 URL：以服务器 .env 为准（TWILIO_WHATSAPP_WEBHOOK_FULL_URL / PUBLIC_BASE_URL），其次为旧版 JSON。"""
+    path = request.url.path
+    explicit = (getattr(settings, "twilio_whatsapp_webhook_full_url", None) or "").strip()
+    if explicit:
+        return explicit
+    public = (getattr(settings, "public_base_url", None) or "").strip().rstrip("/")
+    if public:
+        return public + path
     f = _read_twilio_file()
     explicit = (f.get("webhook_full_url") or "").strip()
     if explicit:
         return explicit
-    explicit = (getattr(settings, "twilio_whatsapp_webhook_full_url", None) or "").strip()
-    if explicit:
-        return explicit
     pub = (f.get("public_base") or "").strip().rstrip("/")
     if pub:
-        return pub + request.url.path
-    public = (getattr(settings, "public_base_url", None) or "").strip().rstrip("/")
-    if public:
-        return public + request.url.path
+        return pub + path
     return str(request.url)
+
+
+def _twilio_webhook_suggested() -> str:
+    path = _INBOUND_PATH
+    wh_full = (getattr(settings, "twilio_whatsapp_webhook_full_url", None) or "").strip()
+    if wh_full:
+        return wh_full
+    env_pub = (getattr(settings, "public_base_url", None) or "").strip().rstrip("/")
+    if env_pub:
+        return env_pub + path
+    f = _read_twilio_file()
+    wh_full = (f.get("webhook_full_url") or "").strip()
+    if wh_full:
+        return wh_full
+    pub = (f.get("public_base") or "").strip().rstrip("/")
+    if pub:
+        return pub + path
+    return ""
 
 
 def _form_to_str_dict(form: Any) -> Dict[str, str]:
@@ -100,33 +119,23 @@ class TwilioTestSendBody(BaseModel):
 class TwilioWhatsappConfigUpdate(BaseModel):
     account_sid: Optional[str] = None
     auth_token: Optional[str] = None
-    webhook_full_url: Optional[str] = None
-    public_base: Optional[str] = None
 
 
 @router.get("/api/twilio-whatsapp/config", summary="读取 Twilio WhatsApp 配置（脱敏）")
 def get_twilio_whatsapp_config(_: int = Depends(get_messenger_user_id)):
     f = _read_twilio_file()
     sid = (f.get("account_sid") or "").strip()
-    pub = (f.get("public_base") or "").strip().rstrip("/")
-    wh_full = (f.get("webhook_full_url") or "").strip()
     path = _INBOUND_PATH
-    if wh_full:
-        suggested = wh_full
-    elif pub:
-        suggested = pub + path
-    else:
-        env_pub = (getattr(settings, "public_base_url", None) or "").strip().rstrip("/")
-        suggested = (env_pub + path) if env_pub else ""
+    suggested = _twilio_webhook_suggested()
+    env_pub = (getattr(settings, "public_base_url", None) or "").strip().rstrip("/")
     return {
         "account_sid_masked": _mask_sid(sid),
         "has_account_sid": bool(sid),
         "has_auth_token": _mask_token_set(),
-        "public_base": f.get("public_base") or "",
-        "webhook_full_url": f.get("webhook_full_url") or "",
+        "public_base_effective": env_pub,
         "webhook_suggested": suggested,
         "inbound_path": path,
-        "env_fallback_note": "亦可使用 .env：TWILIO_AUTH_TOKEN、TWILIO_WHATSAPP_WEBHOOK_FULL_URL、PUBLIC_BASE_URL",
+        "env_fallback_note": "公网与 Webhook 由服务器 .env 决定：PUBLIC_BASE_URL、TWILIO_WHATSAPP_WEBHOOK_FULL_URL、TWILIO_AUTH_TOKEN；盒内 JSON 仅保存 SID/Token",
     }
 
 
@@ -149,23 +158,6 @@ def post_twilio_whatsapp_config(
             f["auth_token"] = t
         else:
             f.pop("auth_token", None)
-    if "public_base" in patch:
-        pb = str(patch.get("public_base") or "").strip().rstrip("/")
-        if pb:
-            f["public_base"] = pb
-        else:
-            f.pop("public_base", None)
-    if "webhook_full_url" in patch:
-        w = str(patch.get("webhook_full_url") or "").strip()
-        if w:
-            if not re.match(r"^https://", w, re.I):
-                raise HTTPException(
-                    status_code=400,
-                    detail="完整 Webhook URL 须为 https:// 开头",
-                )
-            f["webhook_full_url"] = w
-        else:
-            f.pop("webhook_full_url", None)
     _write_twilio_file(f)
     logger.info("[Twilio WA] 配置已更新 path=%s", _TWILIO_CONFIG_PATH)
     return {"ok": True, "message": "Twilio WhatsApp 配置已保存并生效"}
