@@ -122,6 +122,9 @@ class TwilioTestSendBody(BaseModel):
 class TwilioWhatsappConfigUpdate(BaseModel):
     account_sid: Optional[str] = None
     auth_token: Optional[str] = None
+    twilio_kb_enterprise_id: Optional[int] = None
+    twilio_kb_product_id: Optional[int] = None
+    knowledge_user_id: Optional[int] = None
 
 
 class TwilioSubmitReplyBody(BaseModel):
@@ -156,6 +159,9 @@ def get_twilio_whatsapp_config(_: int = Depends(get_messenger_user_id)):
         "webhook_suggested": suggested,
         "inbound_path": path,
         "env_fallback_note": "公网与 Webhook 由服务器 .env 决定：PUBLIC_BASE_URL、TWILIO_WHATSAPP_WEBHOOK_FULL_URL、TWILIO_AUTH_TOKEN；盒内 JSON 仅保存 SID/Token",
+        "twilio_kb_enterprise_id": f.get("twilio_kb_enterprise_id"),
+        "twilio_kb_product_id": f.get("twilio_kb_product_id"),
+        "knowledge_user_id": f.get("knowledge_user_id"),
     }
 
 
@@ -178,6 +184,26 @@ def post_twilio_whatsapp_config(
             f["auth_token"] = t
         else:
             f.pop("auth_token", None)
+    if "twilio_kb_enterprise_id" in patch:
+        eid = patch.get("twilio_kb_enterprise_id")
+        if eid is None:
+            f.pop("twilio_kb_enterprise_id", None)
+        else:
+            f["twilio_kb_enterprise_id"] = int(eid)
+            f.pop("enterprise_id", None)
+    if "twilio_kb_product_id" in patch:
+        pid = patch.get("twilio_kb_product_id")
+        if pid is None:
+            f.pop("twilio_kb_product_id", None)
+        else:
+            f["twilio_kb_product_id"] = int(pid)
+            f.pop("product_id", None)
+    if "knowledge_user_id" in patch:
+        k = patch.get("knowledge_user_id")
+        if k is None:
+            f.pop("knowledge_user_id", None)
+        else:
+            f["knowledge_user_id"] = int(k)
     _write_twilio_file(f)
     logger.info("[Twilio WA] 配置已更新 path=%s", _TWILIO_CONFIG_PATH)
     return {"ok": True, "message": "Twilio WhatsApp 配置已保存并生效"}
