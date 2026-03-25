@@ -5,13 +5,16 @@ import json
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional
-from xml.sax.saxutils import escape
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from ..core.config import settings
+from ..db import get_db
+from ..models import TwilioPendingMessage
 from .auth import get_messenger_user_id
 
 router = APIRouter()
@@ -121,6 +124,23 @@ class TwilioWhatsappConfigUpdate(BaseModel):
     auth_token: Optional[str] = None
 
 
+class TwilioSubmitReplyBody(BaseModel):
+    message_id: int
+    reply_text: str
+
+
+def _check_forward_secret(
+    x_forward_secret: Optional[str] = Header(None, alias="X-Forward-Secret"),
+):
+    secret = (settings.wecom_forward_secret or "").strip()
+    if secret and x_forward_secret != secret:
+        raise HTTPException(status_code=401, detail="X-Forward-Secret invalid")
+    return True
+
+
+_EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+
+
 @router.get("/api/twilio-whatsapp/config", summary="读取 Twilio WhatsApp 配置（脱敏）")
 def get_twilio_whatsapp_config(_: int = Depends(get_messenger_user_id)):
     f = _read_twilio_file()
@@ -197,8 +217,87 @@ def twilio_whatsapp_test_send(
         raise HTTPException(status_code=502, detail=str(e)) from e
 
 
+@router.get("/api/twilio-whatsapp/pending", summary="本机轮询：拉取待处理 WhatsApp 入站")
+def twilio_whatsapp_pending(
+    limit: int = 20,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(TwilioPendingMessage)
+        .filter(TwilioPendingMessage.status == "pending")
+        .order_by(TwilioPendingMessage.id.asc())
+        .limit(max(1, min(limit, 100)))
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "twilio_message_sid": r.twilio_message_sid,
+                "from_user": r.from_user,
+                "to_user": r.to_user,
+                "content": r.body,
+                "msg_type": "text" if (r.num_media or "0") in ("0", "") else "media",
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.post("/api/twilio-whatsapp/submit-reply", summary="本机提交 AI 回复，云端通过 Twilio 代发")
+def twilio_whatsapp_submit_reply(
+    body: TwilioSubmitReplyBody,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    row = (
+        db.query(TwilioPendingMessage)
+        .filter(
+            TwilioPendingMessage.id == body.message_id,
+            TwilioPendingMessage.status == "pending",
+        )
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="消息不存在或已处理")
+    sid = effective_account_sid()
+    token = effective_auth_token()
+    if not sid or not token:
+        row.status = "failed"
+        row.reply_text = (body.reply_text or "")[:500]
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail="云端未配置 Account SID / Auth Token，无法代发 WhatsApp",
+        )
+    text = (body.reply_text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="reply_text 不能为空")
+    try:
+        from twilio.rest import Client
+
+        client = Client(sid, token)
+        client.messages.create(
+            from_=row.to_user,
+            to=row.from_user,
+            body=text[:1600],
+        )
+    except Exception as e:
+        logger.warning("[Twilio WA] submit-reply 发送失败: %s", e)
+        row.status = "failed"
+        row.reply_text = text[:500]
+        db.commit()
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    row.status = "replied"
+    row.reply_text = text[:500]
+    db.commit()
+    return {"ok": True}
+
+
 @router.post(_INBOUND_PATH, summary="Twilio WhatsApp 入站 Webhook")
-async def twilio_whatsapp_inbound(request: Request):
+async def twilio_whatsapp_inbound(request: Request, db: Session = Depends(get_db)):
     token = effective_auth_token()
     if not token:
         raise HTTPException(
@@ -226,25 +325,37 @@ async def twilio_whatsapp_inbound(request: Request):
     frm = params.get("From", "")
     to = params.get("To", "")
     body = (params.get("Body") or "").strip()
-    num_media = params.get("NumMedia", "0")
+    num_media = params.get("NumMedia", "0") or "0"
+    msg_sid = (params.get("MessageSid") or params.get("SmsSid") or "").strip()
 
     logger.info(
-        "[Twilio WA] inbound From=%s To=%s NumMedia=%s Body=%s",
+        "[Twilio WA] inbound sid=%s From=%s To=%s NumMedia=%s Body=%s",
+        msg_sid,
         frm,
         to,
         num_media,
         body[:200] if body else "",
     )
 
-    if body:
-        reply = f"Lobster 已收到：{body}"
+    if msg_sid:
+        try:
+            row = TwilioPendingMessage(
+                twilio_message_sid=msg_sid,
+                from_user=frm,
+                to_user=to,
+                body=body,
+                num_media=str(num_media),
+                status="pending",
+            )
+            db.add(row)
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            logger.info("[Twilio WA] 重复 MessageSid=%s 已忽略", msg_sid)
     else:
-        reply = "Lobster 已收到消息（无文本正文，可能为媒体或系统事件）"
+        logger.warning("[Twilio WA] 入站缺少 MessageSid，未入队")
 
-    xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        "<Response><Message>"
-        f"{escape(reply)}"
-        "</Message></Response>"
+    return Response(
+        content=_EMPTY_TWIML,
+        media_type="application/xml; charset=utf-8",
     )
-    return Response(content=xml, media_type="application/xml; charset=utf-8")

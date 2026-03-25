@@ -179,6 +179,22 @@ class WecomPendingMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class TwilioPendingMessage(Base):
+    """Twilio WhatsApp 入站先入队；本机 lobster_online 轮询拉取后 AI 回复，再通过 submit-reply 由云端代发。"""
+
+    __tablename__ = "twilio_pending_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    twilio_message_sid: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    from_user: Mapped[str] = mapped_column(String(128), nullable=False)
+    to_user: Mapped[str] = mapped_column(String(128), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    num_media: Mapped[str] = mapped_column(String(8), nullable=False, default="0")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    reply_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PublishTask(Base):
     __tablename__ = "publish_tasks"
 
