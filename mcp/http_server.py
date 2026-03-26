@@ -194,6 +194,14 @@ def _backend_headers(token: Optional[str]) -> Dict[str, str]:
     return h
 
 
+def _capabilities_api_base() -> str:
+    """预扣/退还等优先直连 AUTH_SERVER_BASE（与线上一致），避免本机 BASE_URL 代理异常。"""
+    auth = (os.environ.get("AUTH_SERVER_BASE") or "").strip().rstrip("/")
+    if auth:
+        return auth
+    return BASE_URL.rstrip("/")
+
+
 async def _find_account_id_by_nickname(nickname: str, token: Optional[str]) -> Optional[int]:
     """Lookup account id by nickname from backend."""
     try:
@@ -772,7 +780,7 @@ async def _record_call(token: Optional[str], capability_id: str, success: bool, 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             await client.post(
-                f"{BASE_URL}/capabilities/record-call",
+                f"{_capabilities_api_base()}/capabilities/record-call",
                 json=_sanitize_for_json(body),
                 headers=_backend_headers(token),
             )
@@ -1426,9 +1434,9 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     if upstream_name == "sutui" and upstream_tool == "generate":
                         pre_body["model"] = (payload.get("model") or "").strip()
                         pre_body["params"] = payload
-                    async with httpx.AsyncClient(timeout=15.0) as client:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
                         pre_r = await client.post(
-                            f"{BASE_URL}/capabilities/pre-deduct",
+                            f"{_capabilities_api_base()}/capabilities/pre-deduct",
                             json=_sanitize_for_json(pre_body),
                             headers=_backend_headers(token),
                         )
@@ -1445,14 +1453,34 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         msg = base if (not d or d in ("积分不足", "余额不足")) else f"{base}（{d}）"
                         return [{"type": "text", "text": msg}], True
                     if pre_r.status_code == 200:
-                        pre_deduct_amount = (pre_r.json() or {}).get("credits_charged") or 0
-                except Exception:
+                        try:
+                            body_ok = pre_r.json() if pre_r.content else {}
+                            if not isinstance(body_ok, dict):
+                                body_ok = {}
+                            pre_deduct_amount = int(body_ok.get("credits_charged") or 0)
+                        except Exception as parse_e:
+                            logger.warning(
+                                "[MCP] pre_deduct 200 响应非 JSON capability_id=%s err=%s body_prefix=%s",
+                                capability_id,
+                                parse_e,
+                                (pre_r.text or "")[:300],
+                            )
+                            return [
+                                {
+                                    "type": "text",
+                                    "text": "预扣积分返回异常（无法解析认证中心响应）。请稍后重试。",
+                                }
+                            ], True
+                except Exception as e:
                     if upstream_name == "sutui" and upstream_tool == "generate":
                         logger.exception("[MCP] pre-deduct 请求失败 capability_id=%s", capability_id)
                         return [
                             {
                                 "type": "text",
-                                "text": "无法连接认证中心完成预扣积分（网络或超时）。请稍后重试。",
+                                "text": (
+                                    "无法连接认证中心完成预扣积分（网络或超时）。请稍后重试。"
+                                    f" 详情：{type(e).__name__}: {str(e)[:200]}"
+                                ),
                             }
                         ], True
 
@@ -1752,7 +1780,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     try:
                         async with httpx.AsyncClient(timeout=10.0) as client:
                             await client.post(
-                                f"{BASE_URL}/capabilities/refund",
+                                f"{_capabilities_api_base()}/capabilities/refund",
                                 json={"capability_id": capability_id, "credits": refund_amt},
                                 headers=_backend_headers(token),
                             )
