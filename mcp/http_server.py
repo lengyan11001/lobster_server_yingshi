@@ -581,6 +581,7 @@ async def _call_upstream_sutui_tasks_rest(
     tool_name: str,
     arguments: Dict[str, Any],
     token: str,
+    lobster_capability_id: str = "",
 ) -> Dict[str, Any]:
     """经 xskill 官方 REST `/api/v3/tasks/create` 与 `/api/v3/tasks/query` 调用，避免 MCP HTTP 在部分模型上返回 Decimal 序列化错误（-32603）。"""
     if not isinstance(arguments, dict):
@@ -591,7 +592,8 @@ async def _call_upstream_sutui_tasks_rest(
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    # 与 save-url 一致：禁用系统代理，避免 HTTPS_PROXY 干扰访问 api.xskill.ai / 自建网关
+    async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
         if tool_name == "generate":
             model = (arguments.get("model") or "").strip()
             if not model:
@@ -609,20 +611,54 @@ async def _call_upstream_sutui_tasks_rest(
             return {"error": {"message": f"REST 上游未实现工具: {tool_name}"}}
 
         if r.status_code >= 400:
+            err_body = (r.text or "")[:_SUTUI_UPSTREAM_LOG_MAX]
+            logger.warning(
+                "[速推完整响应] %s | tool=%s | lobster_capability=%s | REST HTTP=%s\n%s",
+                _sutui_phase_label(tool_name),
+                tool_name,
+                lobster_capability_id or "(无)",
+                r.status_code,
+                err_body,
+            )
             return {"error": {"message": f"上游 REST HTTP {r.status_code}: {(r.text or '')[:800]}"}}
         try:
             payload = r.json()
         except Exception as e:
+            raw = (r.text or "")[:_SUTUI_UPSTREAM_LOG_MAX]
+            logger.warning(
+                "[速推完整响应] %s | tool=%s | lobster_capability=%s | REST 非JSON err=%s\n%s",
+                _sutui_phase_label(tool_name),
+                tool_name,
+                lobster_capability_id or "(无)",
+                e,
+                raw,
+            )
             return {"error": {"message": f"上游 REST 非 JSON: {e}"}}
         if not isinstance(payload, dict):
+            logger.warning(
+                "[速推完整响应] %s | tool=%s | lobster_capability=%s | REST 顶层非对象 body_prefix=%s",
+                _sutui_phase_label(tool_name),
+                tool_name,
+                lobster_capability_id or "(无)",
+                (r.text or "")[:800],
+            )
             return {"error": {"message": "上游 REST 返回非对象"}}
         code = payload.get("code")
         if code is not None and int(code) != 200:
             msg = payload.get("message") or payload.get("msg") or str(payload)
+            _log_sutui_upstream_full_response(
+                "sutui", tool_name, lobster_capability_id, _sanitize_for_json(payload)
+            )
             return {"error": {"message": f"上游业务错误: {msg}"}}
         data = payload.get("data")
         if not isinstance(data, dict):
+            _log_sutui_upstream_full_response(
+                "sutui", tool_name, lobster_capability_id, _sanitize_for_json(payload)
+            )
             return {"error": {"message": f"上游 REST 无 data 对象: {str(payload)[:500]}"}}
+        _log_sutui_upstream_full_response(
+            "sutui", tool_name, lobster_capability_id, _sanitize_for_json(payload)
+        )
         return _sanitize_for_json(data)
 
 
@@ -648,7 +684,9 @@ async def _call_upstream_mcp_tool(
         # 实测 xskill MCP HTTP 在 generate 返回体序列化时抛 Decimal 错误；create/query 走 REST 稳定
         if tool_name in ("generate", "get_result"):
             api_base = os.environ.get("SUTUI_API_BASE", "https://api.xskill.ai").rstrip("/")
-            return await _call_upstream_sutui_tasks_rest(api_base, tool_name, arguments, token)
+            return await _call_upstream_sutui_tasks_rest(
+                api_base, tool_name, arguments, token, lobster_capability_id
+            )
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         init_body = {
@@ -1284,10 +1322,45 @@ def _norm_json_key(k: Any) -> str:
     return str(k).replace("_", "").lower()
 
 
+def _collect_xskill_public_url_fields_first(obj: Any, out: List[str], seen: set) -> None:
+    """xskill tasks/query 的 data 内常见显式可访问字段 public_url（优先于同对象内其它 CDN 路径）。"""
+    if isinstance(obj, dict):
+        for k in ("public_url", "publicUrl"):
+            v = obj.get(k)
+            if isinstance(v, str) and v.startswith(("http://", "https://")) and v not in seen:
+                seen.add(v)
+                out.append(v.strip())
+        for v in obj.values():
+            _collect_xskill_public_url_fields_first(v, out, seen)
+    elif isinstance(obj, list):
+        for x in obj:
+            _collect_xskill_public_url_fields_first(x, out, seen)
+
+
+def _collect_xskill_result_primary_urls(obj: Any, out: List[str], seen: set) -> None:
+    """完成态 result 对象内常见主链接（文档称结果在 result；优先于散落 image_url 正则顺序）。"""
+    if isinstance(obj, dict):
+        res = obj.get("result")
+        if isinstance(res, dict):
+            for k in ("url", "image_url", "video_url", "output_url"):
+                v = res.get(k)
+                if isinstance(v, str) and v.startswith(("http://", "https://")) and v not in seen:
+                    seen.add(v)
+                    out.append(v.strip())
+        for v in obj.values():
+            _collect_xskill_result_primary_urls(v, out, seen)
+    elif isinstance(obj, list):
+        for x in obj:
+            _collect_xskill_result_primary_urls(x, out, seen)
+
+
 def _extract_media_urls_for_auto_save(upstream_resp: Any) -> List[str]:
     """从上游 JSON 提取媒体 URL：带扩展名正则 + 常见字段递归（无扩展名 CDN 直链）。"""
     order: List[str] = []
     seen: set = set()
+    if isinstance(upstream_resp, (dict, list)):
+        _collect_xskill_public_url_fields_first(upstream_resp, order, seen)
+        _collect_xskill_result_primary_urls(upstream_resp, order, seen)
     blob = (
         json.dumps(_sanitize_for_json(upstream_resp), ensure_ascii=False)
         if isinstance(upstream_resp, (dict, list))
@@ -1362,7 +1435,7 @@ async def _auto_save_generated_assets(
             "tags": f"auto,{capability_id}",
         }
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
                 r = await client.post(f"{BASE_URL}/api/assets/save-url", json=body, headers=_backend_headers(token, request))
             if r.status_code < 400:
                 d = r.json()
