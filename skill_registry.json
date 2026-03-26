@@ -2,8 +2,9 @@
   "packages": {
     "douyin_publish": {
       "name": "发抖音",
-      "description": "一键将生成的视频/图文发布到抖音。默认已安装直接可用；未解锁「添加更多发布账号」时仅可添加 1 个账号。",
+      "description": "一键将生成的视频/图文发布到抖音。默认已安装直接可用；可添加多个发布账号。",
       "type": "builtin",
+      "store_visibility": "online",
       "default_installed": true,
       "status": "available",
       "capabilities": {},
@@ -11,17 +12,29 @@
     },
     "xiaohongshu_publish": {
       "name": "发小红书",
-      "description": "一键将视频、图文发布到小红书。默认已安装直接可用；未解锁「添加更多发布账号」时仅可添加 1 个账号。",
+      "description": "一键将视频、图文发布到小红书。默认已安装直接可用；可添加多个发布账号。",
       "type": "builtin",
+      "store_visibility": "online",
       "default_installed": true,
       "status": "available",
       "capabilities": {},
       "tags": ["publish", "xiaohongshu", "video", "image"]
     },
+    "toutiao_publish": {
+      "name": "发今日头条",
+      "description": "一键将视频、图文发布到今日头条（头条号）。默认已安装直接可用；可添加多个发布账号。",
+      "type": "builtin",
+      "store_visibility": "online",
+      "default_installed": true,
+      "status": "available",
+      "capabilities": {},
+      "tags": ["publish", "toutiao", "video", "image"]
+    },
     "wecom_reply": {
       "name": "企业微信自动回复",
       "description": "接收企业微信消息，由 AI 自动生成回复。需 1000 积分解锁后进入配置页并使用。",
       "type": "builtin",
+      "store_visibility": "debug",
       "unlock_price_credits": 1000,
       "status": "available",
       "capabilities": {},
@@ -31,6 +44,7 @@
       "name": "Facebook Messenger 客服",
       "description": "多应用 Webhook、Meta 消息自动回复；配置与回调走海外 lobster_server（在线版「Messenger」API 基址）。",
       "type": "builtin",
+      "store_visibility": "debug",
       "default_installed": true,
       "status": "available",
       "capabilities": {},
@@ -40,6 +54,7 @@
       "name": "素材剪辑",
       "description": "对素材库视频/图片做叠字、裁剪、画幅、静音、配乐、静图转视频、抽帧；需本机已安装 ffmpeg。1000 积分解锁后可在对话中用自然语言描述剪辑意图（须给出可解析参数）。",
       "type": "builtin",
+      "store_visibility": "debug",
       "unlock_price_credits": 1000,
       "status": "available",
       "capabilities": {
@@ -101,9 +116,9 @@
     },
     "add_more_publish_accounts": {
       "name": "添加更多发布账号",
-      "description": "解锁后可添加多个抖音/小红书等发布账号（未解锁时仅可添加 1 个）。",
+      "description": "（已开放）可添加多个抖音/小红书/头条等发布账号，无需积分解锁。",
       "type": "builtin",
-      "unlock_price_credits": 1000,
+      "store_visibility": "debug",
       "show_in_store": false,
       "status": "available",
       "capabilities": {},
@@ -113,6 +128,8 @@
       "name": "速推 MCP",
       "description": "图片生成、视频解析、语音合成、模型搜索等 AI 创作能力",
       "type": "upstream_mcp",
+      "store_visibility": "online",
+      "default_installed": true,
       "config": {
         "upstream_name": "sutui",
         "upstream_url_env": "CAPABILITY_SUTUI_MCP_URL",

@@ -85,10 +85,16 @@ class RecordCallIn(BaseModel):
     """若由 pre-deduct 已扣过，传本次扣费数；pre_deduct_applied=True 时不在本接口再次减余额。"""
     credits_charged: Optional[int] = None
     pre_deduct_applied: bool = False
+    """预扣金额（与 credits_charged 在预扣成功时一致）；与 credits_final 联用做差额结算。"""
+    credits_pre_deducted: Optional[int] = None
+    """速推返回的实际消耗积分；与预扣差额多退少补。"""
+    credits_final: Optional[int] = None
 
 
 class PreDeductIn(BaseModel):
     capability_id: str
+    model: Optional[str] = None
+    params: Optional[dict] = None
 
 
 @router.post("/capabilities/pre-deduct", summary="调用能力前预扣积分（不足返回 402）")
@@ -107,6 +113,31 @@ def pre_deduct(
     if not _should_deduct_credits():
         return {"credits_charged": 0, "message": "未启用积分扣减"}
     cap = db.query(CapabilityConfig).filter(CapabilityConfig.capability_id == body.capability_id).first()
+    upstream = (cap.upstream or "").strip() if cap else ""
+    upstream_tool = (cap.upstream_tool or "").strip() if cap else ""
+
+    if upstream == "sutui" and upstream_tool == "generate":
+        from ..services.sutui_pricing import estimate_pre_deduct_credits
+
+        model = (body.model or "").strip()
+        if not model:
+            raise HTTPException(
+                status_code=400,
+                detail="调用生成能力时必须提供 model 以按速推定价预扣积分。",
+            )
+        est, err = estimate_pre_deduct_credits(model, body.params if isinstance(body.params, dict) else None)
+        if err:
+            raise HTTPException(status_code=400, detail=err)
+        db.refresh(current_user)
+        if (current_user.credits or 0) < est:
+            raise HTTPException(
+                status_code=402,
+                detail=f"积分不足：本次预估需 {est} 积分（按速推模型定价），当前余额 {current_user.credits or 0}。请先充值。",
+            )
+        current_user.credits = (current_user.credits or 0) - est
+        db.commit()
+        return {"credits_charged": est}
+
     unit_credits = int(cap.unit_credits or 0) if cap else 0
     if unit_credits <= 0:
         return {"credits_charged": 0}
@@ -155,21 +186,38 @@ def record_call(
         )
     cap = db.query(CapabilityConfig).filter(CapabilityConfig.capability_id == body.capability_id).first()
     unit_credits = int(cap.unit_credits or 0) if cap else 0
-    credits_charged = body.credits_charged if body.credits_charged is not None else 0
+    credits_charged_body = body.credits_charged if body.credits_charged is not None else 0
     pre_applied = bool(getattr(body, "pre_deduct_applied", False))
+    credits_final = getattr(body, "credits_final", None)
+    credits_pre_deducted = getattr(body, "credits_pre_deducted", None)
 
-    if credits_charged > 0 and _should_deduct_credits():
-        if pre_applied:
-            pass
-        else:
-            db.refresh(current_user)
-            if (current_user.credits or 0) < credits_charged:
-                raise HTTPException(
-                    status_code=402,
-                    detail=f"积分不足：本次需 {credits_charged} 积分（速推返回消耗），当前余额 {current_user.credits or 0}。请先充值。",
-                )
-            current_user.credits = (current_user.credits or 0) - credits_charged
-    elif credits_charged == 0 and _should_deduct_credits() and unit_credits > 0:
+    credits_charged = 0
+
+    if _should_deduct_credits() and pre_applied and credits_final is not None:
+        pre = int(credits_pre_deducted if credits_pre_deducted is not None else credits_charged_body)
+        final = int(credits_final)
+        delta = final - pre
+        db.refresh(current_user)
+        if delta > 0 and (current_user.credits or 0) < delta:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"积分不足：速推实际扣费 {final}，预扣 {pre}，需补扣 {delta} 积分，"
+                    f"当前余额 {current_user.credits or 0}。请先充值。"
+                ),
+            )
+        current_user.credits = (current_user.credits or 0) - delta
+        credits_charged = final
+    elif credits_charged_body > 0 and _should_deduct_credits() and not pre_applied:
+        db.refresh(current_user)
+        if (current_user.credits or 0) < credits_charged_body:
+            raise HTTPException(
+                status_code=402,
+                detail=f"积分不足：本次需 {credits_charged_body} 积分（速推返回消耗），当前余额 {current_user.credits or 0}。请先充值。",
+            )
+        current_user.credits = (current_user.credits or 0) - credits_charged_body
+        credits_charged = credits_charged_body
+    elif credits_charged_body == 0 and _should_deduct_credits() and not pre_applied and unit_credits > 0:
         db.refresh(current_user)
         if (current_user.credits or 0) < unit_credits:
             raise HTTPException(
@@ -178,6 +226,8 @@ def record_call(
             )
         current_user.credits = (current_user.credits or 0) - unit_credits
         credits_charged = unit_credits
+    elif pre_applied and credits_final is None and credits_charged_body > 0:
+        credits_charged = credits_charged_body
     log = CapabilityCallLog(
         user_id=current_user.id,
         capability_id=body.capability_id,

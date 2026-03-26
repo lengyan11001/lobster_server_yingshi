@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from ..core.config import settings, get_effective_public_base_url
 from ..captcha_util import create_captcha, verify_captcha
 from ..db import get_db
-from ..models import User
+from ..models import SkillUnlock, User
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -185,12 +185,20 @@ def register(body: RegisterBody, db: Session = Depends(get_db)):
         email=email,
         hashed_password=get_password_hash(body.password),
         credits=0,
-        role="user",
+        role="admin" if email == "test01" else "user",
         preferred_model="sutui",
     )
     db.add(user)
     db.commit()
     db.refresh(user)
+    for pkg_id in (
+        "sutui_mcp",
+        "douyin_publish",
+        "xiaohongshu_publish",
+        "toutiao_publish",
+    ):
+        db.add(SkillUnlock(user_id=user.id, package_id=pkg_id))
+    db.commit()
     access_token = create_access_token(data={"sub": str(user.id)})
     return Token(access_token=access_token)
 

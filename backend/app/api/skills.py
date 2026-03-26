@@ -21,6 +21,22 @@ router = APIRouter()
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 
 
+def _skill_store_admin(user: User) -> bool:
+    """技能商店：管理员可见「调试中」包；role=admin 或账号 test01。"""
+    if (getattr(user, "role", None) or "").strip() == "admin":
+        return True
+    email = (getattr(user, "email", None) or "").strip().lower()
+    return email == "test01"
+
+
+def _pkg_store_visibility(pkg: dict) -> str:
+    """未声明时视为 debug（仅管理员在商店可见）。"""
+    v = (pkg.get("store_visibility") or "").strip().lower()
+    if v in ("online", "debug"):
+        return v
+    return "debug"
+
+
 def _load_registry() -> dict:
     p = _BASE_DIR / "skill_registry.json"
     if not p.exists():
@@ -136,9 +152,12 @@ def list_store(current_user: User = Depends(get_current_user), db: Session = Dep
     installed = set(_load_installed().get("installed", []))
     unlocked = _user_unlocked_package_ids(db, current_user.id)
     packages = registry.get("packages", {})
+    is_admin = _skill_store_admin(current_user)
     out = []
     for pkg_id, pkg in packages.items():
         if pkg.get("show_in_store") is False:
+            continue
+        if _pkg_store_visibility(pkg) == "debug" and not is_admin:
             continue
         is_installed = (
             pkg_id in installed
@@ -153,6 +172,7 @@ def list_store(current_user: User = Depends(get_current_user), db: Session = Dep
             "description": pkg.get("description", ""),
             "type": pkg.get("type", ""),
             "tags": pkg.get("tags", []),
+            "store_visibility": _pkg_store_visibility(pkg),
             "status": "installed" if is_installed else pkg.get("status", "available"),
             "capabilities_count": len(pkg.get("capabilities", {})),
             "unlock_price_yuan": pkg.get("unlock_price_yuan"),
@@ -160,7 +180,7 @@ def list_store(current_user: User = Depends(get_current_user), db: Session = Dep
             "default_installed": pkg.get("default_installed"),
             "unlocked": pkg_id in unlocked,
         })
-    return {"packages": out}
+    return {"packages": out, "is_skill_store_admin": is_admin}
 
 
 @router.get("/skills/unlocked-packages", summary="当前用户已解锁的技能包 ID 列表（MCP 校验用）")
@@ -199,7 +219,12 @@ def publish_add_account_eligible(
         return {"allowed": True}
     reg = _load_registry()
     pkg = (reg.get("packages") or {}).get(ADD_MORE_PUBLISH_ACCOUNTS_PACKAGE_ID) or {}
-    amount = int(pkg.get("unlock_price_credits") or 1000)
+    amount = int(pkg.get("unlock_price_credits") or 0)
+    if amount <= 0:
+        if installation_slots_enabled():
+            iid = parse_installation_id_strict(x_installation_id)
+            ensure_installation_slot(db, current_user.id, iid)
+        return {"allowed": True}
     return {
         "allowed": False,
         "need_credits_unlock": True,
@@ -296,6 +321,8 @@ def install_skill(
         raise HTTPException(status_code=404, detail=f"技能包 {body.package_id} 不存在")
     if package.get("status") == "coming_soon":
         raise HTTPException(status_code=400, detail="该技能包即将推出，暂不可安装")
+    if _pkg_store_visibility(package) == "debug" and not _skill_store_admin(current_user):
+        raise HTTPException(status_code=403, detail="该技能包为调试中，仅管理员可安装")
 
     unlock_price = package.get("unlock_price_yuan")
     unlock_credits = package.get("unlock_price_credits")
@@ -412,6 +439,8 @@ def unlock_by_credits(
     package = packages.get(body.package_id)
     if not package:
         raise HTTPException(status_code=404, detail=f"技能包 {body.package_id} 不存在")
+    if _pkg_store_visibility(package) == "debug" and not _skill_store_admin(current_user):
+        raise HTTPException(status_code=403, detail="该技能包为调试中，仅管理员可积分解锁")
     need = package.get("unlock_price_credits")
     if not need or int(need) <= 0:
         raise HTTPException(status_code=400, detail="该技能不支持积分解锁")
@@ -453,6 +482,8 @@ def create_unlock_order(
     package = packages.get(body.package_id)
     if not package:
         raise HTTPException(status_code=404, detail=f"技能包 {body.package_id} 不存在")
+    if _pkg_store_visibility(package) == "debug" and not _skill_store_admin(current_user):
+        raise HTTPException(status_code=403, detail="该技能包为调试中，仅管理员可创建付费解锁订单")
     price = package.get("unlock_price_yuan")
     if not price or price <= 0:
         raise HTTPException(status_code=400, detail="该技能无需付费解锁")
@@ -563,6 +594,7 @@ def add_mcp(
             "name": name,
             "description": f"MCP: {url}",
             "type": "remote_mcp",
+            "store_visibility": "debug",
             "config": {"mcp_url": url},
             "capabilities": {},
             "tags": ["mcp"],

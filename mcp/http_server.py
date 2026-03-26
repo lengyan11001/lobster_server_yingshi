@@ -732,7 +732,8 @@ def _is_task_still_in_progress(upstream_resp: Any) -> bool:
 
 async def _record_call(token: Optional[str], capability_id: str, success: bool, latency_ms: Optional[int],
                        request_payload: Dict, response_payload: Optional[Dict], error_message: Optional[str],
-                       credits_charged: Optional[int] = None, pre_deduct_applied: bool = False) -> None:
+                       credits_charged: Optional[int] = None, pre_deduct_applied: bool = False,
+                       credits_pre_deducted: Optional[int] = None, credits_final: Optional[int] = None) -> None:
     if not token:
         return
     body = {
@@ -744,6 +745,10 @@ async def _record_call(token: Optional[str], capability_id: str, success: bool, 
     }
     if credits_charged is not None:
         body["credits_charged"] = credits_charged
+    if credits_pre_deducted is not None:
+        body["credits_pre_deducted"] = credits_pre_deducted
+    if credits_final is not None:
+        body["credits_final"] = credits_final
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             await client.post(
@@ -1371,27 +1376,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 return [{"type": "text", "text": f"能力配置缺失 upstream_tool: {capability_id}"}], True
             upstream_name = str(cfg.get("upstream") or "sutui").strip()
             upstream_url = upstream_urls.get(upstream_name, "").strip()
-            pre_deduct_amount = 0
-            if token:
-                try:
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        pre_r = await client.post(
-                            f"{BASE_URL}/capabilities/pre-deduct",
-                            json={"capability_id": capability_id},
-                            headers=_backend_headers(token),
-                        )
-                    if pre_r.status_code == 402:
-                        detail = (pre_r.json() or {}).get("detail", "积分不足")
-                        return [{"type": "text", "text": f"积分不足，无法调用能力。{detail}"}], True
-                    if pre_r.status_code == 200:
-                        pre_deduct_amount = (pre_r.json() or {}).get("credits_charged") or 0
-                except Exception:
-                    pass
-
-            if not upstream_url:
-                return [{"type": "text", "text": f"未配置上游网关: {upstream_name}，请在 .env 或技能商店中配置"}], True
-            sutui_token = (request.headers.get("X-Sutui-Token") or "").strip() or None if request else None
-            # 规范化 payload：根据 capability_id 调用相应的规范化函数
+            # 先规范化 payload（与上游一致），再按速推官方 docs 定价预扣积分
             original_model = payload.get("model") if isinstance(payload, dict) else None
             if capability_id == "image.generate":
                 payload = _normalize_image_generate_payload(payload)
@@ -1403,7 +1388,40 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             normalized_model = payload.get("model") if isinstance(payload, dict) else None
             if original_model != normalized_model:
                 logger.info("[MCP] 模型名称映射: %s -> %s", original_model, normalized_model)
-            
+
+            pre_deduct_amount = 0
+            if token:
+                try:
+                    pre_body: Dict[str, Any] = {"capability_id": capability_id}
+                    if upstream_name == "sutui" and upstream_tool == "generate":
+                        pre_body["model"] = (payload.get("model") or "").strip()
+                        pre_body["params"] = payload
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        pre_r = await client.post(
+                            f"{BASE_URL}/capabilities/pre-deduct",
+                            json=_sanitize_for_json(pre_body),
+                            headers=_backend_headers(token),
+                        )
+                    if pre_r.status_code == 400:
+                        raw = pre_r.json() if pre_r.content else {}
+                        detail = raw.get("detail", "无法预扣积分")
+                        if isinstance(detail, list):
+                            detail = str(detail)
+                        return [{"type": "text", "text": str(detail)}], True
+                    if pre_r.status_code == 402:
+                        detail = (pre_r.json() or {}).get("detail", "积分不足")
+                        return [{"type": "text", "text": f"积分不足，无法调用能力。{detail}"}], True
+                    if pre_r.status_code == 200:
+                        pre_deduct_amount = (pre_r.json() or {}).get("credits_charged") or 0
+                except Exception as e:
+                    if upstream_name == "sutui" and upstream_tool == "generate":
+                        logger.exception("[MCP] pre-deduct 请求失败 capability_id=%s", capability_id)
+                        return [{"type": "text", "text": f"预扣积分失败，无法调用能力：{e}"}], True
+
+            if not upstream_url:
+                return [{"type": "text", "text": f"未配置上游网关: {upstream_name}，请在 .env 或技能商店中配置"}], True
+            sutui_token = (request.headers.get("X-Sutui-Token") or "").strip() or None if request else None
+
             # 检测并转存内部图片 URL 到公开 CDN（图生视频/图生图需要）
             temp_ids_to_register = []  # 在外部作用域定义，用于后续注册
             if capability_id in ("image.generate", "video.generate") and isinstance(payload, dict):
@@ -1663,17 +1681,6 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 err_obj = upstream_resp.get("error")
                 if isinstance(err_obj, dict):
                     upstream_error = str(err_obj.get("message") or "")[:500]
-            if upstream_error and pre_deduct_amount > 0 and token:
-                try:
-                    async with httpx.AsyncClient(timeout=10.0) as client:
-                        await client.post(
-                            f"{BASE_URL}/capabilities/refund",
-                            json={"capability_id": capability_id, "credits": pre_deduct_amount},
-                            headers=_backend_headers(token),
-                        )
-                except Exception:
-                    pass
-
             poll_task_id = (payload.get("task_id") or payload.get("taskId") or "").strip()
             
             # 如果是video.generate调用，从响应中提取task_id并注册临时文件
@@ -1742,40 +1749,65 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     actual_used = 0
                 else:
                     actual_used = _extract_sutui_credits_used(upstream_resp)
+
+            settle_final = 0 if upstream_error else int(actual_used)
+
             if pre_deduct_amount > 0:
-                bill_credits = pre_deduct_amount
+                if (
+                    not upstream_error
+                    and upstream_tool == "generate"
+                    and settle_final == 0
+                    and pre_deduct_amount > 0
+                ):
+                    logger.warning(
+                        "[MCP] 速推创建成功但未解析到 price/credits_used，预扣 %s 积分将全额退回，请检查上游响应或定价解析",
+                        pre_deduct_amount,
+                    )
                 pre_applied_flag = True
+                bill_credits = pre_deduct_amount
+                logger.info(
+                    "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s settle_final=%s",
+                    capability_id, pre_deduct_amount, actual_used, settle_final,
+                )
+                await _record_call(
+                    token, capability_id, not bool(upstream_error), latency_ms, payload,
+                    upstream_resp if isinstance(upstream_resp, dict) else {}, upstream_error or None,
+                    credits_charged=(bill_credits if bill_credits > 0 else None),
+                    pre_deduct_applied=pre_applied_flag,
+                    credits_pre_deducted=pre_deduct_amount,
+                    credits_final=settle_final,
+                )
             else:
                 bill_credits = actual_used
                 pre_applied_flag = False
-            logger.info(
-                "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s bill=%s pre_applied=%s",
-                capability_id, pre_deduct_amount, actual_used, bill_credits, pre_applied_flag,
-            )
-            await _record_call(
-                token, capability_id, not bool(upstream_error), latency_ms, payload,
-                upstream_resp if isinstance(upstream_resp, dict) else {}, upstream_error or None,
-                credits_charged=(bill_credits if bill_credits > 0 else None),
-                pre_deduct_applied=pre_applied_flag,
-            )
+                logger.info(
+                    "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s bill=%s pre_applied=%s",
+                    capability_id, pre_deduct_amount, actual_used, bill_credits, pre_applied_flag,
+                )
+                await _record_call(
+                    token, capability_id, not bool(upstream_error), latency_ms, payload,
+                    upstream_resp if isinstance(upstream_resp, dict) else {}, upstream_error or None,
+                    credits_charged=(bill_credits if bill_credits > 0 else None),
+                    pre_deduct_applied=pre_applied_flag,
+                )
             if (
                 upstream_tool == "generate"
                 and not upstream_error
-                and bill_credits > 0
+                and settle_final > 0
                 and isinstance(upstream_resp, dict)
             ):
                 created_tid = _extract_task_id_from_sutui_response(upstream_resp)
                 if created_tid:
-                    _remember_task_billed_credits(created_tid, bill_credits)
+                    _remember_task_billed_credits(created_tid, settle_final)
                     logger.info(
                         "[MCP] 已记录创建任务扣费 task_id=%s credits=%s（失败时凭 task_id 退款）",
                         created_tid,
-                        bill_credits,
+                        settle_final,
                     )
             logger.info("[MCP] invoke_capability 完成 capability_id=%s latency_ms=%s ok=%s", capability_id, latency_ms, not bool(upstream_error))
             data: Dict[str, Any] = {"capability_id": capability_id, "result": _redact_sensitive(upstream_resp)}
-            if bill_credits > 0:
-                data["credits_used"] = bill_credits
+            if settle_final > 0:
+                data["credits_used"] = settle_final
 
             if not upstream_error:
                 saved = await _auto_save_generated_assets(upstream_resp, capability_id, payload, token)
