@@ -187,10 +187,14 @@ def _get_token_from_request(request: Request) -> Optional[str]:
     return token or None
 
 
-def _backend_headers(token: Optional[str]) -> Dict[str, str]:
+def _backend_headers(token: Optional[str], request: Optional[Request] = None) -> Dict[str, str]:
     h = {"Content-Type": "application/json"}
     if token:
         h["Authorization"] = f"Bearer {token}"
+    if request is not None:
+        xi = (request.headers.get("X-Installation-Id") or request.headers.get("x-installation-id") or "").strip()
+        if xi:
+            h["X-Installation-Id"] = xi
     return h
 
 
@@ -202,11 +206,13 @@ def _capabilities_api_base() -> str:
     return BASE_URL.rstrip("/")
 
 
-async def _find_account_id_by_nickname(nickname: str, token: Optional[str]) -> Optional[int]:
+async def _find_account_id_by_nickname(
+    nickname: str, token: Optional[str], request: Optional[Request] = None,
+) -> Optional[int]:
     """Lookup account id by nickname from backend."""
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{BASE_URL}/api/accounts", headers=_backend_headers(token))
+            r = await client.get(f"{BASE_URL}/api/accounts", headers=_backend_headers(token, request))
         if r.status_code == 200:
             for a in r.json().get("accounts", []):
                 if a.get("nickname", "").strip() == nickname:
@@ -761,7 +767,8 @@ def _is_task_still_in_progress(upstream_resp: Any) -> bool:
 async def _record_call(token: Optional[str], capability_id: str, success: bool, latency_ms: Optional[int],
                        request_payload: Dict, response_payload: Optional[Dict], error_message: Optional[str],
                        credits_charged: Optional[int] = None, pre_deduct_applied: bool = False,
-                       credits_pre_deducted: Optional[int] = None, credits_final: Optional[int] = None) -> None:
+                       credits_pre_deducted: Optional[int] = None, credits_final: Optional[int] = None,
+                       request: Optional[Request] = None) -> None:
     if not token:
         return
     body = {
@@ -782,7 +789,7 @@ async def _record_call(token: Optional[str], capability_id: str, success: bool, 
             await client.post(
                 f"{_capabilities_api_base()}/capabilities/record-call",
                 json=_sanitize_for_json(body),
-                headers=_backend_headers(token),
+                headers=_backend_headers(token, request),
             )
     except Exception:
         pass
@@ -1275,6 +1282,7 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
 
 async def _auto_save_generated_assets(
     upstream_resp: Any, capability_id: str, payload: Dict, token: Optional[str],
+    request: Optional[Request] = None,
 ) -> List[Dict[str, str]]:
     """Extract media URLs from upstream result and auto-save as local assets."""
     if not token:
@@ -1304,7 +1312,7 @@ async def _auto_save_generated_assets(
         }
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                r = await client.post(f"{BASE_URL}/api/assets/save-url", json=body, headers=_backend_headers(token))
+                r = await client.post(f"{BASE_URL}/api/assets/save-url", json=body, headers=_backend_headers(token, request))
             if r.status_code < 400:
                 d = r.json()
                 saved.append({"asset_id": d.get("asset_id", ""), "filename": d.get("filename", ""), "media_type": mt or media_type})
@@ -1346,13 +1354,13 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         await client.get(
                             f"{BASE_URL}/api/mcp-registry/browse",
                             params={"page": str(pg)},
-                            headers=_backend_headers(token),
+                            headers=_backend_headers(token, request),
                         )
                     # Now search the cache
                     r = await client.get(
                         f"{BASE_URL}/api/mcp-registry/search",
                         params={"q": query, "page_size": "20"},
-                        headers=_backend_headers(token),
+                        headers=_backend_headers(token, request),
                     )
                 data = r.json() if r.content else {}
                 servers = data.get("servers", [])
@@ -1378,23 +1386,23 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     r = await client.post(
                         f"{BASE_URL}/skills/add-mcp",
                         json={"name": mcp_name, "url": mcp_url},
-                        headers=_backend_headers(token),
+                        headers=_backend_headers(token, request),
                     )
                 return [{"type": "text", "text": json.dumps(r.json() if r.content else {}, ensure_ascii=False, indent=2)}], r.status_code >= 400
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 if action == "list_store":
-                    r = await client.get(f"{BASE_URL}/skills/store", headers=_backend_headers(token))
+                    r = await client.get(f"{BASE_URL}/skills/store", headers=_backend_headers(token, request))
                 elif action == "list_installed":
-                    r = await client.get(f"{BASE_URL}/skills/installed", headers=_backend_headers(token))
+                    r = await client.get(f"{BASE_URL}/skills/installed", headers=_backend_headers(token, request))
                 elif action == "install":
                     if not package_id:
                         return [{"type": "text", "text": "请提供 package_id"}], True
-                    r = await client.post(f"{BASE_URL}/skills/install", json={"package_id": package_id}, headers=_backend_headers(token))
+                    r = await client.post(f"{BASE_URL}/skills/install", json={"package_id": package_id}, headers=_backend_headers(token, request))
                 elif action == "uninstall":
                     if not package_id:
                         return [{"type": "text", "text": "请提供 package_id"}], True
-                    r = await client.post(f"{BASE_URL}/skills/uninstall", json={"package_id": package_id}, headers=_backend_headers(token))
+                    r = await client.post(f"{BASE_URL}/skills/uninstall", json={"package_id": package_id}, headers=_backend_headers(token, request))
                 else:
                     return [{"type": "text", "text": f"未知操作: {action}。支持: list_store, list_installed, install, uninstall, search_online, add_mcp"}], True
             return [{"type": "text", "text": json.dumps(r.json() if r.content else {}, ensure_ascii=False, indent=2)}], r.status_code >= 400
@@ -1438,7 +1446,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         pre_r = await client.post(
                             f"{_capabilities_api_base()}/capabilities/pre-deduct",
                             json=_sanitize_for_json(pre_body),
-                            headers=_backend_headers(token),
+                            headers=_backend_headers(token, request),
                         )
                     if pre_r.status_code == 400:
                         raw = pre_r.json() if pre_r.content else {}
@@ -1781,7 +1789,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                             await client.post(
                                 f"{_capabilities_api_base()}/capabilities/refund",
                                 json={"capability_id": capability_id, "credits": refund_amt},
-                                headers=_backend_headers(token),
+                                headers=_backend_headers(token, request),
                             )
                         logger.info(
                             "[MCP] 任务终态失败退款 task_id=%s credits=%s（与速推创建任务扣费对应）",
@@ -1844,6 +1852,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     pre_deduct_applied=pre_applied_flag,
                     credits_pre_deducted=pre_deduct_amount,
                     credits_final=settle_final,
+                    request=request,
                 )
             else:
                 bill_credits = actual_used
@@ -1857,6 +1866,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     upstream_resp if isinstance(upstream_resp, dict) else {}, upstream_error or None,
                     credits_charged=(bill_credits if bill_credits > 0 else None),
                     pre_deduct_applied=pre_applied_flag,
+                    request=request,
                 )
             if (
                 upstream_tool == "generate"
@@ -1878,7 +1888,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 data["credits_used"] = settle_final
 
             if not upstream_error:
-                saved = await _auto_save_generated_assets(upstream_resp, capability_id, payload, token)
+                saved = await _auto_save_generated_assets(upstream_resp, capability_id, payload, token, request=request)
                 if saved:
                     data["saved_assets"] = saved
 
@@ -1896,7 +1906,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 "prompt": args.get("prompt", ""),
             }
             async with httpx.AsyncClient(timeout=120.0) as client:
-                r = await client.post(f"{BASE_URL}/api/assets/save-url", json=body, headers=_backend_headers(token))
+                r = await client.post(f"{BASE_URL}/api/assets/save-url", json=body, headers=_backend_headers(token, request))
             data = r.json() if r.content else {}
             text = json.dumps(data, ensure_ascii=False, indent=2)
             return [{"type": "text", "text": text}], r.status_code >= 400
@@ -1909,14 +1919,14 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 params_qs["q"] = args["query"]
             params_qs["limit"] = str(args.get("limit", 20))
             async with httpx.AsyncClient(timeout=30.0) as client:
-                r = await client.get(f"{BASE_URL}/api/assets", params=params_qs, headers=_backend_headers(token))
+                r = await client.get(f"{BASE_URL}/api/assets", params=params_qs, headers=_backend_headers(token, request))
             data = r.json() if r.content else {}
             text = json.dumps(data, ensure_ascii=False, indent=2)
             return [{"type": "text", "text": text}], r.status_code >= 400
 
         if name == "list_publish_accounts":
             async with httpx.AsyncClient(timeout=30.0) as client:
-                r = await client.get(f"{BASE_URL}/api/accounts", headers=_backend_headers(token))
+                r = await client.get(f"{BASE_URL}/api/accounts", headers=_backend_headers(token, request))
             data = r.json() if r.content else {}
             text = json.dumps(data, ensure_ascii=False, indent=2)
             return [{"type": "text", "text": text}], r.status_code >= 400
@@ -1925,11 +1935,11 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             nickname = (args.get("account_nickname") or "").strip()
             if not nickname:
                 return [{"type": "text", "text": "请提供 account_nickname"}], True
-            acct_id = await _find_account_id_by_nickname(nickname, token)
+            acct_id = await _find_account_id_by_nickname(nickname, token, request)
             if not acct_id:
                 return [{"type": "text", "text": f"找不到昵称为「{nickname}」的账号，请先在「发布管理」中添加"}], True
             async with httpx.AsyncClient(timeout=60.0) as client:
-                r = await client.post(f"{BASE_URL}/api/accounts/{acct_id}/open-browser", headers=_backend_headers(token))
+                r = await client.post(f"{BASE_URL}/api/accounts/{acct_id}/open-browser", headers=_backend_headers(token, request))
             data = r.json() if r.content else {}
             text = json.dumps(data, ensure_ascii=False, indent=2)
             return [{"type": "text", "text": text}], r.status_code >= 400
@@ -1938,11 +1948,11 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             nickname = (args.get("account_nickname") or "").strip()
             if not nickname:
                 return [{"type": "text", "text": "请提供 account_nickname"}], True
-            acct_id = await _find_account_id_by_nickname(nickname, token)
+            acct_id = await _find_account_id_by_nickname(nickname, token, request)
             if not acct_id:
                 return [{"type": "text", "text": f"找不到昵称为「{nickname}」的账号"}], True
             async with httpx.AsyncClient(timeout=30.0) as client:
-                r = await client.get(f"{BASE_URL}/api/accounts/{acct_id}/login-status", headers=_backend_headers(token))
+                r = await client.get(f"{BASE_URL}/api/accounts/{acct_id}/login-status", headers=_backend_headers(token, request))
             data = r.json() if r.content else {}
             text = json.dumps(data, ensure_ascii=False, indent=2)
             return [{"type": "text", "text": text}], r.status_code >= 400
@@ -1965,7 +1975,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 "options": args.get("options") if isinstance(args.get("options"), dict) else {},
             }
             async with httpx.AsyncClient(timeout=180.0) as client:
-                r = await client.post(f"{BASE_URL}/api/publish", json=body, headers=_backend_headers(token))
+                r = await client.post(f"{BASE_URL}/api/publish", json=body, headers=_backend_headers(token, request))
             data = r.json() if r.content else {}
             logger.info("[MCP] publish_content 后端响应: status=%s body_status=%s",
                         r.status_code, data.get("status") if isinstance(data, dict) else None)

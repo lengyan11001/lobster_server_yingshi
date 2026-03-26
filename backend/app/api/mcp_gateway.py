@@ -100,6 +100,10 @@ async def mcp_gateway_proxy(request: Request) -> Response:
     if token:
         headers["Authorization"] = f"Bearer {token}"
         headers["x-user-authorization"] = f"Bearer {token}"
+    # 安装槽：显式透传，避免个别 ASGI/代理层对 dict(headers) 的键名处理差异导致丢失
+    xi = (request.headers.get("X-Installation-Id") or request.headers.get("x-installation-id") or "").strip()
+    if xi:
+        headers["X-Installation-Id"] = xi
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             r = await client.post(MCP_BACKEND_URL, content=body, headers=headers)
