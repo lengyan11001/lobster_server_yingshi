@@ -209,6 +209,15 @@ class SaveAssetReq(BaseModel):
     model: Optional[str] = None
 
 
+_SAVE_URL_DOWNLOADER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+}
+
+
 @router.post("/api/assets/save-url", summary="从 URL 保存素材")
 async def save_asset_from_url(
     body: SaveAssetReq,
@@ -216,12 +225,25 @@ async def save_asset_from_url(
     db: Session = Depends(get_db),
 ):
     try:
-        async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as c:
-            resp = await c.get(body.url)
+        async with httpx.AsyncClient(
+            timeout=120.0,
+            follow_redirects=True,
+            trust_env=False,
+        ) as c:
+            resp = await c.get(body.url, headers=_SAVE_URL_DOWNLOADER_HEADERS)
             resp.raise_for_status()
             data = resp.content
+    except httpx.HTTPStatusError as e:
+        snip = (e.response.text or "")[:300]
+        raise HTTPException(
+            status_code=400,
+            detail=f"下载失败: HTTP {e.response.status_code} {snip!r}",
+        )
     except Exception as e:
-        raise HTTPException(400, detail=f"下载失败: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"下载失败: {type(e).__name__}: {e!s}",
+        )
 
     url_path = body.url.split("?")[0].split("#")[0]
     url_ext = Path(url_path).suffix.lower() if "." in url_path.split("/")[-1] else ""
