@@ -1,4 +1,4 @@
-"""鉴权后按用户是否管理员选择速推 Token 池，转发 OpenAI 兼容 chat/completions 至 api.xskill.ai。"""
+"""鉴权后统一使用服务器赞助/管理端速推 Token 池，转发 OpenAI 兼容 chat/completions 至 api.xskill.ai。"""
 from __future__ import annotations
 
 import json
@@ -15,9 +15,14 @@ from mcp.sutui_tokens import next_sutui_server_token
 from ..core.config import settings
 from ..db import get_db
 from ..models import User
-from ..services.sutui_pricing import estimate_credits_from_pricing, estimate_pre_deduct_credits, fetch_model_pricing
+from ..services.credit_ledger import append_credit_ledger
+from ..services.sutui_pricing import (
+    estimate_credits_from_pricing,
+    estimate_pre_deduct_credits,
+    extract_upstream_reported_credits,
+    fetch_model_pricing,
+)
 from .auth import get_current_user
-from .skills import _skill_store_admin
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +38,16 @@ def _should_deduct_credits() -> bool:
     return edition == "online" and getattr(settings, "lobster_independent_auth", True)
 
 
-def _credits_for_sutui_chat(model: str, usage: Optional[dict]) -> int:
-    """按速推 docs 定价 + usage 计算本次对话扣分数。"""
+def _credits_for_sutui_chat(
+    model: str,
+    usage: Optional[dict],
+    response_body: Optional[Dict[str, Any]] = None,
+) -> int:
+    """按上游响应内嵌的本次消耗（若有）优先；否则按速推 docs 定价 + usage 计算。"""
+    if response_body and isinstance(response_body, dict):
+        reported = extract_upstream_reported_credits(response_body)
+        if reported > 0:
+            return reported
     pricing = fetch_model_pricing(model)
     if not pricing:
         est, err = estimate_pre_deduct_credits(model, None)
@@ -55,10 +68,16 @@ def _credits_for_sutui_chat(model: str, usage: Optional[dict]) -> int:
     return est
 
 
-def _apply_chat_deduct(db: Session, current_user: User, model: str, usage: Optional[dict]) -> None:
+def _apply_chat_deduct(
+    db: Session,
+    current_user: User,
+    model: str,
+    usage: Optional[dict],
+    response_body: Optional[Dict[str, Any]] = None,
+) -> None:
     if not _should_deduct_credits():
         return
-    credits = _credits_for_sutui_chat(model, usage)
+    credits = _credits_for_sutui_chat(model, usage, response_body)
     if credits <= 0:
         return
     db.refresh(current_user)
@@ -73,6 +92,17 @@ def _apply_chat_deduct(db: Session, current_user: User, model: str, usage: Optio
         )
         return
     current_user.credits = bal - credits
+    bal_after = int(current_user.credits or 0)
+    append_credit_ledger(
+        db,
+        current_user.id,
+        -credits,
+        "sutui_chat",
+        bal_after,
+        description=f"速推 LLM 对话扣费 model={model}",
+        ref_type="sutui_chat",
+        meta={"model": model, "usage": usage},
+    )
     db.commit()
     logger.info("[sutui-chat] 已扣积分 user_id=%s model=%s credits=%s", current_user.id, model, credits)
 
@@ -88,12 +118,11 @@ async def sutui_chat_completions(
     except Exception:
         raise HTTPException(status_code=400, detail="请求体须为 JSON")
 
-    admin = _skill_store_admin(current_user)
-    token = await next_sutui_server_token(is_admin=admin)
+    token = await next_sutui_server_token(is_admin=True)
     if not token:
         raise HTTPException(
             status_code=503,
-            detail="服务器未配置速推 Token 池（用户池/管理员池均为空）",
+            detail="服务器未配置速推 Token 池（请配置 SUTUI_SERVER_TOKENS_ADMIN / SUTUI_SERVER_TOKEN_ADMIN 或兼容项 SUTUI_SERVER_TOKEN）",
         )
 
     stream = bool(body.get("stream"))
@@ -107,8 +136,23 @@ async def sutui_chat_completions(
     model_id = (body.get("model") or "").strip()
 
     if not stream:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            r = await client.post(url, json=body, headers=headers)
+        try:
+            async with httpx.AsyncClient(timeout=120.0, trust_env=True) as client:
+                r = await client.post(url, json=body, headers=headers)
+        except httpx.ConnectError as e:
+            logger.exception("[sutui-chat] 上游连接失败（出网/DNS/防火墙/上游不可达） url=%s", url)
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"无法连接速推 LLM 上游 {_api_base()}（chat/completions）。"
+                    f"请在服务器上检查：安全组/防火墙是否放行 HTTPS 出站、DNS 能否解析该域名、"
+                    f"是否需要 HTTP_PROXY；也可在本机执行 curl -I {_api_base()} 验证。"
+                    f" 原始错误: {e!s}"
+                )[:2000],
+            )
+        except httpx.TimeoutException as e:
+            logger.exception("[sutui-chat] 上游请求超时 url=%s", url)
+            raise HTTPException(status_code=504, detail=f"速推 LLM 上游响应超时: {e!s}"[:2000])
         try:
             data = r.json()
         except Exception:
@@ -116,21 +160,50 @@ async def sutui_chat_completions(
 
         if r.status_code == 200 and model_id:
             usage = data.get("usage") if isinstance(data, dict) else None
-            _apply_chat_deduct(db, current_user, model_id, usage if isinstance(usage, dict) else None)
+            _apply_chat_deduct(
+                db,
+                current_user,
+                model_id,
+                usage if isinstance(usage, dict) else None,
+                data if isinstance(data, dict) else None,
+            )
 
         return JSONResponse(content=data, status_code=r.status_code)
 
     # 流式：上游不在此返回完整 usage，扣费与「非流式」一致请用 stream=false；此处暂不扣积分以免失败无法回退
 
     async def gen() -> AsyncIterator[bytes]:
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("POST", url, json=body, headers=headers) as resp:
-                if resp.status_code >= 400:
-                    txt = (await resp.aread()).decode("utf-8", errors="replace")
-                    err = json.dumps({"error": {"message": txt[:2000], "status": resp.status_code}}, ensure_ascii=False)
-                    yield f"data: {err}\n\n".encode("utf-8")
-                    return
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
+        try:
+            async with httpx.AsyncClient(timeout=300.0, trust_env=True) as client:
+                async with client.stream("POST", url, json=body, headers=headers) as resp:
+                    if resp.status_code >= 400:
+                        txt = (await resp.aread()).decode("utf-8", errors="replace")
+                        err = json.dumps({"error": {"message": txt[:2000], "status": resp.status_code}}, ensure_ascii=False)
+                        yield f"data: {err}\n\n".encode("utf-8")
+                        return
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+        except httpx.ConnectError as e:
+            logger.exception("[sutui-chat] 流式上游连接失败 url=%s", url)
+            err = json.dumps(
+                {
+                    "error": {
+                        "message": (
+                            f"无法连接速推 LLM 上游 {_api_base()}。请检查服务器 HTTPS 出站与 DNS。"
+                            f" 原始错误: {e!s}"
+                        )[:2000],
+                        "status": 502,
+                    }
+                },
+                ensure_ascii=False,
+            )
+            yield f"data: {err}\n\n".encode("utf-8")
+        except httpx.TimeoutException as e:
+            logger.exception("[sutui-chat] 流式上游超时 url=%s", url)
+            err = json.dumps(
+                {"error": {"message": f"速推 LLM 上游超时: {e!s}"[:2000], "status": 504}},
+                ensure_ascii=False,
+            )
+            yield f"data: {err}\n\n".encode("utf-8")
 
     return StreamingResponse(gen(), media_type="text/event-stream")

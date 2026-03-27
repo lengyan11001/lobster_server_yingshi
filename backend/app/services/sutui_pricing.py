@@ -1,6 +1,7 @@
 """速推/xskill：从官方 docs 接口读取模型定价并估算预扣积分（与 model-pricing-guide.md 一致）。"""
 from __future__ import annotations
 
+import json
 import math
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -141,3 +142,49 @@ def estimate_pre_deduct_credits(model_id: str, params: Optional[dict]) -> Tuple[
     if est <= 0:
         return 0, "该模型定价无效，请联系管理员配置。"
     return est, None
+
+
+def _dict_looks_like_account_balance(d: dict) -> bool:
+    """含余额语义时，避免把字段名 credits 误当作「本次消耗」（与 mcp/http_server 一致）。"""
+    kl = {str(k).lower() for k in d}
+    return bool(kl & {"balance", "remaining", "remaining_credits", "total_balance", "available", "points"})
+
+
+def extract_upstream_reported_credits(obj: Any, _depth: int = 0) -> int:
+    """
+    从速推 chat/completions 或任务类完整 JSON 中解析「本次消耗积分」。
+    与 mcp/http_server._extract_sutui_credits_used 字段集合对齐；优先于 docs 定价推算。
+    """
+    if _depth > 42:
+        return 0
+    best = 0
+    if isinstance(obj, dict):
+        balance_shape = _dict_looks_like_account_balance(obj)
+        for k, v in obj.items():
+            lk = str(k).lower()
+            if lk in (
+                "credits_used",
+                "credits_charged",
+                "credit_cost",
+                "consumed_credits",
+                "usage_credits",
+                "cost",
+                "price",
+            ):
+                if isinstance(v, (int, float)) and v > 0:
+                    best = max(best, int(v))
+            elif lk == "credits" and isinstance(v, (int, float)) and v > 0 and not balance_shape:
+                best = max(best, int(v))
+            elif isinstance(v, (dict, list)):
+                best = max(best, extract_upstream_reported_credits(v, _depth + 1))
+            elif isinstance(v, str):
+                s = v.strip()
+                if s.startswith("{"):
+                    try:
+                        best = max(best, extract_upstream_reported_credits(json.loads(s), _depth + 1))
+                    except Exception:
+                        pass
+    elif isinstance(obj, list):
+        for it in obj:
+            best = max(best, extract_upstream_reported_credits(it, _depth + 1))
+    return best

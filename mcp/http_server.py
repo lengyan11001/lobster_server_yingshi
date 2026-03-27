@@ -1737,8 +1737,9 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
             if not upstream_url:
                 return [{"type": "text", "text": f"未配置上游网关: {upstream_name}，请在 .env 或技能商店中配置"}], True
-            sutui_token = (request.headers.get("X-Sutui-Token") or "").strip() or None if request else None
-            is_admin_for_pool = await _fetch_is_skill_store_admin(token)
+            # 统一走赞助/管理端速推 Token 池；不再使用客户端 X-Sutui-Token（与用户池解耦，算力由服务器池出）
+            sutui_token = None
+            is_admin_for_pool = True
 
             # 检测并转存内部图片 URL 到公开 CDN（图生视频/图生图需要）
             temp_ids_to_register = []  # 在外部作用域定义，用于后续注册

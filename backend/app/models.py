@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -280,4 +280,24 @@ class SkillUnlockOrder(Base):
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)  # pending, paid, cancelled
     out_trade_no: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CreditLedger(Base):
+    """积分流水：预扣、结算（实扣/多退少补）、退款、充值、技能解锁、对话扣费等每次变动一行。"""
+
+    __tablename__ = "credit_ledger"
+    __table_args__ = (Index("ix_credit_ledger_user_created", "user_id", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    delta: Mapped[int] = mapped_column(Integer, nullable=False)
+    balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    # entry_type: pre_deduct | settle | refund | recharge | skill_unlock | sutui_chat | publish_refund | unit_deduct
+    entry_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+
+    description: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    ref_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    ref_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

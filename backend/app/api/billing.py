@@ -16,7 +16,8 @@ from sqlalchemy.orm import Session
 from ..core.config import settings, get_effective_public_base_url
 from ..db import get_db
 from .auth import get_current_user
-from ..models import RechargeOrder, User, CapabilityCallLog
+from ..models import CapabilityCallLog, CreditLedger, RechargeOrder, User
+from ..services.credit_ledger import append_credit_ledger
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,22 @@ def _apply_wechat_paid_to_order(
     user = db.query(User).filter(User.id == order.user_id).first()
     if user:
         user.credits = (user.credits or 0) + order.credits
+        bal = int(user.credits or 0)
+        append_credit_ledger(
+            db,
+            user.id,
+            int(order.credits or 0),
+            "recharge",
+            bal,
+            description="充值到账（微信支付）",
+            ref_type="recharge_order",
+            ref_id=(order.out_trade_no or "")[:128],
+            meta={
+                "order_id": order.id,
+                "amount_fen": paid_total_fen,
+                "wechat_transaction_id": wechat_transaction_id,
+            },
+        )
     order.status = "paid"
     order.paid_at = datetime.utcnow()
     db.commit()
@@ -249,6 +266,43 @@ def get_credit_history(
     off = max(0, offset)
     n = min(max(limit, 1), 200)
     return {"items": out[off : off + n], "total": total}
+
+
+@router.get("/api/billing/credit-ledger", summary="积分流水（预扣/结算/退款/充值等，一行一条）")
+def get_credit_ledger(
+    limit: int = 100,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """完整审计流水：与 users.credits 变动一一对应（历史数据在表上线前为空）。"""
+    q = db.query(CreditLedger).filter(CreditLedger.user_id == current_user.id)
+    total = q.count()
+    off = max(0, offset)
+    n = min(max(limit, 1), 500)
+    rows = (
+        q.order_by(CreditLedger.created_at.desc())
+        .offset(off)
+        .limit(n)
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "delta": r.delta,
+                "balance_after": r.balance_after,
+                "entry_type": r.entry_type,
+                "description": r.description or "",
+                "ref_type": r.ref_type or "",
+                "ref_id": r.ref_id or "",
+                "meta": r.meta,
+                "time": r.created_at.isoformat() if r.created_at else "",
+            }
+            for r in rows
+        ],
+        "total": total,
+    }
 
 
 class RechargeCreateBody(BaseModel):
@@ -681,7 +735,20 @@ def complete_recharge(
     user = db.query(User).filter(User.id == order.user_id).first()
     if not user:
         raise HTTPException(status_code=500, detail="用户不存在")
-    user.credits = (user.credits or 0) + order.credits
+    add_credits = int(order.credits or 0)
+    user.credits = (user.credits or 0) + add_credits
+    bal = int(user.credits or 0)
+    append_credit_ledger(
+        db,
+        user.id,
+        add_credits,
+        "recharge",
+        bal,
+        description="充值到账（管理员 complete）",
+        ref_type="recharge_order",
+        ref_id=(order.out_trade_no or "")[:128],
+        meta={"order_id": order.id, "source": "admin_complete"},
+    )
     order.status = "paid"
     from datetime import datetime
     order.paid_at = datetime.utcnow()

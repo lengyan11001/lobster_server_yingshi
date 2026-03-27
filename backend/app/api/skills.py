@@ -14,6 +14,7 @@ from ..core.config import settings
 from ..db import get_db
 from .auth import get_current_user
 from ..models import CapabilityConfig, SkillUnlock, SkillUnlockOrder, User
+from ..services.credit_ledger import append_credit_ledger
 from .installation_slots import ensure_installation_slot, installation_slots_enabled, parse_installation_id_strict
 
 router = APIRouter()
@@ -463,6 +464,18 @@ def unlock_by_credits(
             detail=f"积分不足：解锁需 {need} 积分，当前余额 {current_user.credits or 0}。请先充值。",
         )
     current_user.credits = (current_user.credits or 0) - need
+    bal = int(current_user.credits or 0)
+    append_credit_ledger(
+        db,
+        current_user.id,
+        -need,
+        "skill_unlock",
+        bal,
+        description=f"积分解锁技能 {package.get('name', body.package_id)}",
+        ref_type="skill_package",
+        ref_id=(body.package_id or "")[:128],
+        meta={"package_id": body.package_id, "need_credits": need},
+    )
     db.add(SkillUnlock(user_id=current_user.id, package_id=body.package_id))
     if installation_slots_enabled():
         iid = parse_installation_id_strict(x_installation_id)

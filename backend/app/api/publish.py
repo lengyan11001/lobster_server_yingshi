@@ -15,6 +15,7 @@ from .auth import get_current_user
 from .installation_slots import ensure_installation_slot, installation_slots_enabled, parse_installation_id_strict
 from ..db import get_db
 from ..models import Asset, CapabilityCallLog, PublishAccount, PublishTask, SkillUnlock, User
+from ..services.credit_ledger import append_credit_ledger
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -452,6 +453,18 @@ async def create_publish_task(
     if credits_charged > 0 and task.status != "success":
         db.refresh(current_user)
         current_user.credits = (current_user.credits or 0) + credits_charged
+        bal = int(current_user.credits or 0)
+        append_credit_ledger(
+            db,
+            current_user.id,
+            credits_charged,
+            "publish_refund",
+            bal,
+            description="发布失败退还积分",
+            ref_type="publish_task",
+            ref_id=str(task.id),
+            meta={"asset_id": body.asset_id, "status": task.status},
+        )
         db.commit()
         credits_charged = 0
     elif credits_charged > 0:

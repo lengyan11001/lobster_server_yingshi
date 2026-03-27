@@ -9,6 +9,7 @@ from ..core.config import settings
 from ..db import get_db
 from .auth import get_current_user
 from ..models import CapabilityCallLog, CapabilityConfig, User
+from ..services.credit_ledger import append_credit_ledger
 from .installation_slots import installation_slots_enabled, parse_installation_id_strict
 from .skills import user_can_use_capability
 
@@ -135,6 +136,21 @@ def pre_deduct(
                 detail=f"积分不足：本次预估需 {est} 积分（按速推模型定价），当前余额 {current_user.credits or 0}。请先充值。",
             )
         current_user.credits = (current_user.credits or 0) - est
+        bal = int(current_user.credits or 0)
+        append_credit_ledger(
+            db,
+            current_user.id,
+            -est,
+            "pre_deduct",
+            bal,
+            description="能力预扣（按模型估价）",
+            ref_type="capability",
+            meta={
+                "capability_id": body.capability_id,
+                "model": model,
+                "pre_estimated": est,
+            },
+        )
         db.commit()
         return {"credits_charged": est}
 
@@ -148,6 +164,17 @@ def pre_deduct(
             detail=f"积分不足：本次需 {unit_credits} 积分，当前余额 {current_user.credits or 0}。请先充值。",
         )
     current_user.credits = (current_user.credits or 0) - unit_credits
+    bal = int(current_user.credits or 0)
+    append_credit_ledger(
+        db,
+        current_user.id,
+        -unit_credits,
+        "pre_deduct",
+        bal,
+        description="能力预扣（按 unit_credits）",
+        ref_type="capability",
+        meta={"capability_id": body.capability_id, "unit_credits": unit_credits},
+    )
     db.commit()
     return {"credits_charged": unit_credits}
 
@@ -166,7 +193,19 @@ def refund_credits(
     if not _should_deduct_credits() or body.credits <= 0:
         return {"ok": True}
     db.refresh(current_user)
-    current_user.credits = (current_user.credits or 0) + body.credits
+    refund_amt = int(body.credits)
+    current_user.credits = (current_user.credits or 0) + refund_amt
+    bal = int(current_user.credits or 0)
+    append_credit_ledger(
+        db,
+        current_user.id,
+        refund_amt,
+        "refund",
+        bal,
+        description="预扣/任务失败退款",
+        ref_type="capability",
+        meta={"capability_id": body.capability_id, "refund_credits": refund_amt},
+    )
     db.commit()
     return {"ok": True, "refunded": body.credits}
 
@@ -192,12 +231,15 @@ def record_call(
     credits_pre_deducted = getattr(body, "credits_pre_deducted", None)
 
     credits_charged = 0
+    db.refresh(current_user)
+    balance_before = int(current_user.credits or 0)
+    ledger_kind: Optional[str] = None
+    ledger_meta: Optional[dict] = None
 
     if _should_deduct_credits() and pre_applied and credits_final is not None:
         pre = int(credits_pre_deducted if credits_pre_deducted is not None else credits_charged_body)
         final = int(credits_final)
         delta = final - pre
-        db.refresh(current_user)
         if delta > 0 and (current_user.credits or 0) < delta:
             raise HTTPException(
                 status_code=402,
@@ -208,8 +250,14 @@ def record_call(
             )
         current_user.credits = (current_user.credits or 0) - delta
         credits_charged = final
+        ledger_kind = "settle"
+        ledger_meta = {
+            "capability_id": body.capability_id,
+            "pre_deducted": pre,
+            "final": final,
+            "delta_settle": -delta,
+        }
     elif credits_charged_body > 0 and _should_deduct_credits() and not pre_applied:
-        db.refresh(current_user)
         if (current_user.credits or 0) < credits_charged_body:
             raise HTTPException(
                 status_code=402,
@@ -217,8 +265,9 @@ def record_call(
             )
         current_user.credits = (current_user.credits or 0) - credits_charged_body
         credits_charged = credits_charged_body
+        ledger_kind = "direct_charge"
+        ledger_meta = {"capability_id": body.capability_id, "credits_charged": credits_charged_body}
     elif credits_charged_body == 0 and _should_deduct_credits() and not pre_applied and unit_credits > 0:
-        db.refresh(current_user)
         if (current_user.credits or 0) < unit_credits:
             raise HTTPException(
                 status_code=402,
@@ -226,6 +275,8 @@ def record_call(
             )
         current_user.credits = (current_user.credits or 0) - unit_credits
         credits_charged = unit_credits
+        ledger_kind = "unit_charge"
+        ledger_meta = {"capability_id": body.capability_id, "unit_credits": unit_credits}
     elif pre_applied and credits_final is None and credits_charged_body > 0:
         credits_charged = credits_charged_body
     log = CapabilityCallLog(
@@ -244,6 +295,25 @@ def record_call(
         chat_context_id=(body.chat_context_id or "")[:128] or None,
     )
     db.add(log)
+    db.flush()
+    balance_after = int(current_user.credits or 0)
+    ldelta = balance_after - balance_before
+    if ledger_kind:
+        append_credit_ledger(
+            db,
+            current_user.id,
+            ldelta,
+            ledger_kind,
+            balance_after,
+            description=f"能力调用结算 {body.capability_id}",
+            ref_type="capability_call_log",
+            ref_id=str(log.id),
+            meta={
+                **(ledger_meta or {}),
+                "success": body.success,
+                "credits_charged": credits_charged,
+            },
+        )
     db.commit()
     db.refresh(log)
     return {"id": log.id, "capability_id": log.capability_id, "success": log.success, "credits_charged": credits_charged}
