@@ -1682,17 +1682,20 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 logger.info("[MCP] 模型名称映射: %s -> %s", original_model, normalized_model)
 
             pre_deduct_amount = 0
+            billing_idem = str(uuid.uuid4())
             if token:
                 try:
                     pre_body: Dict[str, Any] = {"capability_id": capability_id}
                     if upstream_name == "sutui" and upstream_tool == "generate":
                         pre_body["model"] = (payload.get("model") or "").strip()
                         pre_body["params"] = payload
+                    _pre_hdr = dict(_backend_headers(token, request))
+                    _pre_hdr["X-Billing-Idempotency-Key"] = billing_idem
                     async with httpx.AsyncClient(timeout=30.0) as client:
                         pre_r = await client.post(
                             f"{_capabilities_api_base()}/capabilities/pre-deduct",
                             json=_sanitize_for_json(pre_body),
-                            headers=_backend_headers(token, request),
+                            headers=_pre_hdr,
                         )
                     if pre_r.status_code == 400:
                         raw = pre_r.json() if pre_r.content else {}
@@ -2088,9 +2091,15 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     )
                 pre_applied_flag = True
                 bill_credits = pre_deduct_amount
+                if upstream_error:
+                    cf_out: Optional[int] = 0
+                elif int(actual_used) == int(pre_deduct_amount):
+                    cf_out = None
+                else:
+                    cf_out = int(actual_used)
                 logger.info(
-                    "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s settle_final=%s",
-                    capability_id, pre_deduct_amount, actual_used, settle_final,
+                    "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s settle_final=%s credits_final_out=%s",
+                    capability_id, pre_deduct_amount, actual_used, settle_final, cf_out,
                 )
                 await _record_call(
                     token, capability_id, not bool(upstream_error), latency_ms, payload,
@@ -2098,7 +2107,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     credits_charged=(bill_credits if bill_credits > 0 else None),
                     pre_deduct_applied=pre_applied_flag,
                     credits_pre_deducted=pre_deduct_amount,
-                    credits_final=settle_final,
+                    credits_final=cf_out,
                     request=request,
                 )
             else:

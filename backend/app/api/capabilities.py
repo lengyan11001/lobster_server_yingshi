@@ -1,14 +1,17 @@
 """Capabilities: list available capabilities and call logs；调用时按 unit_credits 扣积分（与速推同扣）。付费技能仅已解锁用户可用。"""
+import json
+from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..core.config import settings
 from ..db import get_db
 from .auth import get_current_user
-from ..models import CapabilityCallLog, CapabilityConfig, User
+from ..models import BillingIdempotency, CapabilityCallLog, CapabilityConfig, User
 from ..services.credit_ledger import append_credit_ledger
 from .installation_slots import installation_slots_enabled, parse_installation_id_strict
 from .skills import user_can_use_capability
@@ -112,6 +115,56 @@ class PreDeductIn(BaseModel):
     params: Optional[dict] = None
 
 
+def _billing_idempotency_key(request: Request) -> str:
+    return (
+        (request.headers.get("X-Billing-Idempotency-Key") or request.headers.get("X-Idempotency-Key") or "")
+        .strip()[:128]
+    )
+
+
+def _pre_deduct_idempotent_cached(
+    db: Session, user_id: int, idem_key: str
+) -> Optional[dict]:
+    if not idem_key:
+        return None
+    row = (
+        db.query(BillingIdempotency)
+        .filter(
+            BillingIdempotency.user_id == user_id,
+            BillingIdempotency.key == idem_key,
+            BillingIdempotency.endpoint == "pre_deduct",
+        )
+        .first()
+    )
+    if not row:
+        return None
+    if datetime.utcnow() - row.created_at > timedelta(minutes=10):
+        return None
+    try:
+        return json.loads(row.response_json)
+    except Exception:
+        return None
+
+
+def _pre_deduct_idempotent_store(db: Session, user_id: int, idem_key: str, payload: dict) -> None:
+    if not idem_key:
+        return
+    try:
+        db.add(
+            BillingIdempotency(
+                user_id=user_id,
+                key=idem_key,
+                endpoint="pre_deduct",
+                response_json=json.dumps(payload, ensure_ascii=False),
+            )
+        )
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+    except Exception:
+        db.rollback()
+
+
 @router.post("/capabilities/pre-deduct", summary="调用能力前预扣积分（不足返回 402）")
 def pre_deduct(
     body: PreDeductIn,
@@ -120,6 +173,7 @@ def pre_deduct(
     db: Session = Depends(get_db),
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
+    idem_key = _billing_idempotency_key(request)
     iid = _installation_id_for_capability_checks(x_installation_id)
     if not user_can_use_capability(db, current_user.id, body.capability_id, iid):
         raise HTTPException(
@@ -130,6 +184,10 @@ def pre_deduct(
         return {"credits_charged": 0, "message": "未启用积分扣减"}
     if not _billing_request_may_mutate_balance(request):
         return {"credits_charged": 0, "billing_skipped": True}
+    if idem_key:
+        cached = _pre_deduct_idempotent_cached(db, current_user.id, idem_key)
+        if cached is not None:
+            return cached
     cap = db.query(CapabilityConfig).filter(CapabilityConfig.capability_id == body.capability_id).first()
     upstream = (cap.upstream or "").strip() if cap else ""
     upstream_tool = (cap.upstream_tool or "").strip() if cap else ""
@@ -169,7 +227,9 @@ def pre_deduct(
             },
         )
         db.commit()
-        return {"credits_charged": est}
+        out = {"credits_charged": est}
+        _pre_deduct_idempotent_store(db, current_user.id, idem_key, out)
+        return out
 
     unit_credits = int(cap.unit_credits or 0) if cap else 0
     if unit_credits <= 0:
@@ -193,7 +253,9 @@ def pre_deduct(
         meta={"capability_id": body.capability_id, "unit_credits": unit_credits},
     )
     db.commit()
-    return {"credits_charged": unit_credits}
+    out = {"credits_charged": unit_credits}
+    _pre_deduct_idempotent_store(db, current_user.id, idem_key, out)
+    return out
 
 
 class RefundIn(BaseModel):

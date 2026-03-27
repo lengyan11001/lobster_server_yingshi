@@ -283,6 +283,20 @@ class SkillUnlockOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class BillingIdempotency(Base):
+    """预扣幂等：同一用户同一 X-Billing-Idempotency-Key 在窗口内只扣一次，避免双通道重复 pre_deduct。"""
+
+    __tablename__ = "billing_idempotency"
+    __table_args__ = (UniqueConstraint("user_id", "key", "endpoint", name="uq_billing_idempotency"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    key: Mapped[str] = mapped_column(String(128), nullable=False)
+    endpoint: Mapped[str] = mapped_column(String(32), nullable=False)
+    response_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class CreditLedger(Base):
     """积分流水：预扣、结算（实扣/多退少补）、退款、充值、技能解锁、对话扣费等每次变动一行。"""
 

@@ -221,51 +221,43 @@ def get_my_recharge_orders(
     return {"items": items, "total": total}
 
 
-@router.get("/api/billing/credit-history", summary="积分变动记录（充值增加、能力/模型调用扣减）")
+@router.get("/api/billing/credit-history", summary="积分变动记录（与 credit_ledger 一致：预扣/结算/退款/充值/LLM 等）")
 def get_credit_history(
     limit: int = 100,
     offset: int = 0,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """合并充值到账（+）与能力调用扣费（-），按时间倒序，支持分页。"""
-    out = []
-    paid_orders = (
-        db.query(RechargeOrder)
-        .filter(RechargeOrder.user_id == current_user.id, RechargeOrder.status == "paid")
-        .order_by(RechargeOrder.paid_at.desc())
-        .limit(500)
-        .all()
-    )
-    for r in paid_orders:
-        if (r.paid_at and (r.credits or 0) > 0) or (r.credits or 0) > 0:
-            out.append({
-                "time": (r.paid_at or r.created_at).isoformat() if (r.paid_at or r.created_at) else "",
-                "type": "recharge",
-                "amount": r.credits or 0,
-                "description": "充值到账",
-                "out_trade_no": r.out_trade_no or "",
-            })
-    call_logs = (
-        db.query(CapabilityCallLog)
-        .filter(CapabilityCallLog.user_id == current_user.id, CapabilityCallLog.credits_charged > 0)
-        .order_by(CapabilityCallLog.created_at.desc())
-        .limit(500)
-        .all()
-    )
-    for r in call_logs:
-        out.append({
-            "time": r.created_at.isoformat() if r.created_at else "",
-            "type": "deduct",
-            "amount": -(r.credits_charged or 0),
-            "description": (r.capability_id or "能力调用").strip() or "能力调用",
-            "out_trade_no": "",
-        })
-    out.sort(key=lambda x: x["time"] or "1970-01-01", reverse=True)
-    total = len(out)
+    """与 users.credits 变动一一对应；展示 credit_ledger 全量（含 sutui_chat、pre_deduct、settle 等）。"""
+    q = db.query(CreditLedger).filter(CreditLedger.user_id == current_user.id)
+    total = q.count()
     off = max(0, offset)
     n = min(max(limit, 1), 200)
-    return {"items": out[off : off + n], "total": total}
+    rows = (
+        q.order_by(CreditLedger.created_at.desc())
+        .offset(off)
+        .limit(n)
+        .all()
+    )
+    out = []
+    for r in rows:
+        et = (r.entry_type or "").strip().lower()
+        delta = int(r.delta or 0)
+        if delta > 0:
+            type_label = "recharge" if et == "recharge" else "increase"
+        else:
+            type_label = "deduct"
+        desc = (r.description or "").strip() or et or "积分变动"
+        out.append({
+            "time": r.created_at.isoformat() if r.created_at else "",
+            "type": type_label,
+            "entry_type": r.entry_type or "",
+            "amount": delta,
+            "description": desc,
+            "balance_after": int(r.balance_after or 0),
+            "out_trade_no": "",
+        })
+    return {"items": out, "total": total}
 
 
 @router.get("/api/billing/credit-ledger", summary="积分流水（预扣/结算/退款/充值等，一行一条）")
