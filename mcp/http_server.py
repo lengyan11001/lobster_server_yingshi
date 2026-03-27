@@ -1018,16 +1018,21 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     """
     if not payload or not isinstance(payload, dict):
         return payload
-    model = (payload.get("model") or "").strip()
+    model = (payload.get("model") or payload.get("model_id") or "").strip()
     prompt = (payload.get("prompt") or "").strip()
     fp = payload.get("filePaths") or []
     image_url = (payload.get("image_url") or "").strip()
     mf = payload.get("media_files") or []
-    
+    has_image = bool(fp) or bool(image_url) or bool(mf)
+
+    # LLM 漏传 model 时与对话/capability 说明一致：默认 Seedance 2，避免上游 REST 报「generate 缺少 model」
+    if not model:
+        model = "st-ai/super-seed2"
+        logger.info("[MCP] video.generate 未传 model，默认 st-ai/super-seed2")
+
     # 模型名称到标准 ID 的映射（将界面展示名转换为速推/xskill 标准模型 ID）
     # 注意：这里只处理常见的展示名，标准 ID 格式（如 fal-ai/xxx）直接透传
     model_lower = model.lower()
-    has_image = bool(fp) or bool(image_url) or bool(mf)
     
     if "/" not in model or not model.startswith(("fal-ai/", "st-ai/", "wan/", "jimeng-", "openai/", "anthropic/", "google/", "xai/")):
         # 可能是展示名，尝试映射到标准模型 ID
