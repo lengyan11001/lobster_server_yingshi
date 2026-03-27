@@ -593,6 +593,14 @@ async def _call_upstream_sutui_tasks_rest(
         "Accept": "application/json",
     }
     # 与 save-url 一致：禁用系统代理，避免 HTTPS_PROXY 干扰访问 api.xskill.ai / 自建网关
+    _SUTUI_NET_RETRY = 3
+    _SUTUI_NET_EXC = (
+        httpx.ConnectError,
+        httpx.TimeoutException,
+        httpx.ReadTimeout,
+        httpx.ConnectTimeout,
+        httpx.WriteTimeout,
+    )
     async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
         if tool_name == "generate":
             model = (arguments.get("model") or "").strip()
@@ -600,15 +608,38 @@ async def _call_upstream_sutui_tasks_rest(
                 return {"error": {"message": "generate 缺少 model"}}
             params = {k: v for k, v in arguments.items() if k != "model"}
             body = {"model": model, "params": params, "channel": None}
-            r = await client.post(f"{api_base}/api/v3/tasks/create", json=body, headers=headers)
+            url = f"{api_base}/api/v3/tasks/create"
         elif tool_name == "get_result":
             task_id = (arguments.get("task_id") or "").strip()
             if not task_id:
                 return {"error": {"message": "get_result 缺少 task_id"}}
             body = {"task_id": task_id}
-            r = await client.post(f"{api_base}/api/v3/tasks/query", json=body, headers=headers)
+            url = f"{api_base}/api/v3/tasks/query"
         else:
             return {"error": {"message": f"REST 上游未实现工具: {tool_name}"}}
+
+        r: Optional[httpx.Response] = None
+        last_net: Optional[BaseException] = None
+        for attempt in range(_SUTUI_NET_RETRY):
+            try:
+                r = await client.post(url, json=body, headers=headers)
+                last_net = None
+                break
+            except _SUTUI_NET_EXC as e:
+                last_net = e
+                logger.warning(
+                    "[速推REST] 网络异常 tool=%s attempt=%s/%s lobster_capability=%s err=%s",
+                    tool_name,
+                    attempt + 1,
+                    _SUTUI_NET_RETRY,
+                    lobster_capability_id or "(无)",
+                    e,
+                )
+                if attempt + 1 < _SUTUI_NET_RETRY:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+        if last_net is not None:
+            return {"error": {"message": f"上游网络不可达: {last_net}"}}
+        assert r is not None
 
         if r.status_code >= 400:
             err_body = (r.text or "")[:_SUTUI_UPSTREAM_LOG_MAX]
