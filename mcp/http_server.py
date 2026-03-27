@@ -1472,9 +1472,12 @@ async def _auto_save_generated_assets(
     prompt_text = payload.get("prompt", "") or capability_id
 
     def _mt_for_url(u: str) -> str:
-        low = u.lower()
-        if low.endswith((".mp4", ".webm", ".mov")):
+        """先按 URL 路径扩展名区分，避免视频任务里缩略图/封面 .jpg 被标成 video（save-url 会把图强行当 mp4 扩展名，预览坏）。"""
+        path = (u or "").split("?")[0].split("#")[0].lower()
+        if path.endswith((".mp4", ".webm", ".mov")):
             return "video"
+        if path.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+            return "image"
         if capability_id.startswith("video") or "video" in capability_id:
             return "video"
         if capability_id == "task.get_result" and payload.get("capability_id"):
