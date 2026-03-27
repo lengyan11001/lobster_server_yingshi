@@ -87,22 +87,35 @@ def _asset_file_token(asset_id: str, expiry_ts: int) -> str:
     ).hexdigest()
 
 
-def build_asset_file_url(request: Request, asset_id: str) -> Optional[str]:
-    """生成带签名的素材文件访问 URL，供注入到对话消息中（速推可拉取）。保证返回纯 ASCII。
-    若速推报 Failed to download：说明其服务器无法访问该 URL，请在 .env 设置 PUBLIC_BASE_URL 为
-    速推可访问的地址（公网 IP/域名或内网穿透如 ngrok），勿用 localhost/127.0.0.1/仅局域网 IP。"""
+def _is_loopback_base(base: str) -> bool:
+    if not (base or "").strip():
+        return True
+    b = (base or "").lower()
+    return "127.0.0.1" in b or "localhost" in b or "0.0.0.0" in b
+
+
+def _resolve_asset_public_base(request: Request) -> str:
+    """生成 /api/assets/file 签名链的根：避免误用 127.0.0.1 作多设备预览。"""
     from ..core.config import get_settings
-    expiry_ts = int(time.time()) + _ASSET_FILE_EXPIRY_SEC
-    token = _asset_file_token(asset_id, expiry_ts)
+
     settings = get_settings()
-    base = (getattr(settings, "public_base_url", None) or "").strip().rstrip("/")
+    port = getattr(settings, "port", 8000)
+    pub = (getattr(settings, "public_base_url", None) or "").strip().rstrip("/")
+    lan = (getattr(settings, "lan_public_base_url", None) or "").strip().rstrip("/")
+
+    base = ""
+    if pub and not _is_loopback_base(pub):
+        base = pub
+    elif lan and not _is_loopback_base(lan):
+        base = lan
+
     if not base:
         try:
             base = str((request.base_url or "").rstrip("/"))
         except Exception:
             base = ""
     if not base:
-        base = f"http://127.0.0.1:{getattr(settings, 'port', 8000)}"
+        base = f"http://127.0.0.1:{port}"
     if "0.0.0.0" in base:
         host = (request.headers.get("host") or "").strip()
         if host:
@@ -110,14 +123,29 @@ def build_asset_file_url(request: Request, asset_id: str) -> Optional[str]:
             base = f"{sch}://{host}"
         else:
             base = base.replace("0.0.0.0", "127.0.0.1")
-    # 强制纯 ASCII，避免速推拉图时出现编码问题
+
+    if _is_loopback_base(base) and lan and not _is_loopback_base(lan):
+        base = lan
+    if _is_loopback_base(base) and pub:
+        base = pub
+
     try:
         base.encode("ascii")
     except UnicodeEncodeError:
-        base = f"http://127.0.0.1:{getattr(settings, 'port', 8000)}"
+        base = f"http://127.0.0.1:{port}"
         logger.warning(
-            "[素材] base_url 含非 ASCII，已回退为 127.0.0.1。请在 .env 设置 PUBLIC_BASE_URL（如 http://本机局域网IP:8000）以便速推拉取。"
+            "[素材] base_url 含非 ASCII，已回退为 127.0.0.1。请在 .env 设置 PUBLIC_BASE_URL 或 LAN_PUBLIC_BASE_URL。"
         )
+    return base
+
+
+def build_asset_file_url(request: Request, asset_id: str) -> Optional[str]:
+    """生成带签名的素材文件访问 URL，供注入到对话消息中（速推可拉取）。保证返回纯 ASCII。
+    若速推报 Failed to download：说明其服务器无法访问该 URL，请在 .env 设置 PUBLIC_BASE_URL 为
+    速推可访问的地址（公网 IP/域名或内网穿透如 ngrok），勿用 localhost/127.0.0.1/仅局域网 IP。"""
+    expiry_ts = int(time.time()) + _ASSET_FILE_EXPIRY_SEC
+    token = _asset_file_token(asset_id, expiry_ts)
+    base = _resolve_asset_public_base(request)
     return f"{base}/api/assets/file/{asset_id}?token={token}&expiry={expiry_ts}"
 
 

@@ -21,8 +21,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./lobster.db"
     host: str = "0.0.0.0"
     port: int = 8000
-    """微信/支付回调根地址。不填时自动用本机 LAN IP:PORT；服务器仅公网 IP 无域名时填 http://公网IP:8000"""
+    """微信/支付回调根地址。不填时自动用本机 LAN IP:PORT；服务器仅公网 IP 无域名时填 http://公网IP:8000。勿填 127.0.0.1 作多设备素材预览根。"""
     public_base_url: Optional[str] = None
+    """素材签名 URL：局域网/公网可访问根地址。PUBLIC_BASE_URL 为回环或未设时用于 /api/assets/file 预览链。"""
+    lan_public_base_url: Optional[str] = None
     mcp_port: int = 8001
     """本构建统一为在线版：online（独立登录/注册或速推扫码，速推 Token 来自登录）。"""
     lobster_edition: str = "online"
