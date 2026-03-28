@@ -28,6 +28,59 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# 日志中单条响应最大字符（避免 choices 正文撑爆日志）
+_SUTUI_CHAT_LOG_BODY_MAX = 24_000
+
+
+def _sutui_chat_upstream_body_for_log(data: Optional[Dict[str, Any]]) -> str:
+    """保留 usage、id、model、计费相关嵌套字段；choices 只保留索引/角色，不打印正文。"""
+    if not isinstance(data, dict):
+        return ""
+    slim: Dict[str, Any] = {}
+    for key in ("id", "object", "created", "model", "system_fingerprint", "usage", "service_tier"):
+        if key in data:
+            slim[key] = data[key]
+    ch = data.get("choices")
+    if isinstance(ch, list):
+        slim["choices"] = []
+        for c in ch[:8]:
+            if not isinstance(c, dict):
+                continue
+            entry: Dict[str, Any] = {"index": c.get("index"), "finish_reason": c.get("finish_reason")}
+            msg = c.get("message")
+            if isinstance(msg, dict):
+                entry["message"] = {
+                    "role": msg.get("role"),
+                    "content_len": len(msg.get("content") or "") if isinstance(msg.get("content"), str) else None,
+                }
+            slim["choices"].append(entry)
+    # 其余顶层键（常为速推扩展：计费、扩展字段）
+    for k, v in data.items():
+        if k in slim or k == "choices":
+            continue
+        lk = str(k).lower()
+        if any(
+            x in lk
+            for x in (
+                "credit",
+                "price",
+                "cost",
+                "bill",
+                "charge",
+                "usage",
+                "x-",
+                "sutui",
+            )
+        ):
+            slim[k] = v
+    try:
+        raw = json.dumps(slim, ensure_ascii=False, default=str)
+    except Exception:
+        raw = str(slim)[:2000]
+    if len(raw) > _SUTUI_CHAT_LOG_BODY_MAX:
+        return raw[:_SUTUI_CHAT_LOG_BODY_MAX] + f"... [截断，原约 {len(raw)} 字符]"
+    return raw
+
 
 def _api_base() -> str:
     return (getattr(settings, "sutui_api_base", None) or "https://api.xskill.ai").rstrip("/")
@@ -77,7 +130,25 @@ def _apply_chat_deduct(
 ) -> None:
     if not _should_deduct_credits():
         return
+    reported_raw = 0
+    if response_body and isinstance(response_body, dict):
+        reported_raw = extract_upstream_reported_credits(response_body)
     credits = _credits_for_sutui_chat(model, usage, response_body)
+    billing_src = (
+        "upstream价字段优先"
+        if reported_raw > 0
+        else ("docs定价+usage或兜底" if credits > 0 else "未扣费")
+    )
+    logger.info(
+        "[sutui-chat] 计费明细 user_id=%s model=%s 扣费来源=%s 最终扣积分=%s extract_upstream_reported=%s usage=%s 上游响应(节选)=%s",
+        current_user.id,
+        model,
+        billing_src,
+        credits,
+        reported_raw,
+        usage,
+        _sutui_chat_upstream_body_for_log(response_body if isinstance(response_body, dict) else None),
+    )
     if credits <= 0:
         return
     db.refresh(current_user)
