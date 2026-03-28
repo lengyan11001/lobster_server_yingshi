@@ -18,6 +18,7 @@ from ..db import get_db
 from .auth import get_current_user
 from ..models import CapabilityCallLog, CreditLedger, RechargeOrder, User
 from ..services.credit_ledger import append_credit_ledger
+from ..services.credits_amount import credits_json_float, quantize_credits
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +56,13 @@ def _apply_wechat_paid_to_order(
     order.wechat_transaction_id = wechat_transaction_id
     user = db.query(User).filter(User.id == order.user_id).first()
     if user:
-        user.credits = (user.credits or 0) + order.credits
-        bal = int(user.credits or 0)
+        add_c = quantize_credits(order.credits or 0)
+        user.credits = quantize_credits(user.credits or 0) + add_c
+        bal = quantize_credits(user.credits)
         append_credit_ledger(
             db,
             user.id,
-            int(order.credits or 0),
+            add_c,
             "recharge",
             bal,
             description="充值到账（微信支付）",
@@ -242,7 +244,7 @@ def get_credit_history(
     out = []
     for r in rows:
         et = (r.entry_type or "").strip().lower()
-        delta = int(r.delta or 0)
+        delta = quantize_credits(r.delta or 0)
         if delta > 0:
             type_label = "recharge" if et == "recharge" else "increase"
         else:
@@ -252,9 +254,9 @@ def get_credit_history(
             "time": r.created_at.isoformat() if r.created_at else "",
             "type": type_label,
             "entry_type": r.entry_type or "",
-            "amount": delta,
+            "amount": credits_json_float(delta),
             "description": desc,
-            "balance_after": int(r.balance_after or 0),
+            "balance_after": credits_json_float(r.balance_after or 0),
             "out_trade_no": "",
         })
     return {"items": out, "total": total}
@@ -282,8 +284,8 @@ def get_credit_ledger(
         "items": [
             {
                 "id": r.id,
-                "delta": r.delta,
-                "balance_after": r.balance_after,
+                "delta": credits_json_float(r.delta),
+                "balance_after": credits_json_float(r.balance_after),
                 "entry_type": r.entry_type,
                 "description": r.description or "",
                 "ref_type": r.ref_type or "",
@@ -727,9 +729,9 @@ def complete_recharge(
     user = db.query(User).filter(User.id == order.user_id).first()
     if not user:
         raise HTTPException(status_code=500, detail="用户不存在")
-    add_credits = int(order.credits or 0)
-    user.credits = (user.credits or 0) + add_credits
-    bal = int(user.credits or 0)
+    add_credits = quantize_credits(order.credits or 0)
+    user.credits = quantize_credits(user.credits or 0) + add_credits
+    bal = quantize_credits(user.credits)
     append_credit_ledger(
         db,
         user.id,

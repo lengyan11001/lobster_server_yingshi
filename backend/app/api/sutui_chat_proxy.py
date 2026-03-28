@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from decimal import Decimal
 from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
@@ -16,9 +17,11 @@ from ..core.config import settings
 from ..db import get_db
 from ..models import User
 from ..services.credit_ledger import append_credit_ledger
+from ..services.credits_amount import quantize_credits, user_balance_decimal
 from ..services.sutui_pricing import (
     estimate_credits_from_pricing,
     estimate_pre_deduct_credits,
+    extract_upstream_billing_snapshot,
     extract_upstream_reported_credits,
     fetch_model_pricing,
 )
@@ -95,19 +98,19 @@ def _credits_for_sutui_chat(
     model: str,
     usage: Optional[dict],
     response_body: Optional[Dict[str, Any]] = None,
-) -> int:
-    """按上游响应内嵌的本次消耗（若有）优先；否则按速推 docs 定价 + usage 计算。"""
+):
+    """按上游响应内嵌的本次消耗（若有）优先；否则按速推 docs 定价 + usage 计算。返回 4 位小数积分。"""
     if response_body and isinstance(response_body, dict):
         reported = extract_upstream_reported_credits(response_body)
         if reported > 0:
-            return reported
+            return quantize_credits(reported)
     pricing = fetch_model_pricing(model)
     if not pricing:
         est, err = estimate_pre_deduct_credits(model, None)
         if err:
             logger.warning("[sutui-chat] 无定价 model=%s err=%s", model, err)
-            return 0
-        return est
+            return Decimal(0)
+        return quantize_credits(est)
     params: Dict[str, Any] = {}
     if usage and isinstance(usage, dict):
         params["prompt_tokens"] = usage.get("prompt_tokens", 0)
@@ -116,9 +119,9 @@ def _credits_for_sutui_chat(
     if est <= 0:
         est2, err = estimate_pre_deduct_credits(model, None)
         if err:
-            return 0
-        return est2
-    return est
+            return Decimal(0)
+        return quantize_credits(est2)
+    return quantize_credits(est)
 
 
 def _apply_chat_deduct(
@@ -130,15 +133,21 @@ def _apply_chat_deduct(
 ) -> None:
     if not _should_deduct_credits():
         return
-    reported_raw = 0
+    reported_raw = None
     if response_body and isinstance(response_body, dict):
         reported_raw = extract_upstream_reported_credits(response_body)
     credits = _credits_for_sutui_chat(model, usage, response_body)
     billing_src = (
         "upstream价字段优先"
-        if reported_raw > 0
+        if reported_raw and reported_raw > 0
         else ("docs定价+usage或兜底" if credits > 0 else "未扣费")
     )
+    snap = extract_upstream_billing_snapshot(response_body if isinstance(response_body, dict) else None)
+    try:
+        snap_json = json.dumps(snap, ensure_ascii=False, default=str)
+    except Exception:
+        snap_json = str(snap)[:2000]
+    logger.info("[sutui-chat] 上游扣费原始结构=%s", snap_json)
     logger.info(
         "[sutui-chat] 计费明细 user_id=%s model=%s 扣费来源=%s 最终扣积分=%s extract_upstream_reported=%s usage=%s 上游响应(节选)=%s",
         current_user.id,
@@ -152,7 +161,7 @@ def _apply_chat_deduct(
     if credits <= 0:
         return
     db.refresh(current_user)
-    bal = current_user.credits or 0
+    bal = user_balance_decimal(current_user)
     if bal < credits:
         logger.error(
             "[sutui-chat] 扣积分失败（余额不足） user_id=%s model=%s need=%s have=%s",
@@ -163,7 +172,7 @@ def _apply_chat_deduct(
         )
         return
     current_user.credits = bal - credits
-    bal_after = int(current_user.credits or 0)
+    bal_after = quantize_credits(current_user.credits)
     append_credit_ledger(
         db,
         current_user.id,

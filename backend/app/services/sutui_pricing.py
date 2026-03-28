@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import math
 import time
+from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote
 
 import httpx
 
 from ..core.config import settings
+from .credits_amount import quantize_credits
 
 _DOCS_CACHE: Dict[str, Tuple[float, Optional[dict]]] = {}
 _CACHE_TTL_SEC = 3600
@@ -150,28 +152,57 @@ def _dict_looks_like_account_balance(d: dict) -> bool:
     return bool(kl & {"balance", "remaining", "remaining_credits", "total_balance", "available", "points"})
 
 
-def upstream_numeric_credits_to_int(v: Any) -> int:
-    """速推常在 x_billing 等字段返回小数积分（如 0.9558）；禁止 int() 截断成 0。"""
+def upstream_numeric_credits_to_decimal(v: Any) -> Decimal:
+    """速推常在 x_billing 等字段返回小数积分（如 0.9558）；统一量化为 4 位小数。"""
     try:
         x = float(v)
     except (TypeError, ValueError):
-        return 0
+        return Decimal(0)
     if x <= 0:
-        return 0
-    iv = int(round(x))
-    if iv == 0 and x > 0:
-        return 1
-    return iv
+        return Decimal(0)
+    return quantize_credits(x)
 
 
-def extract_upstream_reported_credits(obj: Any, _depth: int = 0) -> int:
+def extract_upstream_billing_snapshot(data: Optional[dict]) -> dict[str, Any]:
     """
-    从速推 chat/completions 或任务类完整 JSON 中解析「本次消耗积分」。
-    与 mcp/http_server._extract_sutui_credits_used 字段集合对齐；优先于 docs 定价推算。
+    从 chat/completions 等响应中抽出与计费相关的字段，便于日志对照（含 x_billing、usage 等）。
+    """
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, Any] = {}
+    priority = ("x_billing", "X-Billing", "billing", "usage", "service_tier")
+    for k in priority:
+        if k in data:
+            out[k] = data[k]
+    for k, v in data.items():
+        if k in out:
+            continue
+        lk = str(k).lower()
+        if any(
+            x in lk
+            for x in (
+                "credit",
+                "price",
+                "cost",
+                "bill",
+                "charge",
+                "usage",
+                "x_billing",
+                "sutui",
+            )
+        ):
+            out[k] = v
+    return out
+
+
+def extract_upstream_reported_credits(obj: Any, _depth: int = 0) -> Decimal:
+    """
+    从速推 chat/completions 或任务类完整 JSON 中解析「本次消耗积分」（4 位小数）。
+    与 mcp/http_server 计费解析字段集合对齐；优先于 docs 定价推算。
     """
     if _depth > 42:
-        return 0
-    best = 0
+        return Decimal(0)
+    best = Decimal(0)
     if isinstance(obj, dict):
         balance_shape = _dict_looks_like_account_balance(obj)
         for k, v in obj.items():
@@ -186,9 +217,9 @@ def extract_upstream_reported_credits(obj: Any, _depth: int = 0) -> int:
                 "price",
             ):
                 if isinstance(v, (int, float)) and v > 0:
-                    best = max(best, upstream_numeric_credits_to_int(v))
+                    best = max(best, upstream_numeric_credits_to_decimal(v))
             elif lk == "credits" and isinstance(v, (int, float)) and v > 0 and not balance_shape:
-                best = max(best, upstream_numeric_credits_to_int(v))
+                best = max(best, upstream_numeric_credits_to_decimal(v))
             elif isinstance(v, (dict, list)):
                 best = max(best, extract_upstream_reported_credits(v, _depth + 1))
             elif isinstance(v, str):

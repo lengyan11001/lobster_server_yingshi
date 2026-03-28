@@ -20,7 +20,8 @@ import httpx
 
 from mcp.sutui_tokens import next_sutui_server_token
 
-from backend.app.services.sutui_pricing import upstream_numeric_credits_to_int
+from backend.app.services.credits_amount import quantize_credits
+from backend.app.services.sutui_pricing import extract_upstream_reported_credits
 
 logger = logging.getLogger(__name__)
 
@@ -422,57 +423,13 @@ def _parse_sse_or_json(resp: httpx.Response) -> Dict[str, Any]:
 _SUTUI_UPSTREAM_LOG_MAX = 500_000
 
 
-def _dict_looks_like_account_balance(d: dict) -> bool:
-    """含余额语义时，避免把字段名 credits 误当作「本次消耗」。"""
-    kl = {str(k).lower() for k in d}
-    return bool(kl & {"balance", "remaining", "remaining_credits", "total_balance", "available", "points"})
-
-
-def _extract_sutui_credits_used(obj: Any, _depth: int = 0) -> int:
-    """从速推 MCP JSON-RPC 整棵响应里解析本次消耗积分（动态扣费）。取遍历到的最大正整数，避免嵌套重复偏小。"""
-    if _depth > 42:
-        return 0
-    best = 0
-    if isinstance(obj, dict):
-        balance_shape = _dict_looks_like_account_balance(obj)
-        for k, v in obj.items():
-            lk = str(k).lower()
-            # price：xskill 官方 REST 创建任务返回里表示本次消耗积分（见 xskill-ai/scripts/xskill_api.py run_task）
-            if lk in (
-                "credits_used",
-                "credits_charged",
-                "credit_cost",
-                "consumed_credits",
-                "usage_credits",
-                "cost",
-                "price",
-            ):
-                if isinstance(v, (int, float)) and v > 0:
-                    best = max(best, upstream_numeric_credits_to_int(v))
-            elif lk == "credits" and isinstance(v, (int, float)) and v > 0 and not balance_shape:
-                best = max(best, upstream_numeric_credits_to_int(v))
-            elif isinstance(v, (dict, list)):
-                best = max(best, _extract_sutui_credits_used(v, _depth + 1))
-            elif isinstance(v, str):
-                s = v.strip()
-                if s.startswith("{"):
-                    try:
-                        best = max(best, _extract_sutui_credits_used(json.loads(s), _depth + 1))
-                    except Exception:
-                        pass
-    elif isinstance(obj, list):
-        for it in obj:
-            best = max(best, _extract_sutui_credits_used(it, _depth + 1))
-    return best
-
-
 # 速推：在 create/generate 时扣费（与 xskill REST tasks/create 的 price 一致）；get_result 仅轮询，不再扣费。
 # 若任务终态失败，按此处记录的 task_id 向龙虾用户退款（与速推侧失败退款语义对齐）。
 _MAX_TASK_BILLED_TRACK = 3000
-_task_billed_on_create: "OrderedDict[str, int]" = OrderedDict()
+_task_billed_on_create: "OrderedDict[str, Decimal]" = OrderedDict()
 
 
-def _remember_task_billed_credits(task_id: str, credits: int) -> None:
+def _remember_task_billed_credits(task_id: str, credits: Decimal) -> None:
     if not task_id or credits <= 0:
         return
     _task_billed_on_create[task_id] = credits
@@ -481,10 +438,10 @@ def _remember_task_billed_credits(task_id: str, credits: int) -> None:
         _task_billed_on_create.popitem(last=False)
 
 
-def _pop_task_billed_credits(task_id: str) -> int:
+def _pop_task_billed_credits(task_id: str) -> Decimal:
     if not task_id:
-        return 0
-    return int(_task_billed_on_create.pop(task_id, 0) or 0)
+        return Decimal(0)
+    return quantize_credits(_task_billed_on_create.pop(task_id, 0) or 0)
 
 
 def _extract_task_id_from_sutui_response(obj: Any, _depth: int = 0) -> str:
@@ -568,7 +525,7 @@ def _log_sutui_upstream_full_response(
     if upstream_name != "sutui":
         return
     try:
-        parsed = _extract_sutui_credits_used(out) if isinstance(out, dict) else 0
+        parsed = extract_upstream_reported_credits(out) if isinstance(out, dict) else quantize_credits(0)
         raw = json.dumps(out, ensure_ascii=False, default=str)
         total_len = len(raw)
         if total_len > _SUTUI_UPSTREAM_LOG_MAX:
@@ -844,8 +801,8 @@ def _is_task_still_in_progress(upstream_resp: Any) -> bool:
 
 async def _record_call(token: Optional[str], capability_id: str, success: bool, latency_ms: Optional[int],
                        request_payload: Dict, response_payload: Optional[Dict], error_message: Optional[str],
-                       credits_charged: Optional[int] = None, pre_deduct_applied: bool = False,
-                       credits_pre_deducted: Optional[int] = None, credits_final: Optional[int] = None,
+                       credits_charged: Optional[float] = None, pre_deduct_applied: bool = False,
+                       credits_pre_deducted: Optional[float] = None, credits_final: Optional[float] = None,
                        request: Optional[Request] = None) -> None:
     if not token:
         return
@@ -1683,7 +1640,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             if original_model != normalized_model:
                 logger.info("[MCP] 模型名称映射: %s -> %s", original_model, normalized_model)
 
-            pre_deduct_amount = 0
+            pre_deduct_amount = quantize_credits(0)
             billing_idem = str(uuid.uuid4())
             if token:
                 try:
@@ -1716,7 +1673,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                             body_ok = pre_r.json() if pre_r.content else {}
                             if not isinstance(body_ok, dict):
                                 body_ok = {}
-                            pre_deduct_amount = int(body_ok.get("credits_charged") or 0)
+                            pre_deduct_amount = quantize_credits(body_ok.get("credits_charged") or 0)
                         except Exception as parse_e:
                             logger.warning(
                                 "[MCP] pre_deduct 200 响应非 JSON capability_id=%s err=%s body_prefix=%s",
@@ -2040,7 +1997,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         async with httpx.AsyncClient(timeout=10.0) as client:
                             await client.post(
                                 f"{_capabilities_api_base()}/capabilities/refund",
-                                json={"capability_id": capability_id, "credits": refund_amt},
+                                json={"capability_id": capability_id, "credits": float(refund_amt)},
                                 headers=_backend_headers(token, request),
                             )
                         logger.info(
@@ -2068,17 +2025,17 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     except Exception as e:
                         logger.debug("[临时文件] 清理失败 task_id=%s error=%s", poll_task_id, e)
 
-            actual_used = 0
+            actual_used = quantize_credits(0)
             if isinstance(upstream_resp, dict) and not upstream_error:
                 # 仅 generate（创建任务）按速推返回扣费；get_result 只轮询不重复扣
                 if upstream_tool == "generate":
-                    actual_used = _extract_sutui_credits_used(upstream_resp)
+                    actual_used = extract_upstream_reported_credits(upstream_resp)
                 elif upstream_tool == "get_result":
-                    actual_used = 0
+                    actual_used = quantize_credits(0)
                 else:
-                    actual_used = _extract_sutui_credits_used(upstream_resp)
+                    actual_used = extract_upstream_reported_credits(upstream_resp)
 
-            settle_final = 0 if upstream_error else int(actual_used)
+            settle_final = quantize_credits(0) if upstream_error else quantize_credits(actual_used)
 
             if pre_deduct_amount > 0:
                 if (
@@ -2095,10 +2052,10 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 bill_credits = pre_deduct_amount
                 if upstream_error:
                     cf_out: Optional[int] = 0
-                elif int(actual_used) == int(pre_deduct_amount):
+                elif actual_used == pre_deduct_amount:
                     cf_out = None
                 else:
-                    cf_out = int(actual_used)
+                    cf_out = float(quantize_credits(actual_used))
                 logger.info(
                     "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s settle_final=%s credits_final_out=%s",
                     capability_id, pre_deduct_amount, actual_used, settle_final, cf_out,

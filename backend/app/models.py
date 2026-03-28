@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -16,7 +17,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    credits: Mapped[int] = mapped_column(Integer, default=99999, nullable=False)
+    credits: Mapped[Decimal] = mapped_column(Numeric(20, 4), default=Decimal("99999.0000"), nullable=False)
     role: Mapped[str] = mapped_column(String(32), default="user", nullable=False)
     preferred_model: Mapped[str] = mapped_column(String(128), default="openclaw", nullable=False)
     """速推登录后下发的 token，用于调用速推统一接口。"""
@@ -51,7 +52,7 @@ class CapabilityCallLog(Base):
     upstream: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     upstream_tool: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     success: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    credits_charged: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    credits_charged: Mapped[Decimal] = mapped_column(Numeric(20, 4), default=Decimal("0.0000"), nullable=False)
     latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     request_payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     response_payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
@@ -305,8 +306,8 @@ class CreditLedger(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
-    delta: Mapped[int] = mapped_column(Integer, nullable=False)
-    balance_after: Mapped[int] = mapped_column(Integer, nullable=False)
+    delta: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
+    balance_after: Mapped[Decimal] = mapped_column(Numeric(20, 4), nullable=False)
     # entry_type: pre_deduct | settle | refund | recharge | skill_unlock | sutui_chat | publish_refund | unit_deduct
     entry_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
 

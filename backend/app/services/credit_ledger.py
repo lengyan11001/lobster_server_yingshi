@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from decimal import Decimal
+from typing import Any, Optional, Union
 
 from sqlalchemy.orm import Session
 
 from ..models import CreditLedger
+from .credits_amount import quantize_credits
 
 logger = logging.getLogger(__name__)
 
@@ -14,20 +16,22 @@ logger = logging.getLogger(__name__)
 def append_credit_ledger(
     db: Session,
     user_id: int,
-    delta: int,
+    delta: Union[int, float, Decimal, str],
     entry_type: str,
-    balance_after: int,
+    balance_after: Union[int, float, Decimal, str],
     *,
     description: str = "",
     ref_type: Optional[str] = None,
     ref_id: Optional[str] = None,
     meta: Optional[dict[str, Any]] = None,
 ) -> CreditLedger:
-    """delta：正数为入账，负数为出账；balance_after 为变动后 users.credits 快照。"""
+    """delta：正数为入账，负数为出账；balance_after 为变动后 users.credits 快照（最多 4 位小数）。"""
+    d = quantize_credits(delta)
+    bal = quantize_credits(balance_after)
     row = CreditLedger(
         user_id=user_id,
-        delta=int(delta),
-        balance_after=int(balance_after),
+        delta=d,
+        balance_after=bal,
         entry_type=(entry_type or "unknown")[:32],
         description=(description or "")[:512] or None,
         ref_type=(ref_type or "")[:32] or None,

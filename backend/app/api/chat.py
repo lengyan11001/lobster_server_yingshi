@@ -238,7 +238,9 @@ async def _exec_tool_with_balance(
     cap = (args.get("capability_id") or "").strip() if name == "invoke_capability" else None
     if name == "invoke_capability" and db is not None and user_id is not None:
         user = db.query(User).filter(User.id == user_id).first()
-        if user and (user.credits or 0) <= 0:
+        from ..services.credits_amount import user_balance_decimal
+
+        if user and user_balance_decimal(user) <= 0:
             return "积分不足：当前余额为 0，无法使用速推能力。请先充值。"
     res = await _exec_tool(name, args, token, sutui_token, progress_cb)
     # 积分扣减统一由 MCP → POST /capabilities/record-call 完成（含速推返回动态 credits_used）

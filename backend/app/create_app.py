@@ -216,6 +216,75 @@ def _migrate_recharge_callback_audit():
         logger.warning("Migration recharge_orders callback_audit skipped: %s", e)
 
 
+def _migrate_credits_decimal_sqlite():
+    """INTEGER 积分列改为 NUMERIC(20,4)（存量库升级；新库由 create_all 已为小数）。"""
+    from sqlalchemy import text
+
+    if "sqlite" not in (settings.database_url or "").lower():
+        return
+    try:
+        with engine.begin() as conn:
+
+            def coltypes(table: str) -> dict[str, str]:
+                r = conn.execute(text(f"PRAGMA table_info({table})"))
+                return {row[1]: (row[2] or "") for row in r.fetchall()}
+
+            def is_int_col(t: str) -> bool:
+                return "INT" in (t or "").upper()
+
+            ucols = coltypes("users")
+            if "credits" in ucols and is_int_col(ucols["credits"]):
+                conn.execute(text("ALTER TABLE users ADD COLUMN credits_d NUMERIC(20,4)"))
+                conn.execute(text("UPDATE users SET credits_d = credits"))
+                conn.execute(text("ALTER TABLE users DROP COLUMN credits"))
+                conn.execute(text("ALTER TABLE users RENAME COLUMN credits_d TO credits"))
+
+            lcols = coltypes("credit_ledger")
+            if "delta" in lcols and is_int_col(lcols["delta"]):
+                conn.execute(text("ALTER TABLE credit_ledger ADD COLUMN delta_d NUMERIC(20,4)"))
+                conn.execute(text("UPDATE credit_ledger SET delta_d = delta"))
+                conn.execute(text("ALTER TABLE credit_ledger DROP COLUMN delta"))
+                conn.execute(text("ALTER TABLE credit_ledger RENAME COLUMN delta_d TO delta"))
+            lcols = coltypes("credit_ledger")
+            if "balance_after" in lcols and is_int_col(lcols["balance_after"]):
+                conn.execute(text("ALTER TABLE credit_ledger ADD COLUMN balance_after_d NUMERIC(20,4)"))
+                conn.execute(text("UPDATE credit_ledger SET balance_after_d = balance_after"))
+                conn.execute(text("ALTER TABLE credit_ledger DROP COLUMN balance_after"))
+                conn.execute(text("ALTER TABLE credit_ledger RENAME COLUMN balance_after_d TO balance_after"))
+
+            ccols = coltypes("capability_call_logs")
+            if "credits_charged" in ccols and is_int_col(ccols["credits_charged"]):
+                conn.execute(text("ALTER TABLE capability_call_logs ADD COLUMN credits_charged_d NUMERIC(20,4) DEFAULT 0"))
+                conn.execute(text("UPDATE capability_call_logs SET credits_charged_d = credits_charged"))
+                conn.execute(text("ALTER TABLE capability_call_logs DROP COLUMN credits_charged"))
+                conn.execute(text("ALTER TABLE capability_call_logs RENAME COLUMN credits_charged_d TO credits_charged"))
+    except Exception as e:
+        logger.warning("Migration credits decimal (sqlite) skipped: %s", e)
+
+
+def _migrate_credits_decimal_mysql():
+    from sqlalchemy import text
+
+    url = (settings.database_url or "").lower()
+    if "mysql" not in url and "mariadb" not in url:
+        return
+    stmts = [
+        "ALTER TABLE users MODIFY COLUMN credits DECIMAL(20,4) NOT NULL DEFAULT 99999.0000",
+        "ALTER TABLE credit_ledger MODIFY COLUMN delta DECIMAL(20,4) NOT NULL",
+        "ALTER TABLE credit_ledger MODIFY COLUMN balance_after DECIMAL(20,4) NOT NULL",
+        "ALTER TABLE capability_call_logs MODIFY COLUMN credits_charged DECIMAL(20,4) NOT NULL DEFAULT 0.0000",
+    ]
+    try:
+        with engine.begin() as conn:
+            for s in stmts:
+                try:
+                    conn.execute(text(s))
+                except Exception as ex:
+                    logger.warning("mysql migrate credits: %s err=%s", s[:80], ex)
+    except Exception as e:
+        logger.warning("Migration credits decimal (mysql) skipped: %s", e)
+
+
 @asynccontextmanager
 async def _app_lifespan(app: FastAPI):
     probe_task = None
@@ -241,6 +310,8 @@ def create_app() -> FastAPI:
     _migrate_wecom_agent_id()
     _migrate_recharge_amount_fen()
     _migrate_recharge_callback_audit()
+    _migrate_credits_decimal_sqlite()
+    _migrate_credits_decimal_mysql()
     _ensure_default_user()
     _seed_capability_catalog()
     _auto_start_openclaw()

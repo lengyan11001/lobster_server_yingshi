@@ -5,6 +5,7 @@ import logging
 import secrets
 import time
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any, Dict, Optional
 from urllib.parse import quote
 
@@ -21,12 +22,14 @@ from ..core.config import settings, get_effective_public_base_url
 from ..captcha_util import create_captcha, verify_captcha
 from ..db import get_db
 from ..models import SkillUnlock, User
+from ..services.credits_amount import credits_json_float
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 ONLINE_USER_EMAIL = "online@sutui.lobster.local"
-# 新注册用户初始积分（自主注册、微信首次建号）
-REGISTER_INITIAL_CREDITS = 100
+# 新注册用户初始积分（自主注册、微信首次建号），最多 4 位小数
+REGISTER_INITIAL_CREDITS = Decimal("100.0000")
+DEFAULT_ONLINE_USER_CREDITS = Decimal("99999.0000")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
@@ -39,7 +42,7 @@ class UserOut(BaseModel):
     id: int
     email: str
     preferred_model: str
-    credits: Optional[int] = None
+    credits: Optional[float] = None
 
 
 class Token(BaseModel):
@@ -213,7 +216,7 @@ def get_me(current_user: User = Depends(get_current_user)):
         id=current_user.id,
         email=current_user.email,
         preferred_model=preferred,
-        credits=getattr(current_user, "credits", None),
+        credits=credits_json_float(getattr(current_user, "credits", None) or 0),
     )
 
 
@@ -334,7 +337,7 @@ def sutui_login_with_token(body: LoginWithTokenBody, db: Session = Depends(get_d
         user = User(
             email=ONLINE_USER_EMAIL,
             hashed_password=get_password_hash("online-no-password"),
-            credits=99999,
+            credits=DEFAULT_ONLINE_USER_CREDITS,
             role="user",
             preferred_model="sutui",
         )
@@ -666,7 +669,7 @@ def sutui_callback(
         user = User(
             email=ONLINE_USER_EMAIL,
             hashed_password=get_password_hash("online-no-password"),
-            credits=99999,
+            credits=DEFAULT_ONLINE_USER_CREDITS,
             role="user",
             preferred_model="sutui",
         )

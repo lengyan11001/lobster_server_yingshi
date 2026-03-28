@@ -15,6 +15,7 @@ from ..db import get_db
 from .auth import get_current_user
 from ..models import CapabilityConfig, SkillUnlock, SkillUnlockOrder, User
 from ..services.credit_ledger import append_credit_ledger
+from ..services.credits_amount import quantize_credits, user_balance_decimal
 from .installation_slots import ensure_installation_slot, installation_slots_enabled, parse_installation_id_strict
 
 router = APIRouter()
@@ -451,6 +452,7 @@ def unlock_by_credits(
     if not need or int(need) <= 0:
         raise HTTPException(status_code=400, detail="该技能不支持积分解锁")
     need = int(need)
+    need_d = quantize_credits(need)
     unlocked = _user_unlocked_package_ids(db, current_user.id)
     if body.package_id in unlocked:
         if installation_slots_enabled():
@@ -458,17 +460,17 @@ def unlock_by_credits(
             ensure_installation_slot(db, current_user.id, iid)
         return {"ok": True, "message": f"已解锁 {package.get('name', body.package_id)}", "already_unlocked": True}
     db.refresh(current_user)
-    if (current_user.credits or 0) < need:
+    if user_balance_decimal(current_user) < need_d:
         raise HTTPException(
             status_code=402,
-            detail=f"积分不足：解锁需 {need} 积分，当前余额 {current_user.credits or 0}。请先充值。",
+            detail=f"积分不足：解锁需 {need} 积分，当前余额 {user_balance_decimal(current_user)}。请先充值。",
         )
-    current_user.credits = (current_user.credits or 0) - need
-    bal = int(current_user.credits or 0)
+    current_user.credits = user_balance_decimal(current_user) - need_d
+    bal = quantize_credits(current_user.credits)
     append_credit_ledger(
         db,
         current_user.id,
-        -need,
+        -need_d,
         "skill_unlock",
         bal,
         description=f"积分解锁技能 {package.get('name', body.package_id)}",

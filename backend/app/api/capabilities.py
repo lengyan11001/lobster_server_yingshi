@@ -13,6 +13,7 @@ from ..db import get_db
 from .auth import get_current_user
 from ..models import BillingIdempotency, CapabilityCallLog, CapabilityConfig, User
 from ..services.credit_ledger import append_credit_ledger
+from ..services.credits_amount import credits_json_float, quantize_credits, user_balance_decimal
 from .installation_slots import installation_slots_enabled, parse_installation_id_strict
 from .skills import user_can_use_capability
 
@@ -101,12 +102,12 @@ class RecordCallIn(BaseModel):
     chat_session_id: Optional[str] = None
     chat_context_id: Optional[str] = None
     """若由 pre-deduct 已扣过，传本次扣费数；pre_deduct_applied=True 时不在本接口再次减余额。"""
-    credits_charged: Optional[int] = None
+    credits_charged: Optional[float] = None
     pre_deduct_applied: bool = False
     """预扣金额（与 credits_charged 在预扣成功时一致）；与 credits_final 联用做差额结算。"""
-    credits_pre_deducted: Optional[int] = None
+    credits_pre_deducted: Optional[float] = None
     """速推返回的实际消耗积分；与预扣差额多退少补。"""
-    credits_final: Optional[int] = None
+    credits_final: Optional[float] = None
 
 
 class PreDeductIn(BaseModel):
@@ -205,17 +206,18 @@ def pre_deduct(
         if err:
             raise HTTPException(status_code=400, detail=err)
         db.refresh(current_user)
-        if (current_user.credits or 0) < est:
+        est_d = quantize_credits(est)
+        if user_balance_decimal(current_user) < est_d:
             raise HTTPException(
                 status_code=402,
-                detail=f"积分不足：本次预估需 {est} 积分（按速推模型定价），当前余额 {current_user.credits or 0}。请先充值。",
+                detail=f"积分不足：本次预估需 {est} 积分（按速推模型定价），当前余额 {user_balance_decimal(current_user)}。请先充值。",
             )
-        current_user.credits = (current_user.credits or 0) - est
-        bal = int(current_user.credits or 0)
+        current_user.credits = user_balance_decimal(current_user) - est_d
+        bal = quantize_credits(current_user.credits)
         append_credit_ledger(
             db,
             current_user.id,
-            -est,
+            -est_d,
             "pre_deduct",
             bal,
             description="能力预扣（按模型估价）",
@@ -235,17 +237,18 @@ def pre_deduct(
     if unit_credits <= 0:
         return {"credits_charged": 0}
     db.refresh(current_user)
-    if (current_user.credits or 0) < unit_credits:
+    uc = quantize_credits(unit_credits)
+    if user_balance_decimal(current_user) < uc:
         raise HTTPException(
             status_code=402,
-            detail=f"积分不足：本次需 {unit_credits} 积分，当前余额 {current_user.credits or 0}。请先充值。",
+            detail=f"积分不足：本次需 {unit_credits} 积分，当前余额 {user_balance_decimal(current_user)}。请先充值。",
         )
-    current_user.credits = (current_user.credits or 0) - unit_credits
-    bal = int(current_user.credits or 0)
+    current_user.credits = user_balance_decimal(current_user) - uc
+    bal = quantize_credits(current_user.credits)
     append_credit_ledger(
         db,
         current_user.id,
-        -unit_credits,
+        -uc,
         "pre_deduct",
         bal,
         description="能力预扣（按 unit_credits）",
@@ -260,7 +263,7 @@ def pre_deduct(
 
 class RefundIn(BaseModel):
     capability_id: str
-    credits: int
+    credits: float
 
 
 @router.post("/capabilities/refund", summary="调用失败时退还预扣积分")
@@ -275,9 +278,9 @@ def refund_credits(
     if not _billing_request_may_mutate_balance(request):
         return {"ok": True, "billing_skipped": True, "refunded": 0}
     db.refresh(current_user)
-    refund_amt = int(body.credits)
-    current_user.credits = (current_user.credits or 0) + refund_amt
-    bal = int(current_user.credits or 0)
+    refund_amt = quantize_credits(body.credits)
+    current_user.credits = user_balance_decimal(current_user) + refund_amt
+    bal = quantize_credits(current_user.credits)
     append_credit_ledger(
         db,
         current_user.id,
@@ -286,10 +289,10 @@ def refund_credits(
         bal,
         description="预扣/任务失败退款",
         ref_type="capability",
-        meta={"capability_id": body.capability_id, "refund_credits": refund_amt},
+        meta={"capability_id": body.capability_id, "refund_credits": float(refund_amt)},
     )
     db.commit()
-    return {"ok": True, "refunded": body.credits}
+    return {"ok": True, "refunded": float(refund_amt)}
 
 
 @router.post("/capabilities/record-call", summary="记录能力调用（独立认证时按 unit_credits 扣积分，或使用 pre-deduct 已扣数量）")
@@ -316,30 +319,30 @@ def record_call(
         }
     cap = db.query(CapabilityConfig).filter(CapabilityConfig.capability_id == body.capability_id).first()
     unit_credits = int(cap.unit_credits or 0) if cap else 0
-    credits_charged_body = body.credits_charged if body.credits_charged is not None else 0
+    credits_charged_body = quantize_credits(body.credits_charged if body.credits_charged is not None else 0)
     pre_applied = bool(getattr(body, "pre_deduct_applied", False))
     credits_final = getattr(body, "credits_final", None)
     credits_pre_deducted = getattr(body, "credits_pre_deducted", None)
 
-    credits_charged = 0
+    credits_charged = quantize_credits(0)
     db.refresh(current_user)
-    balance_before = int(current_user.credits or 0)
+    balance_before = user_balance_decimal(current_user)
     ledger_kind: Optional[str] = None
     ledger_meta: Optional[dict] = None
 
     if _should_deduct_credits() and pre_applied and credits_final is not None:
-        pre = int(credits_pre_deducted if credits_pre_deducted is not None else credits_charged_body)
-        final = int(credits_final)
+        pre = quantize_credits(credits_pre_deducted if credits_pre_deducted is not None else credits_charged_body)
+        final = quantize_credits(credits_final)
         delta = final - pre
-        if delta > 0 and (current_user.credits or 0) < delta:
+        if delta > 0 and user_balance_decimal(current_user) < delta:
             raise HTTPException(
                 status_code=402,
                 detail=(
                     f"积分不足：速推实际扣费 {final}，预扣 {pre}，需补扣 {delta} 积分，"
-                    f"当前余额 {current_user.credits or 0}。请先充值。"
+                    f"当前余额 {user_balance_decimal(current_user)}。请先充值。"
                 ),
             )
-        current_user.credits = (current_user.credits or 0) - delta
+        current_user.credits = user_balance_decimal(current_user) - delta
         credits_charged = final
         ledger_kind = "settle"
         ledger_meta = {
@@ -349,23 +352,24 @@ def record_call(
             "delta_settle": -delta,
         }
     elif credits_charged_body > 0 and _should_deduct_credits() and not pre_applied:
-        if (current_user.credits or 0) < credits_charged_body:
+        if user_balance_decimal(current_user) < credits_charged_body:
             raise HTTPException(
                 status_code=402,
-                detail=f"积分不足：本次需 {credits_charged_body} 积分（速推返回消耗），当前余额 {current_user.credits or 0}。请先充值。",
+                detail=f"积分不足：本次需 {credits_charged_body} 积分（速推返回消耗），当前余额 {user_balance_decimal(current_user)}。请先充值。",
             )
-        current_user.credits = (current_user.credits or 0) - credits_charged_body
+        current_user.credits = user_balance_decimal(current_user) - credits_charged_body
         credits_charged = credits_charged_body
         ledger_kind = "direct_charge"
         ledger_meta = {"capability_id": body.capability_id, "credits_charged": credits_charged_body}
     elif credits_charged_body == 0 and _should_deduct_credits() and not pre_applied and unit_credits > 0:
-        if (current_user.credits or 0) < unit_credits:
+        uc = quantize_credits(unit_credits)
+        if user_balance_decimal(current_user) < uc:
             raise HTTPException(
                 status_code=402,
-                detail=f"积分不足：本次需 {unit_credits} 积分，当前余额 {current_user.credits or 0}。请先充值。",
+                detail=f"积分不足：本次需 {unit_credits} 积分，当前余额 {user_balance_decimal(current_user)}。请先充值。",
             )
-        current_user.credits = (current_user.credits or 0) - unit_credits
-        credits_charged = unit_credits
+        current_user.credits = user_balance_decimal(current_user) - uc
+        credits_charged = uc
         ledger_kind = "unit_charge"
         ledger_meta = {"capability_id": body.capability_id, "unit_credits": unit_credits}
     elif pre_applied and credits_final is None and credits_charged_body > 0:
@@ -387,7 +391,7 @@ def record_call(
     )
     db.add(log)
     db.flush()
-    balance_after = int(current_user.credits or 0)
+    balance_after = quantize_credits(current_user.credits)
     ldelta = balance_after - balance_before
     if ledger_kind:
         append_credit_ledger(
@@ -402,12 +406,17 @@ def record_call(
             meta={
                 **(ledger_meta or {}),
                 "success": body.success,
-                "credits_charged": credits_charged,
+                "credits_charged": credits_json_float(credits_charged),
             },
         )
     db.commit()
     db.refresh(log)
-    return {"id": log.id, "capability_id": log.capability_id, "success": log.success, "credits_charged": credits_charged}
+    return {
+        "id": log.id,
+        "capability_id": log.capability_id,
+        "success": log.success,
+        "credits_charged": credits_json_float(credits_charged),
+    }
 
 
 @router.get("/capabilities/my-call-logs", summary="我的能力调用记录")
@@ -427,7 +436,7 @@ def my_call_logs(
             "id": r.id,
             "capability_id": r.capability_id,
             "success": r.success,
-            "credits_charged": r.credits_charged,
+            "credits_charged": credits_json_float(r.credits_charged),
             "latency_ms": r.latency_ms,
             "request_payload": r.request_payload,
             "response_payload": r.response_payload,

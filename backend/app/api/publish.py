@@ -16,6 +16,7 @@ from .installation_slots import ensure_installation_slot, installation_slots_ena
 from ..db import get_db
 from ..models import Asset, CapabilityCallLog, PublishAccount, PublishTask, SkillUnlock, User
 from ..services.credit_ledger import append_credit_ledger
+from ..services.credits_amount import quantize_credits, user_balance_decimal
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -452,8 +453,8 @@ async def create_publish_task(
     # 发布失败且已扣积分则退还
     if credits_charged > 0 and task.status != "success":
         db.refresh(current_user)
-        current_user.credits = (current_user.credits or 0) + credits_charged
-        bal = int(current_user.credits or 0)
+        current_user.credits = user_balance_decimal(current_user) + quantize_credits(credits_charged)
+        bal = quantize_credits(current_user.credits)
         append_credit_ledger(
             db,
             current_user.id,
