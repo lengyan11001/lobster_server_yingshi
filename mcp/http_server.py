@@ -18,6 +18,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from mcp.sutui_error_hints import (
+    append_capability_model_hint,
+    enhance_upstream_rest_error,
+    hint_for_wrong_capability_model,
+)
 from mcp.sutui_tokens import next_sutui_server_token
 
 from backend.app.services.credits_amount import quantize_credits
@@ -567,12 +572,14 @@ async def _call_upstream_sutui_tasks_rest(
         httpx.ConnectTimeout,
         httpx.WriteTimeout,
     )
+    model_for_hint = ""
     async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
         if tool_name == "generate":
-            model = (arguments.get("model") or "").strip()
+            model = (arguments.get("model") or arguments.get("model_id") or "").strip()
             if not model:
-                return {"error": {"message": "generate 缺少 model"}}
-            params = {k: v for k, v in arguments.items() if k != "model"}
+                return {"error": {"message": "generate 缺少 model（或 model_id）"}}
+            model_for_hint = model
+            params = {k: v for k, v in arguments.items() if k not in ("model", "model_id")}
             body = {"model": model, "params": params, "channel": None}
             url = f"{api_base}/api/v3/tasks/create"
         elif tool_name == "get_result":
@@ -617,7 +624,13 @@ async def _call_upstream_sutui_tasks_rest(
                 r.status_code,
                 err_body,
             )
-            return {"error": {"message": f"上游 REST HTTP {r.status_code}: {(r.text or '')[:800]}"}}
+            em = enhance_upstream_rest_error(
+                http_status=r.status_code,
+                err_body=(r.text or ""),
+                capability_id=lobster_capability_id or "",
+                model=model_for_hint,
+            )
+            return {"error": {"message": em}}
         try:
             payload = r.json()
         except Exception as e:
@@ -646,7 +659,12 @@ async def _call_upstream_sutui_tasks_rest(
             _log_sutui_upstream_full_response(
                 "sutui", tool_name, lobster_capability_id, _sanitize_for_json(payload)
             )
-            return {"error": {"message": f"上游业务错误: {msg}"}}
+            em = append_capability_model_hint(
+                f"上游业务错误: {msg}",
+                lobster_capability_id or "",
+                model_for_hint,
+            )
+            return {"error": {"message": em}}
         data = payload.get("data")
         if not isinstance(data, dict):
             _log_sutui_upstream_full_response(
@@ -922,19 +940,36 @@ def _merge_common_video_ui_fields(out: Dict[str, Any], payload: Dict[str, Any]) 
             out[k] = payload[k]
 
 
+def _clamp_num_images_for_image_model(num: int, model: str) -> int:
+    """按速推 docs 常见上限收敛张数，避免 num_images 过大导致 422。"""
+    m = (model or "").lower()
+    n = max(1, int(num))
+    if "seedream" in m:
+        return min(n, 6)
+    if "nano-banana" in m or "flux-2" in m or "qwen-image-edit" in m or m.startswith("jimeng-"):
+        return min(n, 4)
+    return n
+
+
 def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     按图片模型把「统一 payload」转成该模型 API 需要的参数，并保证用户输入的 prompt 原样传入。
     """
     if not payload or not isinstance(payload, dict):
         return payload
-    model = (payload.get("model") or "").strip()
+    payload = dict(payload)
+    model = (payload.get("model") or payload.get("model_id") or "").strip()
+    if not model:
+        model = (os.environ.get("SUTUI_DEFAULT_IMAGE_MODEL") or "fal-ai/flux-2/flash").strip()
+        logger.info("[MCP] image.generate 未传 model，默认 %s", model)
+    payload["model"] = model
     prompt = (payload.get("prompt") or "").strip()
     image_url = (payload.get("image_url") or "").strip()
     image_size = (payload.get("image_size") or "").strip()
     num_images = payload.get("num_images", payload.get("n", 1))
     if isinstance(num_images, (int, float)):
         num_images = max(1, int(num_images))
+    num_images = _clamp_num_images_for_image_model(num_images, model)
 
     # jimeng-4.0 / jimeng-4.5：prompt 必填，image_url 可选，n
     if "jimeng-" in model:
@@ -1636,6 +1671,13 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     payload = _normalize_video_generate_payload(payload)
                 except ValueError as e:
                     return [{"type": "text", "text": f"video.generate 参数错误: {e}"}], True
+
+            if capability_id in ("image.generate", "video.generate"):
+                _mid = (payload.get("model") or payload.get("model_id") or "").strip()
+                _cap_mismatch = hint_for_wrong_capability_model(capability_id, _mid)
+                if _cap_mismatch:
+                    return [{"type": "text", "text": _cap_mismatch}], True
+
             normalized_model = payload.get("model") if isinstance(payload, dict) else None
             if original_model != normalized_model:
                 logger.info("[MCP] 模型名称映射: %s -> %s", original_model, normalized_model)
