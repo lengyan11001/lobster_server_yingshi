@@ -18,7 +18,12 @@ from ..db import get_db
 from .auth import get_current_user
 from ..models import CapabilityCallLog, CreditLedger, RechargeOrder, User
 from ..services.credit_ledger import append_credit_ledger
-from ..services.credits_amount import credits_json_float, ledger_display_delta, quantize_credits
+from ..services.credits_amount import (
+    credits_json_float,
+    credits_json_float_signed,
+    ledger_display_delta,
+    quantize_credits,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -254,7 +259,7 @@ def get_credit_history(
             "time": r.created_at.isoformat() if r.created_at else "",
             "type": type_label,
             "entry_type": r.entry_type or "",
-            "amount": credits_json_float(delta),
+            "amount": credits_json_float_signed(delta),
             "description": desc,
             "balance_after": credits_json_float(r.balance_after or 0),
             "out_trade_no": "",
@@ -284,7 +289,7 @@ def get_credit_ledger(
         "items": [
             {
                 "id": r.id,
-                "delta": credits_json_float(ledger_display_delta(r)),
+                "delta": credits_json_float_signed(ledger_display_delta(r)),
                 "balance_after": credits_json_float(r.balance_after or 0),
                 "entry_type": r.entry_type,
                 "description": r.description or "",
