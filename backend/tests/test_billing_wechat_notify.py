@@ -121,7 +121,7 @@ class TestWechatNotifySecurity:
         """回调金额与订单不一致：返回 fail，不加积分，订单仍 pending。"""
         _create_user(db_session, user_id=1, credits=100)
         _create_pending_order(db_session, out_trade_no="R1_1000_xyz", amount_fen=1, credits=1)
-        # 伪造回调：说付了 99800 分，想骗 12000 积分
+        # 伪造回调：说付了 99800 分，想骗高额积分
         payload = {
             "event_type": "TRANSACTION.SUCCESS",
             "out_trade_no": "R1_1000_xyz",
@@ -212,7 +212,7 @@ class TestWechatNotifySecurity:
     def test_yuan_order_amount_check(self, client, db_session):
         """按元计费订单：expected_fen = amount_yuan * 100，回调金额一致才通过。"""
         _create_user(db_session, user_id=1, credits=0)
-        _create_pending_order(db_session, out_trade_no="R1_5000_yuan", amount_fen=0, amount_yuan=198, credits=2000)
+        _create_pending_order(db_session, out_trade_no="R1_5000_yuan", amount_fen=0, amount_yuan=198, credits=20000)
         # 回调 19800 分 = 198 元，应成功
         payload = {
             "event_type": "TRANSACTION.SUCCESS",
@@ -228,4 +228,4 @@ class TestWechatNotifySecurity:
         assert order.status == "paid"
         assert order.callback_amount_fen == 19800
         user = db_session.query(User).filter(User.id == 1).first()
-        assert user.credits == 2000
+        assert user.credits == 20000

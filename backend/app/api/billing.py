@@ -112,9 +112,9 @@ _CUSTOM_CONFIGS_FILE = _BASE_DIR / "custom_configs.json"
 # 默认收费模式（可被 custom_configs.json 中 BILLING_PRICING 覆盖）
 _DEFAULT_SKILL_UNLOCK = {"min_yuan": 98, "max_yuan": 198}
 _DEFAULT_CREDIT_PACKAGES = [
-    {"price_yuan": 198, "credits": 2000, "label": "198元 - 2000积分"},
-    {"price_yuan": 498, "credits": 5000, "label": "498元 - 5000积分"},
-    {"price_yuan": 998, "credits": 12000, "label": "998元 - 12000积分"},
+    {"price_yuan": 198, "credits": 20000, "label": "198元 - 20000积分"},
+    {"price_yuan": 498, "credits": 50000, "label": "498元 - 50000积分"},
+    {"price_yuan": 998, "credits": 120000, "label": "998元 - 120000积分"},
 ]
 
 
