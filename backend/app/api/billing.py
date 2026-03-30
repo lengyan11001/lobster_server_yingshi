@@ -3,8 +3,10 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from io import BytesIO
 
@@ -26,6 +28,19 @@ from ..services.credits_amount import (
 )
 
 logger = logging.getLogger(__name__)
+
+_BJ = ZoneInfo("Asia/Shanghai")
+
+
+def _dt_utc_naive_to_beijing_str(dt: Optional[datetime]) -> str:
+    """库内时间按 UTC naive 存储时，转为北京时间展示字符串。"""
+    if not dt:
+        return ""
+    u = dt
+    if u.tzinfo is not None:
+        u = u.astimezone(timezone.utc).replace(tzinfo=None)
+    aware = u.replace(tzinfo=timezone.utc)
+    return aware.astimezone(_BJ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _wechat_pay_configured() -> bool:
@@ -221,7 +236,9 @@ def get_my_recharge_orders(
             "credits": r.credits,
             "status": r.status,
             "created_at": r.created_at.isoformat() if r.created_at else "",
+            "created_at_beijing": _dt_utc_naive_to_beijing_str(r.created_at),
             "paid_at": r.paid_at.isoformat() if r.paid_at else "",
+            "paid_at_beijing": _dt_utc_naive_to_beijing_str(r.paid_at),
         }
         for r in rows
     ]
@@ -257,6 +274,7 @@ def get_credit_history(
         desc = (r.description or "").strip() or et or "积分变动"
         out.append({
             "time": r.created_at.isoformat() if r.created_at else "",
+            "time_beijing": _dt_utc_naive_to_beijing_str(r.created_at),
             "type": type_label,
             "entry_type": r.entry_type or "",
             "amount": credits_json_float_signed(delta),

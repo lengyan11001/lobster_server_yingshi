@@ -24,6 +24,8 @@ class User(Base):
     sutui_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     """自建微信登录：开放平台 openid，用于扫码登录关联用户。"""
     wechat_openid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    """注册时客户端所在安装包的品牌标记（与 LOBSTER_BRAND_MARK / brands.json 的 marks 键一致，如 bihuo、yingshi）。"""
+    brand_mark: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 

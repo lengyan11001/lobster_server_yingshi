@@ -2,6 +2,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -43,6 +44,7 @@ class UserOut(BaseModel):
     email: str
     preferred_model: str
     credits: Optional[float] = None
+    brand_mark: Optional[str] = None
 
 
 class Token(BaseModel):
@@ -50,11 +52,27 @@ class Token(BaseModel):
     token_type: str = "bearer"
 
 
+_BRAND_MARK_RE = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
+
+
+def _normalize_brand_mark(raw: Optional[str]) -> Optional[str]:
+    """注册请求中的品牌标记；空则不入库。须为小写 slug（与 brands.json 的 marks 键一致）。"""
+    if raw is None:
+        return None
+    s = (raw or "").strip().lower()
+    if not s:
+        return None
+    if not _BRAND_MARK_RE.match(s):
+        raise HTTPException(status_code=400, detail="品牌标记格式无效")
+    return s
+
+
 class RegisterBody(BaseModel):
     account: str  # 字母开头，2～64 位，仅允许字母数字._-
     password: str
     captcha_id: str = ""
     captcha_answer: str = ""
+    brand_mark: Optional[str] = None
 
 
 # 账号校验规则：字母开头，2～64 位，仅允许 [a-zA-Z0-9._-]，查重与存库统一小写
@@ -192,6 +210,7 @@ def register(body: RegisterBody, db: Session = Depends(get_db)):
         credits=REGISTER_INITIAL_CREDITS,
         role="admin" if email == "test01" else "user",
         preferred_model="sutui",
+        brand_mark=_normalize_brand_mark(body.brand_mark),
     )
     db.add(user)
     db.commit()
@@ -217,6 +236,7 @@ def get_me(current_user: User = Depends(get_current_user)):
         email=current_user.email,
         preferred_model=preferred,
         credits=credits_json_float(getattr(current_user, "credits", None) or 0),
+        brand_mark=getattr(current_user, "brand_mark", None),
     )
 
 
