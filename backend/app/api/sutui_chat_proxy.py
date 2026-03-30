@@ -94,6 +94,74 @@ def _should_deduct_credits() -> bool:
     return edition == "online" and getattr(settings, "lobster_independent_auth", True)
 
 
+def _rough_prompt_tokens_from_messages(messages: Any) -> int:
+    """粗估 prompt token 数，仅用于预检（略高估，减少「余额够预检但事后不够扣」）。"""
+    if not isinstance(messages, list):
+        return 512
+    total_chars = 0
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            total_chars += len(c)
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    total_chars += len(part["text"])
+    # 中英混排：偏保守按约每 3 字符 1 token
+    return max(32, int(total_chars / 3) + 32)
+
+
+def _completion_max_for_estimate(body: Dict[str, Any]) -> int:
+    """从请求中取最大生成长度；未指定时用中等默认值，避免用满上下文上限误伤正常用户。"""
+    mt = body.get("max_tokens") if body.get("max_tokens") is not None else body.get("max_completion_tokens")
+    if mt is None:
+        return 2048
+    try:
+        v = int(mt)
+    except (TypeError, ValueError):
+        return 2048
+    return min(max(v, 1), 128_000)
+
+
+def _chat_balance_precheck_params(body: Dict[str, Any]) -> Dict[str, Any]:
+    pt = _rough_prompt_tokens_from_messages(body.get("messages"))
+    ct = _completion_max_for_estimate(body)
+    return {"prompt_tokens": pt, "completion_tokens": ct}
+
+
+def _require_balance_before_upstream_chat(
+    db: Session,
+    current_user: User,
+    model_id: str,
+    body: Dict[str, Any],
+) -> None:
+    """
+    在上游调用前校验余额：仅当 docs 能取到 pricing 时按本次请求做保守预估。
+    无定价时不拦截（与原先「仍转发、事后按返回计费」一致），避免误杀。
+    """
+    if not _should_deduct_credits() or not (model_id or "").strip():
+        return
+    pricing = fetch_model_pricing(model_id)
+    if not pricing:
+        return
+    params = _chat_balance_precheck_params(body)
+    need = estimate_credits_from_pricing(pricing, params)
+    if need <= 0:
+        return
+    db.refresh(current_user)
+    bal = user_balance_decimal(current_user)
+    if bal < need:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"积分不足：按本次请求参数预估至少需 {need} 积分，当前余额 {bal}。"
+                "请充值或缩短上下文/降低 max_tokens 后重试。"
+            ),
+        )
+
+
 def _credits_for_sutui_chat(
     model: str,
     usage: Optional[dict],
@@ -164,13 +232,18 @@ def _apply_chat_deduct(
     bal = user_balance_decimal(current_user)
     if bal < credits:
         logger.error(
-            "[sutui-chat] 扣积分失败（余额不足） user_id=%s model=%s need=%s have=%s",
+            "[sutui-chat] 扣积分失败（余额不足），上游已成功返回，不向客户端透传正文 user_id=%s model=%s need=%s have=%s",
             current_user.id,
             model,
             credits,
             bal,
         )
-        return
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"积分不足：本次应答需扣 {credits} 积分，当前余额 {bal}。请充值后重试。"
+            ),
+        )
     current_user.credits = bal - credits
     bal_after = quantize_credits(current_user.credits)
     append_credit_ledger(
@@ -219,6 +292,8 @@ async def sutui_chat_completions(
 
     model_id = (body.get("model") or "").strip()
 
+    _require_balance_before_upstream_chat(db, current_user, model_id, body)
+
     if not stream:
         try:
             async with httpx.AsyncClient(timeout=120.0, trust_env=True) as client:
@@ -254,9 +329,12 @@ async def sutui_chat_completions(
 
         return JSONResponse(content=data, status_code=r.status_code)
 
-    # 流式：上游不在此返回完整 usage，扣费与「非流式」一致请用 stream=false；此处暂不扣积分以免失败无法回退
+    # 流式：边下边解析 SSE 行，取最后一个含 usage 的 data JSON；若无则按与预检一致的保守 usage 估算扣费。
 
     async def gen() -> AsyncIterator[bytes]:
+        line_buf = bytearray()
+        last_usage: Optional[Dict[str, Any]] = None
+        stream_completed_ok = False
         try:
             async with httpx.AsyncClient(timeout=300.0, trust_env=True) as client:
                 async with client.stream("POST", url, json=body, headers=headers) as resp:
@@ -265,8 +343,35 @@ async def sutui_chat_completions(
                         err = json.dumps({"error": {"message": txt[:2000], "status": resp.status_code}}, ensure_ascii=False)
                         yield f"data: {err}\n\n".encode("utf-8")
                         return
+                    stream_completed_ok = True
                     async for chunk in resp.aiter_bytes():
                         yield chunk
+                        line_buf.extend(chunk)
+                        while True:
+                            nl = line_buf.find(b"\n")
+                            if nl < 0:
+                                break
+                            line_bytes = line_buf[:nl].rstrip(b"\r")
+                            del line_buf[: nl + 1]
+                            line = line_bytes.decode("utf-8", errors="replace").strip()
+                            if not line.startswith("data:"):
+                                continue
+                            payload = line[5:].strip()
+                            if not payload or payload == "[DONE]":
+                                continue
+                            try:
+                                obj = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue
+                            if not isinstance(obj, dict):
+                                continue
+                            u = obj.get("usage")
+                            if isinstance(u, dict) and (
+                                u.get("prompt_tokens") is not None
+                                or u.get("completion_tokens") is not None
+                                or u.get("total_tokens") is not None
+                            ):
+                                last_usage = u
         except httpx.ConnectError as e:
             logger.exception("[sutui-chat] 流式上游连接失败 url=%s", url)
             err = json.dumps(
@@ -289,5 +394,38 @@ async def sutui_chat_completions(
                 ensure_ascii=False,
             )
             yield f"data: {err}\n\n".encode("utf-8")
+        finally:
+            if not stream_completed_ok or not model_id or not _should_deduct_credits():
+                return
+            usage_for_deduct: Optional[Dict[str, Any]] = last_usage
+            if not usage_for_deduct:
+                sp = _chat_balance_precheck_params(body)
+                usage_for_deduct = {
+                    "prompt_tokens": sp["prompt_tokens"],
+                    "completion_tokens": sp["completion_tokens"],
+                }
+            resp_for_bill: Dict[str, Any] = {"usage": last_usage} if last_usage else {"usage": usage_for_deduct}
+            try:
+                _apply_chat_deduct(
+                    db,
+                    current_user,
+                    model_id,
+                    usage_for_deduct if isinstance(usage_for_deduct, dict) else None,
+                    resp_for_bill,
+                )
+            except HTTPException as exc:
+                if exc.status_code == 402:
+                    logger.error(
+                        "[sutui-chat] 流式结束后扣费失败 user_id=%s model=%s detail=%s",
+                        current_user.id,
+                        model_id,
+                        exc.detail,
+                    )
+                else:
+                    logger.exception(
+                        "[sutui-chat] 流式结束后扣费异常 user_id=%s model=%s",
+                        current_user.id,
+                        model_id,
+                    )
 
     return StreamingResponse(gen(), media_type="text/event-stream")

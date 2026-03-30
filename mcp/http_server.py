@@ -1767,6 +1767,16 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 payload = {}
             if not capability_id or capability_id not in catalog:
                 return [{"type": "text", "text": f"能力未找到: {capability_id}"}], True
+            if not (token or "").strip():
+                return [
+                    {
+                        "type": "text",
+                        "text": (
+                            "调用能力需要登录：请在 MCP 请求中携带 Authorization: Bearer（用户 JWT），"
+                            "以便预扣积分与结算；匿名请求不会转发上游。"
+                        ),
+                    }
+                ], True
             if _capability_id_is_debug_only_in_registry(capability_id) and not await _fetch_is_skill_store_admin(token):
                 return [{"type": "text", "text": "该能力为调试中技能，当前账号不可用。"}], True
             cfg = catalog[capability_id]
