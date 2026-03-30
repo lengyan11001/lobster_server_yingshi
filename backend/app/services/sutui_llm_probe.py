@@ -97,7 +97,8 @@ async def _fetch_mcp_models(token: str) -> List[Dict[str, Any]]:
     return models
 
 
-async def _probe_one_chat(token: str, model_id: str) -> bool:
+async def _probe_one_chat(token: str, model_id: str) -> tuple[bool, int]:
+    """返回 (是否 200 可用, HTTP 状态码)。402 表示管理端 Token 池余额不足，非模型不可用。"""
     base = _api_base()
     url = f"{base}/v1/chat/completions"
     headers = {
@@ -115,12 +116,18 @@ async def _probe_one_chat(token: str, model_id: str) -> bool:
         async with httpx.AsyncClient(timeout=45.0) as client:
             r = await client.post(url, json=body, headers=headers)
         if r.status_code == 200:
-            return True
-        logger.info("[sutui_llm_probe] model=%s status=%s body=%s", model_id, r.status_code, (r.text or "")[:300])
-        return False
+            return True, r.status_code
+        if r.status_code == 402:
+            logger.warning(
+                "[sutui_llm_probe] model=%s status=402 管理端 Token 余额不足，探测将判不可用（请充值后重试）",
+                model_id,
+            )
+        else:
+            logger.info("[sutui_llm_probe] model=%s status=%s body=%s", model_id, r.status_code, (r.text or "")[:300])
+        return False, r.status_code
     except Exception as e:
         logger.info("[sutui_llm_probe] model=%s error=%s", model_id, e)
-        return False
+        return False, 0
 
 
 def _pick_recommended(candidates: List[Dict[str, Any]]) -> Optional[str]:
@@ -155,10 +162,31 @@ async def run_sutui_llm_probe_once() -> Dict[str, Any]:
             "可设为 all 探测全部条目后再收窄。"
         )
 
+    # 只对对话类做 chat 探测；此前 SUTUI_LLM_PROBE_CATEGORY=all 时会对生图/生视频打 completions，易全 503 且浪费额度
+    to_probe = filter_chat_models_for_api(filtered)
+    if not to_probe:
+        raise RuntimeError(
+            "速推 mcp/models 在分类规则下无 text/llm 对话模型，无法探测（请检查上游 catalog）。"
+        )
+
+    prev_good: Optional[Dict[str, Any]] = None
+    if _SNAPSHOT_PATH.exists():
+        try:
+            prev = json.loads(_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+            if sum(1 for x in (prev.get("models") or []) if x.get("available")) > 0:
+                prev_good = prev
+        except Exception:
+            pass
+
     out_models: List[Dict[str, Any]] = []
-    for m in filtered:
-        mid = str(m["id"]).strip()
-        ok = await _probe_one_chat(token, mid)
+    saw_402 = False
+    for m in to_probe:
+        mid = str(m.get("id") or "").strip()
+        if not mid:
+            continue
+        ok, code = await _probe_one_chat(token, mid)
+        if code == 402:
+            saw_402 = True
         await asyncio.sleep(0.15)
         entry = {
             "id": mid,
@@ -171,6 +199,13 @@ async def run_sutui_llm_probe_once() -> Dict[str, Any]:
     candidates = [x for x in out_models if x.get("available")]
     recommended = _pick_recommended(candidates)
 
+    if not candidates and saw_402 and prev_good is not None:
+        logger.warning(
+            "[sutui_llm_probe] 本轮探测因 402 余额不足全部不可用，保留上次有效快照不覆盖 path=%s",
+            _SNAPSHOT_PATH,
+        )
+        return prev_good
+
     ts = datetime.now(timezone.utc).isoformat()
     payload: Dict[str, Any] = {
         "probed_at": ts,
@@ -179,6 +214,8 @@ async def run_sutui_llm_probe_once() -> Dict[str, Any]:
         "recommended": recommended,
         "models": out_models,
     }
+    if not candidates and saw_402:
+        payload["error"] = "探测时管理端 Token 返回 402 余额不足，本轮无可用模型；请充值后等待下次探测或查看实时接口。"
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     _SNAPSHOT_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(
