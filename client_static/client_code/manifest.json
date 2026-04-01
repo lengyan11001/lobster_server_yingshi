@@ -1,7 +1,7 @@
 {
   "version": "1.0.1",
-  "build": 0,
+  "build": 1,
   "bundle_url": "https://api.51ins.com/client/client-code/bundles/lobster_online_code_1.0.1.zip",
   "sha256": "69ab05960958f024f4379021d1c3a2c4e44dc76c05109edac3034f442dd6a213",
-  "note": "纯代码 OTA：build 更大或同 build 下 version 更高则拉 bundle；paths 省略用客户端默认列表。"
+  "note": "发版递增 build 可强制老客户端拉包（仅比 version 的旧脚本也能触发）；zip 未变则 sha256 不变。"
 }
