@@ -634,6 +634,16 @@ def create_app() -> FastAPI:
         name="client_skill_bundle",
     )
 
+    # 在线版客户端「纯代码包」manifest / zip（与 lobster_online CLIENT_CODE_MANIFEST_URL 对应）
+    _client_code_dir = Path(__file__).resolve().parent.parent.parent / "client_static" / "client_code"
+    _client_code_dir.mkdir(parents=True, exist_ok=True)
+    (_client_code_dir / "bundles").mkdir(exist_ok=True)
+    app.mount(
+        "/client/client-code",
+        StaticFiles(directory=str(_client_code_dir)),
+        name="client_client_code",
+    )
+
     # 前端由 lobster_online 提供，本服务仅 API；根路径返回说明
     @app.get("/", include_in_schema=False)
     def index():
