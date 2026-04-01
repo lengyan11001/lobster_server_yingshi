@@ -54,6 +54,23 @@ def _ensure_default_user():
     return
 
 
+def _migrate_capability_configs_extra_config():
+    """Add extra_config JSON column to capability_configs if missing."""
+    from sqlalchemy import text
+
+    try:
+        if "sqlite" not in settings.database_url:
+            return
+        with engine.connect() as conn:
+            r = conn.execute(text("PRAGMA table_info(capability_configs)"))
+            cols = [row[1] for row in r]
+            if "extra_config" not in cols:
+                conn.execute(text("ALTER TABLE capability_configs ADD COLUMN extra_config JSON"))
+                conn.commit()
+    except Exception as e:
+        logger.warning("Migration capability_configs.extra_config skipped: %s", e)
+
+
 def _seed_capability_catalog():
     """Import capability catalog from mcp/capability_catalog.json on first run."""
     catalog_path = Path(__file__).resolve().parent.parent.parent / "mcp" / "capability_catalog.json"
@@ -76,6 +93,7 @@ def _seed_capability_catalog():
                     upstream=str(cfg.get("upstream") or "sutui"),
                     upstream_tool=str(cfg.get("upstream_tool") or "").strip(),
                     arg_schema=cfg.get("arg_schema") if isinstance(cfg.get("arg_schema"), dict) else None,
+                    extra_config=None,
                     enabled=bool(cfg.get("enabled", True)),
                     is_default=bool(cfg.get("is_default", False)),
                     unit_credits=int(cfg.get("unit_credits") or 0),
@@ -561,6 +579,7 @@ def create_app() -> FastAPI:
     _migrate_credits_decimal_sqlite()
     _migrate_credits_decimal_mysql()
     _backfill_installation_signup_bonus_claims()
+    _migrate_capability_configs_extra_config()
     _ensure_default_user()
     _seed_capability_catalog()
     _auto_start_openclaw()

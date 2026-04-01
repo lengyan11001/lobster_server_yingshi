@@ -38,6 +38,7 @@ class CapabilityConfig(Base):
     upstream: Mapped[str] = mapped_column(String(64), nullable=False, default="sutui")
     upstream_tool: Mapped[str] = mapped_column(String(128), nullable=False)
     arg_schema: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    extra_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     unit_credits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

@@ -179,7 +179,7 @@ def list_store(current_user: User = Depends(get_current_user), db: Session = Dep
             or pkg.get("default_installed")
             or _package_capabilities_already_in_catalog(db, pkg)
         )
-        out.append({
+        entry = {
             "id": pkg_id,
             "name": pkg.get("name", pkg_id),
             "description": pkg.get("description", ""),
@@ -192,7 +192,11 @@ def list_store(current_user: User = Depends(get_current_user), db: Session = Dep
             "unlock_price_credits": pkg.get("unlock_price_credits"),
             "default_installed": pkg.get("default_installed"),
             "unlocked": pkg_id in unlocked,
-        })
+        }
+        pc = pkg.get("package_config")
+        if isinstance(pc, dict):
+            entry["package_config"] = pc
+        out.append(entry)
     return {"packages": out, "is_skill_store_admin": is_admin}
 
 
@@ -396,6 +400,8 @@ def install_skill(
         catalog = _load_local_catalog()
         catalog.update(capabilities)
         _save_local_catalog(catalog)
+        pkg_extra = package.get("package_config")
+        seed_extra = pkg_extra if isinstance(pkg_extra, dict) else None
         for cap_id, cap_cfg in capabilities.items():
             existing = db.query(CapabilityConfig).filter(CapabilityConfig.capability_id == cap_id).first()
             if not existing:
@@ -405,6 +411,7 @@ def install_skill(
                     upstream=str(cap_cfg.get("upstream") or "sutui"),
                     upstream_tool=str(cap_cfg.get("upstream_tool") or ""),
                     arg_schema=cap_cfg.get("arg_schema") if isinstance(cap_cfg.get("arg_schema"), dict) else None,
+                    extra_config=dict(seed_extra) if seed_extra else None,
                     enabled=True,
                     is_default=bool(cap_cfg.get("is_default", False)),
                     unit_credits=int(cap_cfg.get("unit_credits") or 0),

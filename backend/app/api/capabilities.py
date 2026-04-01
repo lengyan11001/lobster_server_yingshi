@@ -65,6 +65,7 @@ def list_available(
             "upstream": r.upstream,
             "upstream_tool": r.upstream_tool,
             "arg_schema": r.arg_schema,
+            "extra_config": getattr(r, "extra_config", None),
             "is_default": r.is_default,
             "unit_credits": r.unit_credits,
         })
@@ -86,6 +87,7 @@ def list_registry(
             "enabled": r.enabled,
             "is_default": r.is_default,
             "unit_credits": r.unit_credits,
+            "extra_config": getattr(r, "extra_config", None),
         }
         for r in rows
     ]
