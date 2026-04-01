@@ -2,8 +2,10 @@ import base64
 import hashlib
 import json
 import logging
+import random
 import re
 import secrets
+import threading
 import time
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -24,6 +26,7 @@ from ..captcha_util import create_captcha, verify_captcha
 from ..db import get_db
 from ..models import SkillUnlock, User
 from ..services.credits_amount import credits_json_float
+from ..services.sms_ihuyi import send_verify_code_sms
 from .installation_slots import (
     INSTALLATION_ID_HEADER,
     apply_installation_signup_bonus_for_new_user,
@@ -36,6 +39,16 @@ from .installation_slots import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 ONLINE_USER_EMAIL = "online@sutui.lobster.local"
+
+_SMS_LOCK = threading.Lock()
+_SMS_CODE_STORE: dict[str, tuple[str, float]] = {}
+_SMS_SEND_AT: dict[str, float] = {}
+_SMS_SEND_HOUR_COUNT: dict[str, tuple[float, int]] = {}
+SMS_CODE_TTL_SEC = 600
+SMS_SEND_COOLDOWN_SEC = 60
+SMS_MAX_PER_HOUR = 10
+PHONE_EMAIL_SUFFIX = "@sms.lobster.local"
+_CN_MOBILE_RE = re.compile(r"^1[3-9]\d{9}$")
 # 新注册用户满额新人分（在线独立认证下按 installation_id 仅首注发放，同机再注册为 0），最多 4 位小数
 REGISTER_INITIAL_CREDITS = Decimal("1000.0000")
 DEFAULT_ONLINE_USER_CREDITS = Decimal("99999.0000")
@@ -81,6 +94,48 @@ class RegisterBody(BaseModel):
     captcha_id: str = ""
     captcha_answer: str = ""
     brand_mark: Optional[str] = None
+
+
+class SmsSendBody(BaseModel):
+    phone: str
+    captcha_id: str = ""
+    captcha_answer: str = ""
+
+
+class RegisterPhoneBody(BaseModel):
+    phone: str
+    code: str
+    password: str
+    brand_mark: Optional[str] = None
+
+
+def _normalize_cn_mobile(raw: str) -> str:
+    d = re.sub(r"\D", "", (raw or "").strip())
+    if not _CN_MOBILE_RE.match(d):
+        raise HTTPException(status_code=400, detail="手机号格式无效")
+    return d
+
+
+def _phone_account_email(mobile: str) -> str:
+    return f"{mobile}{PHONE_EMAIL_SUFFIX}"
+
+
+def _purge_sms_stale_locked(now_m: float) -> None:
+    for k in [x for x, v in _SMS_CODE_STORE.items() if v[1] <= now_m]:
+        del _SMS_CODE_STORE[k]
+
+
+def _login_account_key(username: str) -> str:
+    """登录框：含 @ 按邮箱；否则 11 位手机号映射为手机账号邮箱。"""
+    u_raw = (username or "").strip()
+    if not u_raw:
+        return ""
+    if "@" in u_raw:
+        return u_raw.lower()
+    digits_only = re.sub(r"\D", "", u_raw)
+    if _CN_MOBILE_RE.match(digits_only):
+        return _phone_account_email(digits_only)
+    return u_raw.lower()
 
 
 # 账号校验规则：字母开头，2～64 位，仅允许 [a-zA-Z0-9._-]，查重与存库统一小写
@@ -187,7 +242,7 @@ async def login(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="请输入账号和密码")
     if not verify_captcha(captcha_id, captcha_answer):
         raise HTTPException(status_code=400, detail="验证码错误或已过期，请刷新后重试")
-    account_lower = username.strip().lower()
+    account_lower = _login_account_key(username)
     if not account_lower:
         raise HTTPException(status_code=400, detail="请输入账号和密码")
     user = db.query(User).filter(User.email == account_lower).first()
@@ -200,28 +255,92 @@ async def login(request: Request, db: Session = Depends(get_db)):
     return Token(access_token=access_token)
 
 
-@router.post("/register", response_model=Token, summary="注册（独立认证时使用，请求体含验证码，传输请使用 HTTPS）")
+@router.post("/register", response_model=Token, summary="（已关闭）原字母账号注册，请用 /auth/register-phone")
 def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)):
     from ..core.config import settings
     edition = (getattr(settings, "lobster_edition", None) or "online").strip().lower()
     use_independent = getattr(settings, "lobster_independent_auth", True)
     if edition != "online" or not use_independent:
         raise HTTPException(status_code=400, detail="当前版本不支持自主注册")
+    raise HTTPException(status_code=400, detail="已关闭账号密码注册，请使用手机号与短信验证码注册")
+
+
+@router.post("/sms/send", summary="发送手机注册短信验证码（需先通过图形验证码）")
+def send_register_sms(body: SmsSendBody, request: Request):
+    from ..core.config import settings
+
+    edition = (getattr(settings, "lobster_edition", None) or "online").strip().lower()
+    use_independent = getattr(settings, "lobster_independent_auth", True)
+    if edition != "online" or not use_independent:
+        raise HTTPException(status_code=400, detail="当前版本不支持")
+    acc = (getattr(settings, "ihuyi_sms_account", None) or "").strip()
+    pwd = (getattr(settings, "ihuyi_sms_password", None) or "").strip()
+    if not acc or not pwd:
+        raise HTTPException(status_code=503, detail="未配置短信通道（IHUYI_SMS_ACCOUNT / IHUYI_SMS_PASSWORD）")
     if not verify_captcha(body.captcha_id or "", body.captcha_answer or ""):
-        raise HTTPException(status_code=400, detail="验证码错误或已过期，请刷新后重试")
-    email = _normalize_and_validate_account(body.account)
+        raise HTTPException(status_code=400, detail="图形验证码错误或已过期，请刷新后重试")
+    mobile = _normalize_cn_mobile(body.phone)
+    now_m = time.monotonic()
+    with _SMS_LOCK:
+        _purge_sms_stale_locked(now_m)
+        last = _SMS_SEND_AT.get(mobile, 0.0)
+        if now_m - last < SMS_SEND_COOLDOWN_SEC:
+            raise HTTPException(status_code=429, detail="发送过于频繁，请 1 分钟后再试")
+        win = _SMS_SEND_HOUR_COUNT.get(mobile)
+        if win:
+            wstart, cnt = win
+            if now_m - wstart > 3600:
+                _SMS_SEND_HOUR_COUNT[mobile] = (now_m, 1)
+            elif cnt >= SMS_MAX_PER_HOUR:
+                raise HTTPException(status_code=429, detail="该号码本小时发送次数过多，请稍后再试")
+            else:
+                _SMS_SEND_HOUR_COUNT[mobile] = (wstart, cnt + 1)
+        else:
+            _SMS_SEND_HOUR_COUNT[mobile] = (now_m, 1)
+        code = f"{random.randint(0, 999999):06d}"
+        _SMS_CODE_STORE[mobile] = (code, now_m + SMS_CODE_TTL_SEC)
+        _SMS_SEND_AT[mobile] = now_m
+    try:
+        send_verify_code_sms(account=acc, api_key=pwd, mobile=mobile, code=code)
+    except RuntimeError as e:
+        with _SMS_LOCK:
+            _SMS_CODE_STORE.pop(mobile, None)
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    logger.info("[auth/sms/send] mobile=%s ok=1", mobile[:3] + "****" + mobile[-4:])
+    return {"ok": True}
+
+
+@router.post("/register-phone", response_model=Token, summary="手机号注册（短信验证码 + 密码）")
+def register_phone(body: RegisterPhoneBody, request: Request, db: Session = Depends(get_db)):
+    from ..core.config import settings
+
+    edition = (getattr(settings, "lobster_edition", None) or "online").strip().lower()
+    use_independent = getattr(settings, "lobster_independent_auth", True)
+    if edition != "online" or not use_independent:
+        raise HTTPException(status_code=400, detail="当前版本不支持自主注册")
+    mobile = _normalize_cn_mobile(body.phone)
+    code_in = (body.code or "").strip()
+    if not code_in or len(code_in) > 8:
+        raise HTTPException(status_code=400, detail="短信验证码无效")
+    now_m = time.monotonic()
+    with _SMS_LOCK:
+        _purge_sms_stale_locked(now_m)
+        row = _SMS_CODE_STORE.get(mobile)
+        if not row or row[1] <= now_m or row[0] != code_in:
+            raise HTTPException(status_code=400, detail="短信验证码错误或已过期，请重新获取")
+        del _SMS_CODE_STORE[mobile]
     if len(body.password or "") < 6:
         raise HTTPException(status_code=400, detail="密码至少 6 位")
+    email = _phone_account_email(mobile)
     existing = db.query(User).filter(User.email == email).first()
     if existing:
-        raise HTTPException(status_code=400, detail="该账号已注册")
-    # 兼容旧客户端：可无 X-Installation-Id 完成注册，但不送新人积分（由 apply_installation_signup_bonus_for_new_user 置 0）
+        raise HTTPException(status_code=400, detail="该手机号已注册，请直接登录")
     reg_iid = optional_installation_id_from_request(request)
     user = User(
         email=email,
         hashed_password=get_password_hash(body.password),
         credits=REGISTER_INITIAL_CREDITS,
-        role="admin" if email == "test01" else "user",
+        role="user",
         preferred_model="sutui",
         brand_mark=_normalize_brand_mark(body.brand_mark),
     )
@@ -230,6 +349,18 @@ def register(body: RegisterBody, request: Request, db: Session = Depends(get_db)
     apply_installation_signup_bonus_for_new_user(db, user, reg_iid)
     db.commit()
     db.refresh(user)
+    _remote = getattr(request.client, "host", None) if request.client else None
+    _xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or None
+    logger.info(
+        "[auth/register-phone] user_id=%s mobile_tail=%s slots_enabled=%s installation_id_ok=%s credits=%s remote=%s",
+        user.id,
+        mobile[-4:],
+        installation_slots_enabled(),
+        bool(reg_iid),
+        user.credits,
+        _remote,
+        _xff,
+    )
     for pkg_id in (
         "sutui_mcp",
         "douyin_publish",
