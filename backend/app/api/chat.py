@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import copy
 import json
 import logging
 import re
@@ -45,6 +46,12 @@ MCP_URL = "http://127.0.0.1:8001/mcp"
 
 _URL_RE = re.compile(r'https?://[^\s"\'<>\)\]]+', re.IGNORECASE)
 _pending_tool_logs: contextvars.ContextVar[List[Dict]] = contextvars.ContextVar("_pending_tool_logs", default=[])
+# 供 task.get_result 轮询遇 504 时自动重提 video.generate（同请求内最近一次成功提交的参数）
+_last_video_generate_invoke: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "_last_video_generate_invoke", default=None
+)
+# 上游 fal/网关以 JSON 返回 Unexpected status code: 504 时，自动重新提交视频任务的最多次数
+_UPSTREAM_504_VIDEO_RESUBMIT_MAX = 3
 
 _PROVIDERS: Dict[str, Dict[str, str]] = {
     "deepseek":  {"base_url": "https://api.deepseek.com",  "env": "DEEPSEEK_API_KEY"},
@@ -431,6 +438,17 @@ async def _exec_tool(
             await progress_cb(ev_end)
         except Exception:
             pass
+    if (
+        capability_id == "video.generate"
+        and success
+        and result_text
+        and _is_task_result_in_progress(result_text)
+        and _extract_task_id_from_result(result_text)
+    ):
+        try:
+            _last_video_generate_invoke.set(copy.deepcopy(args))
+        except Exception:
+            logger.debug("[素材] 记录 video.generate 参数供504重试用失败", exc_info=True)
     return result_text
 
 
@@ -830,6 +848,164 @@ def _extract_task_id_from_result(result_text: str) -> str:
         return ""
 
 
+def _is_sutui_task_upstream_504_failure(result_text: str) -> bool:
+    """速推任务终态里 output 常见 raw_error: Unexpected status code: 504（非 HTTP 层 504）。"""
+    if not result_text or not result_text.strip():
+        return False
+    low = result_text.lower()
+    return "unexpected status code: 504" in low
+
+
+def _task_result_looks_like_video_task(result_text: str) -> bool:
+    """query 回包 JSON 中含视频模型 id 时才允许用 ContextVar 做 504 重提，避免图片任务误用视频参数。"""
+    if not result_text:
+        return False
+    low = result_text.lower()
+    return any(
+        k in low
+        for k in (
+            "text-to-video",
+            "image-to-video",
+            "sora-2",
+            "seedance",
+            "super-seed",
+            "kling-video",
+            "wan/v",
+            "veo3",
+            "hailuo",
+            "vidu",
+            "grok-imagine-video",
+            "jimeng",
+        )
+    )
+
+
+async def _poll_task_until_terminal_then_retry_video_on_504(
+    *,
+    initial_res: str,
+    get_result_args_base: Dict[str, Any],
+    token: str,
+    sutui_token: Optional[str],
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]],
+    db: Optional[Session],
+    user_id: Optional[int],
+    tool_fn_name: str,
+    poll_interval: int,
+    max_wait_sec: int,
+    enable_504_video_retry: bool,
+    video_resubmit_args: Optional[Dict[str, Any]],
+    log_label: str,
+) -> str:
+    """
+    与 image/video 生成一致：先按间隔轮询 task.get_result 至终态。
+    若启用 enable_504_video_retry 且终态为上游 504，则用 video_resubmit_args 或 ContextVar 中最近一次
+    video.generate 参数重新提交，最多 _UPSTREAM_504_VIDEO_RESUBMIT_MAX 次。
+    """
+    res = initial_res
+    retries_left = _UPSTREAM_504_VIDEO_RESUBMIT_MAX
+    gr_args = dict(get_result_args_base)
+
+    while True:
+        pl = gr_args.get("payload") if isinstance(gr_args.get("payload"), dict) else {}
+        task_id = (pl.get("task_id") or "").strip()
+
+        if _is_task_result_in_progress(res):
+            waited = 0
+            logger.info(
+                "[%s] 自动轮询开始 task_id=%s interval=%ds max_wait=%ds",
+                log_label,
+                task_id or "(无)",
+                poll_interval,
+                max_wait_sec,
+            )
+            while waited < max_wait_sec:
+                await asyncio.sleep(poll_interval)
+                waited += poll_interval
+                res = await _exec_tool_with_balance(
+                    tool_fn_name, gr_args, token, sutui_token, None, db, user_id,
+                )
+                in_prog = _is_task_result_in_progress(res)
+                logger.info(
+                    "[%s] 轮询 task.get_result waited=%ds task_id=%s in_progress=%s hint=%s",
+                    log_label,
+                    waited,
+                    task_id or "(无)",
+                    in_prog,
+                    _task_result_hint(res),
+                )
+                if progress_cb:
+                    try:
+                        ev = {"type": "task_poll", "message": f"正在查询生成结果…（{waited}秒）"}
+                        if task_id:
+                            ev["task_id"] = task_id
+                        ev["result_hint"] = _task_result_hint(res)
+                        await progress_cb(ev)
+                    except Exception:
+                        pass
+                if not in_prog:
+                    saved = _extract_saved_assets_from_task_result(res)
+                    logger.info(
+                        "[%s] 轮询结束 task_id=%s saved_assets_count=%d asset_ids=%s",
+                        log_label,
+                        task_id or "(无)",
+                        len(saved),
+                        [x.get("asset_id") for x in saved],
+                    )
+                    break
+
+        src = video_resubmit_args if video_resubmit_args is not None else _last_video_generate_invoke.get()
+        uses_context_only = video_resubmit_args is None
+        model_ok = (not uses_context_only) or _task_result_looks_like_video_task(res)
+        can_retry = (
+            enable_504_video_retry
+            and retries_left > 0
+            and _is_sutui_task_upstream_504_failure(res)
+            and model_ok
+            and isinstance(src, dict)
+            and (src.get("capability_id") or "").strip() == "video.generate"
+        )
+        if not can_retry:
+            return res
+
+        retries_left -= 1
+        # 终态失败时 MCP 在同一次 get_result 内会调 /capabilities/refund；稍候再提交新任务，
+        # 让退款入账后再走 video.generate 的预扣，避免短时余额与账本不一致。
+        await asyncio.sleep(2.0)
+        logger.warning(
+            "[%s] 上游返回 504，已等待 2s 后自动重新提交 video.generate（本轮后剩余重试 %d 次）",
+            log_label,
+            retries_left,
+        )
+        if progress_cb:
+            try:
+                await progress_cb({"type": "status", "message": "视频生成上游超时(504)，正在自动重试…"})
+            except Exception:
+                pass
+
+        try:
+            submit_args = copy.deepcopy(src)
+        except Exception:
+            submit_args = dict(src) if isinstance(src, dict) else {}
+
+        res = await _exec_tool_with_balance(
+            "invoke_capability",
+            submit_args,
+            token,
+            sutui_token,
+            progress_cb,
+            db,
+            user_id,
+        )
+        new_tid = _extract_task_id_from_result(res)
+        if not new_tid:
+            return res
+        gr_args = {"capability_id": "task.get_result", "payload": {"task_id": new_tid}}
+        if not _is_task_result_in_progress(res):
+            if _is_sutui_task_upstream_504_failure(res) and retries_left > 0:
+                continue
+            return res
+
+
 async def _chat_openai(
     msgs: List[Dict],
     cfg: Dict,
@@ -921,31 +1097,21 @@ async def _chat_openai(
                         get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                         poll_interval = 15
                         max_wait_sec = 20 * 60
-                        waited = 0
-                        logger.info("[素材] image.generate 自动轮询开始 task_id=%s interval=%ds max_wait=%ds", task_id, poll_interval, max_wait_sec)
-                        while waited < max_wait_sec:
-                            await asyncio.sleep(poll_interval)
-                            waited += poll_interval
-                            res = await _exec_tool_with_balance(
-                                "invoke_capability", get_result_args, token, sutui_token, None, db, user_id,
-                            )
-                            in_prog = _is_task_result_in_progress(res)
-                            logger.info("[素材] 轮询 image.generate waited=%ds task_id=%s in_progress=%s hint=%s", waited, task_id, in_prog, _task_result_hint(res))
-                            if progress_cb:
-                                try:
-                                    ev = {"type": "task_poll", "message": f"正在查询生成结果…（{waited}秒）"}
-                                    ev["task_id"] = task_id
-                                    ev["result_hint"] = _task_result_hint(res)
-                                    await progress_cb(ev)
-                                except Exception:
-                                    pass
-                            if not in_prog:
-                                saved = _extract_saved_assets_from_task_result(res)
-                                logger.info(
-                                    "[素材] 轮询结束 image.generate task_id=%s saved_assets_count=%d asset_ids=%s urls=%s",
-                                    task_id, len(saved), [x.get("asset_id") for x in saved], [(x.get("url") or "")[:80] for x in saved],
-                                )
-                                break
+                        res = await _poll_task_until_terminal_then_retry_video_on_504(
+                            initial_res=res,
+                            get_result_args_base=get_result_args,
+                            token=token,
+                            sutui_token=sutui_token,
+                            progress_cb=progress_cb,
+                            db=db,
+                            user_id=user_id,
+                            tool_fn_name=fn.get("name", "invoke_capability"),
+                            poll_interval=poll_interval,
+                            max_wait_sec=max_wait_sec,
+                            enable_504_video_retry=False,
+                            video_resubmit_args=None,
+                            log_label="素材] image.generate",
+                        )
                         if progress_cb:
                             try:
                                 ev_end = {
@@ -965,35 +1131,71 @@ async def _chat_openai(
                                 pass
                 elif (
                     fn.get("name") == "invoke_capability"
+                    and cap == "video.generate"
+                    and _is_task_result_in_progress(res)
+                ):
+                    task_id = _extract_task_id_from_result(res)
+                    if task_id:
+                        get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
+                        poll_interval = 15
+                        max_wait_sec = 20 * 60
+                        video_args = copy.deepcopy(a)
+                        res = await _poll_task_until_terminal_then_retry_video_on_504(
+                            initial_res=res,
+                            get_result_args_base=get_result_args,
+                            token=token,
+                            sutui_token=sutui_token,
+                            progress_cb=progress_cb,
+                            db=db,
+                            user_id=user_id,
+                            tool_fn_name=fn.get("name", "invoke_capability"),
+                            poll_interval=poll_interval,
+                            max_wait_sec=max_wait_sec,
+                            enable_504_video_retry=True,
+                            video_resubmit_args=video_args,
+                            log_label="素材] video.generate",
+                        )
+                        if progress_cb:
+                            try:
+                                ev_end = {
+                                    "type": "tool_end",
+                                    "name": "invoke_capability",
+                                    "preview": (res or "")[:200],
+                                    "capability_id": "task.get_result",
+                                    "phase": "task_polling",
+                                    "in_progress": False,
+                                }
+                                ev_end["media_type"] = _extract_media_type_from_task_result(res)
+                                ev_end["saved_assets"] = _extract_saved_assets_from_task_result(res)
+                                logger.info("[素材] 推送 tool_end phase=task_polling(视频) saved_assets_count=%d", len(ev_end.get("saved_assets") or []))
+                                await progress_cb(ev_end)
+                                await progress_cb({"type": "status", "message": "正在生成回复…"})
+                            except Exception:
+                                pass
+                elif (
+                    fn.get("name") == "invoke_capability"
                     and (a.get("capability_id") or "").strip() == "task.get_result"
                     and _is_task_result_in_progress(res)
                 ):
                     poll_interval = 15
                     max_wait_sec = 20 * 60
-                    waited = 0
                     task_id = (a.get("task_id") or a.get("payload", {}).get("task_id") or "").strip() if isinstance(a.get("payload"), dict) else (a.get("task_id") or "").strip()
                     logger.info("[素材] task.get_result 自动轮询开始 task_id=%s interval=%ds max_wait=%ds", task_id or "(无)", poll_interval, max_wait_sec)
-                    while waited < max_wait_sec:
-                        await asyncio.sleep(poll_interval)
-                        waited += poll_interval
-                        res = await _exec_tool_with_balance(
-                            fn.get("name", ""), a, token, sutui_token, None, db, user_id,
-                        )
-                        in_prog = _is_task_result_in_progress(res)
-                        logger.info("[素材] 轮询 task.get_result waited=%ds task_id=%s in_progress=%s hint=%s", waited, task_id or "(无)", in_prog, _task_result_hint(res))
-                        if progress_cb:
-                            try:
-                                ev = {"type": "task_poll", "message": f"正在查询生成结果…（{waited}秒）"}
-                                if task_id:
-                                    ev["task_id"] = task_id
-                                ev["result_hint"] = _task_result_hint(res)
-                                await progress_cb(ev)
-                            except Exception:
-                                pass
-                        if not in_prog:
-                            saved = _extract_saved_assets_from_task_result(res)
-                            logger.info("[素材] 轮询结束 task.get_result task_id=%s saved_assets_count=%d asset_ids=%s", task_id or "(无)", len(saved), [x.get("asset_id") for x in saved])
-                            break
+                    res = await _poll_task_until_terminal_then_retry_video_on_504(
+                        initial_res=res,
+                        get_result_args_base=dict(a),
+                        token=token,
+                        sutui_token=sutui_token,
+                        progress_cb=progress_cb,
+                        db=db,
+                        user_id=user_id,
+                        tool_fn_name=fn.get("name", "invoke_capability"),
+                        poll_interval=poll_interval,
+                        max_wait_sec=max_wait_sec,
+                        enable_504_video_retry=True,
+                        video_resubmit_args=None,
+                        log_label="素材] task.get_result",
+                    )
                     if progress_cb:
                         try:
                             ev_end = {
@@ -1046,29 +1248,21 @@ async def _chat_openai(
                         get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                         poll_interval = 15
                         max_wait_sec = 20 * 60
-                        waited = 0
-                        logger.info("[素材] image.generate 自动轮询开始(text_calls) task_id=%s interval=%ds", task_id, poll_interval)
-                        while waited < max_wait_sec:
-                            await asyncio.sleep(poll_interval)
-                            waited += poll_interval
-                            res = await _exec_tool_with_balance(
-                                tc_info["name"], {"capability_id": "task.get_result", "payload": {"task_id": task_id}},
-                                token, sutui_token, None, db, user_id,
-                            )
-                            in_prog = _is_task_result_in_progress(res)
-                            logger.info("[素材] 轮询 image.generate(text_calls) waited=%ds task_id=%s in_progress=%s hint=%s", waited, task_id, in_prog, _task_result_hint(res))
-                            if progress_cb:
-                                try:
-                                    ev = {"type": "task_poll", "message": f"正在查询生成结果…（{waited}秒）"}
-                                    ev["task_id"] = task_id
-                                    ev["result_hint"] = _task_result_hint(res)
-                                    await progress_cb(ev)
-                                except Exception:
-                                    pass
-                            if not in_prog:
-                                saved = _extract_saved_assets_from_task_result(res)
-                                logger.info("[素材] 轮询结束 image.generate(text_calls) task_id=%s saved_assets_count=%d asset_ids=%s", task_id, len(saved), [x.get("asset_id") for x in saved])
-                                break
+                        res = await _poll_task_until_terminal_then_retry_video_on_504(
+                            initial_res=res,
+                            get_result_args_base=get_result_args,
+                            token=token,
+                            sutui_token=sutui_token,
+                            progress_cb=progress_cb,
+                            db=db,
+                            user_id=user_id,
+                            tool_fn_name=tc_info["name"],
+                            poll_interval=poll_interval,
+                            max_wait_sec=max_wait_sec,
+                            enable_504_video_retry=False,
+                            video_resubmit_args=None,
+                            log_label="素材] image.generate(text_calls)",
+                        )
                         if progress_cb:
                             try:
                                 ev_end = {
@@ -1088,36 +1282,72 @@ async def _chat_openai(
                                 pass
                 elif (
                     tc_info["name"] == "invoke_capability"
+                    and cap == "video.generate"
+                    and _is_task_result_in_progress(res)
+                ):
+                    task_id = _extract_task_id_from_result(res)
+                    if task_id:
+                        get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
+                        poll_interval = 15
+                        max_wait_sec = 20 * 60
+                        video_args = copy.deepcopy(tc_info["arguments"])
+                        res = await _poll_task_until_terminal_then_retry_video_on_504(
+                            initial_res=res,
+                            get_result_args_base=get_result_args,
+                            token=token,
+                            sutui_token=sutui_token,
+                            progress_cb=progress_cb,
+                            db=db,
+                            user_id=user_id,
+                            tool_fn_name=tc_info["name"],
+                            poll_interval=poll_interval,
+                            max_wait_sec=max_wait_sec,
+                            enable_504_video_retry=True,
+                            video_resubmit_args=video_args,
+                            log_label="素材] video.generate(text_calls)",
+                        )
+                        if progress_cb:
+                            try:
+                                ev_end = {
+                                    "type": "tool_end",
+                                    "name": tc_info["name"],
+                                    "preview": (res or "")[:200],
+                                    "capability_id": "task.get_result",
+                                    "phase": "task_polling",
+                                    "in_progress": False,
+                                }
+                                ev_end["media_type"] = _extract_media_type_from_task_result(res)
+                                ev_end["saved_assets"] = _extract_saved_assets_from_task_result(res)
+                                logger.info("[素材] 推送 tool_end phase=task_polling(视频,text_calls) saved_assets_count=%d", len(ev_end.get("saved_assets") or []))
+                                await progress_cb(ev_end)
+                                await progress_cb({"type": "status", "message": "正在生成回复…"})
+                            except Exception:
+                                pass
+                elif (
+                    tc_info["name"] == "invoke_capability"
                     and (tc_info["arguments"].get("capability_id") or "").strip() == "task.get_result"
                     and _is_task_result_in_progress(res)
                 ):
                     poll_interval = 15
                     max_wait_sec = 20 * 60
-                    waited = 0
                     args = tc_info["arguments"]
                     task_id = (args.get("task_id") or ((args.get("payload") or {}).get("task_id") if isinstance(args.get("payload"), dict) else None) or "").strip()
                     logger.info("[素材] task.get_result 自动轮询开始(text_calls) task_id=%s interval=%ds", task_id or "(无)", poll_interval)
-                    while waited < max_wait_sec:
-                        await asyncio.sleep(poll_interval)
-                        waited += poll_interval
-                        res = await _exec_tool_with_balance(
-                            tc_info["name"], tc_info["arguments"], token, sutui_token, None, db, user_id,
-                        )
-                        in_prog = _is_task_result_in_progress(res)
-                        logger.info("[素材] 轮询 task.get_result(text_calls) waited=%ds task_id=%s in_progress=%s hint=%s", waited, task_id or "(无)", in_prog, _task_result_hint(res))
-                        if progress_cb:
-                            try:
-                                ev = {"type": "task_poll", "message": f"正在查询生成结果…（{waited}秒）"}
-                                if task_id:
-                                    ev["task_id"] = task_id
-                                ev["result_hint"] = _task_result_hint(res)
-                                await progress_cb(ev)
-                            except Exception:
-                                pass
-                        if not in_prog:
-                            saved = _extract_saved_assets_from_task_result(res)
-                            logger.info("[素材] 轮询结束 task.get_result(text_calls) task_id=%s saved_assets_count=%d asset_ids=%s", task_id or "(无)", len(saved), [x.get("asset_id") for x in saved])
-                            break
+                    res = await _poll_task_until_terminal_then_retry_video_on_504(
+                        initial_res=res,
+                        get_result_args_base=dict(args),
+                        token=token,
+                        sutui_token=sutui_token,
+                        progress_cb=progress_cb,
+                        db=db,
+                        user_id=user_id,
+                        tool_fn_name=tc_info["name"],
+                        poll_interval=poll_interval,
+                        max_wait_sec=max_wait_sec,
+                        enable_504_video_retry=True,
+                        video_resubmit_args=None,
+                        log_label="素材] task.get_result(text_calls)",
+                    )
                     if progress_cb:
                         try:
                             ev_end = {
@@ -1190,9 +1420,10 @@ async def _chat_openai(
                         res = await _exec_tool_with_balance(
                             fn.get("name", ""), a, token, sutui_token, progress_cb, db, user_id,
                         )
+                        cap_f = (a.get("capability_id") or "").strip()
                         if (
                             fn.get("name") == "invoke_capability"
-                            and (a.get("capability_id") or "").strip() == "image.generate"
+                            and cap_f == "image.generate"
                             and _is_task_result_in_progress(res)
                         ):
                             task_id = _extract_task_id_from_result(res)
@@ -1200,34 +1431,83 @@ async def _chat_openai(
                                 get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                                 poll_interval = 15
                                 max_wait_sec = 20 * 60
-                                waited = 0
                                 logger.info("[素材] image.generate 自动轮询开始(forced) task_id=%s", task_id)
-                                while waited < max_wait_sec:
-                                    await asyncio.sleep(poll_interval)
-                                    waited += poll_interval
-                                    res = await _exec_tool_with_balance(
-                                "invoke_capability", get_result_args, token, sutui_token, None, db, user_id,
-                            )
-                                    if not _is_task_result_in_progress(res):
+                                res = await _poll_task_until_terminal_then_retry_video_on_504(
+                                    initial_res=res,
+                                    get_result_args_base=get_result_args,
+                                    token=token,
+                                    sutui_token=sutui_token,
+                                    progress_cb=progress_cb,
+                                    db=db,
+                                    user_id=user_id,
+                                    tool_fn_name="invoke_capability",
+                                    poll_interval=poll_interval,
+                                    max_wait_sec=max_wait_sec,
+                                    enable_504_video_retry=False,
+                                    video_resubmit_args=None,
+                                    log_label="素材] image.generate(forced)",
+                                )
+                                if progress_cb:
+                                    try:
                                         saved = _extract_saved_assets_from_task_result(res)
-                                        logger.info("[素材] 轮询结束 image.generate(forced) task_id=%s saved_assets_count=%d", task_id, len(saved))
-                                        if progress_cb:
-                                            try:
-                                                ev_end = {
-                                                    "type": "tool_end",
-                                                    "name": "invoke_capability",
-                                                    "preview": (res or "")[:200],
-                                                    "capability_id": "task.get_result",
-                                                    "phase": "task_polling",
-                                                    "in_progress": False,
-                                                    "media_type": _extract_media_type_from_task_result(res),
-                                                    "saved_assets": saved,
-                                                }
-                                                await progress_cb(ev_end)
-                                                await progress_cb({"type": "status", "message": "正在生成回复…"})
-                                            except Exception:
-                                                pass
-                                        break
+                                        ev_end = {
+                                            "type": "tool_end",
+                                            "name": "invoke_capability",
+                                            "preview": (res or "")[:200],
+                                            "capability_id": "task.get_result",
+                                            "phase": "task_polling",
+                                            "in_progress": False,
+                                            "media_type": _extract_media_type_from_task_result(res),
+                                            "saved_assets": saved,
+                                        }
+                                        await progress_cb(ev_end)
+                                        await progress_cb({"type": "status", "message": "正在生成回复…"})
+                                    except Exception:
+                                        pass
+                        elif (
+                            fn.get("name") == "invoke_capability"
+                            and cap_f == "video.generate"
+                            and _is_task_result_in_progress(res)
+                        ):
+                            task_id = _extract_task_id_from_result(res)
+                            if task_id:
+                                get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
+                                poll_interval = 15
+                                max_wait_sec = 20 * 60
+                                video_args = copy.deepcopy(a)
+                                logger.info("[素材] video.generate 自动轮询开始(forced) task_id=%s", task_id)
+                                res = await _poll_task_until_terminal_then_retry_video_on_504(
+                                    initial_res=res,
+                                    get_result_args_base=get_result_args,
+                                    token=token,
+                                    sutui_token=sutui_token,
+                                    progress_cb=progress_cb,
+                                    db=db,
+                                    user_id=user_id,
+                                    tool_fn_name="invoke_capability",
+                                    poll_interval=poll_interval,
+                                    max_wait_sec=max_wait_sec,
+                                    enable_504_video_retry=True,
+                                    video_resubmit_args=video_args,
+                                    log_label="素材] video.generate(forced)",
+                                )
+                                if progress_cb:
+                                    try:
+                                        saved = _extract_saved_assets_from_task_result(res)
+                                        ev_end = {
+                                            "type": "tool_end",
+                                            "name": "invoke_capability",
+                                            "preview": (res or "")[:200],
+                                            "capability_id": "task.get_result",
+                                            "phase": "task_polling",
+                                            "in_progress": False,
+                                            "media_type": _extract_media_type_from_task_result(res),
+                                            "saved_assets": saved,
+                                        }
+                                        await progress_cb(ev_end)
+                                        await progress_cb({"type": "status", "message": "正在生成回复…"})
+                                    except Exception:
+                                        pass
                         cur.append({
                             "role": "tool",
                             "tool_call_id": tc.get("id", ""),

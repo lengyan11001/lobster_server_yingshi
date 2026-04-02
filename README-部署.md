@@ -14,6 +14,8 @@ bash scripts/deploy_publish.sh
 - 若有未提交改动：自动 `git commit` → `git push origin main` → SSH 远端 `git pull` 并重启 Backend+MCP。  
 - 若无改动：直接 `push`（若已是最新则无推送）→ 仍执行远端更新脚本。
 
+部署链路以 `docs/云服务器部署说明.md`「日常更新」为准：**仅 Git**；勿用 SCP 顶替。Windows 若 `git push` 报 `Permission denied (publickey)`，见 `docs/运维备忘-SSH密钥与部署.md`「GitHub」。
+
 仅推送**已提交**代码、不要自动提交时：
 
 ```bash

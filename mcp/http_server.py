@@ -449,6 +449,49 @@ def _pop_task_billed_credits(task_id: str) -> Decimal:
     return quantize_credits(_task_billed_on_create.pop(task_id, 0) or 0)
 
 
+def _peek_task_billed_credits(task_id: str) -> Decimal:
+    if not task_id:
+        return Decimal(0)
+    return quantize_credits(_task_billed_on_create.get(task_id) or 0)
+
+
+async def _post_task_failure_refund_with_retries(
+    *,
+    token: str,
+    capability_id: str,
+    poll_task_id: str,
+    refund_amt: Decimal,
+    request: Optional[Request],
+) -> bool:
+    """调用 backend /capabilities/refund；成功（HTTP<400）后由调用方 _pop 缓存。失败重试 3 次，避免瞬时网络导致「钱未退回」。"""
+    url = f"{_capabilities_api_base()}/capabilities/refund"
+    body = {"capability_id": capability_id, "credits": float(quantize_credits(refund_amt))}
+    headers = _backend_headers(token, request)
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=15.0, trust_env=False) as client:
+                r = await client.post(url, json=body, headers=headers)
+            if r.status_code < 400:
+                return True
+            logger.warning(
+                "[MCP] 任务失败退款 HTTP %s task_id=%s attempt=%s/3 body_prefix=%s",
+                r.status_code,
+                poll_task_id,
+                attempt + 1,
+                (r.text or "")[:160],
+            )
+        except Exception as e:
+            logger.warning(
+                "[MCP] 任务失败退款请求异常 task_id=%s attempt=%s/3: %s",
+                poll_task_id,
+                attempt + 1,
+                e,
+            )
+        if attempt + 1 < 3:
+            await asyncio.sleep(0.5 * (2**attempt))
+    return False
+
+
 def _extract_task_id_from_sutui_response(obj: Any, _depth: int = 0) -> str:
     if _depth > 42 or obj is None:
         return ""
@@ -1031,6 +1074,27 @@ def _parse_video_duration_seconds(raw: Any, *, default: int = 5) -> int:
         return default
 
 
+# fal-ai/sora-2/*（含 text-to-video / image-to-video）上游 duration 枚举，非列表值易 422
+_SORA_FAL_DURATION_SECONDS = (4, 8, 12, 16, 20)
+
+
+def _coerce_sora_fal_duration_seconds(sec: int) -> int:
+    """将秒数收敛到 fal Sora 2 允许的 duration；距离相同时取较小值。"""
+    try:
+        s = max(1, int(sec))
+    except (ValueError, TypeError, OverflowError):
+        return _SORA_FAL_DURATION_SECONDS[0]
+    if s in _SORA_FAL_DURATION_SECONDS:
+        return s
+    best = _SORA_FAL_DURATION_SECONDS[0]
+    best_d = abs(s - best)
+    for a in _SORA_FAL_DURATION_SECONDS[1:]:
+        d = abs(s - a)
+        if d < best_d or (d == best_d and a < best):
+            best, best_d = a, d
+    return best
+
+
 def _sanitize_video_resolution_value(raw: Any) -> Optional[str]:
     """UI 常见 resolution=auto 等占位：返回 None 表示不要传该字段，避免上游枚举校验 422。"""
     if raw is None:
@@ -1339,12 +1403,23 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
 
     # Sora 2 系列（sora-2/pub, sora-2/vip, sora-2/pro）：通用格式，i2v 用 image_url，t2v 用 aspect_ratio
     # resolution 由 _merge_common_video_ui_fields 统一净化（去掉 auto）。
+    # duration：fal 仅允许 4/8/12/16/20；未传时用 4（与 fal 文档示例一致），勿用全局 default=5
     if "sora-2" in model.lower() or "sora" in model.lower():
         out = {"model": model, "prompt": prompt}
         if first_url:
             out["image_url"] = first_url
         out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
-        out["duration"] = duration_sec
+        _sora_d_raw = _payload_get_duration_raw(payload)
+        _sora_sec = _parse_video_duration_seconds(_sora_d_raw, default=4)
+        _sora_d = _coerce_sora_fal_duration_seconds(_sora_sec)
+        if _sora_d != _sora_sec:
+            logger.info(
+                "[MCP] Sora duration 已收敛为 fal 枚举: raw=%r parsed=%s -> %s",
+                _sora_d_raw,
+                _sora_sec,
+                _sora_d,
+            )
+        out["duration"] = _sora_d
         for k in ["audio", "seed", "negative_prompt"]:
             if k in payload:
                 out[k] = payload[k]
@@ -2201,22 +2276,28 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 and not upstream_error
                 and _sutui_get_result_is_terminal_failure(upstream_resp)
             ):
-                refund_amt = _pop_task_billed_credits(poll_task_id)
+                refund_amt = _peek_task_billed_credits(poll_task_id)
                 if refund_amt > 0:
-                    try:
-                        async with httpx.AsyncClient(timeout=10.0) as client:
-                            await client.post(
-                                f"{_capabilities_api_base()}/capabilities/refund",
-                                json={"capability_id": capability_id, "credits": float(refund_amt)},
-                                headers=_backend_headers(token, request),
-                            )
+                    ok_refund = await _post_task_failure_refund_with_retries(
+                        token=token,
+                        capability_id=capability_id,
+                        poll_task_id=poll_task_id,
+                        refund_amt=refund_amt,
+                        request=request,
+                    )
+                    if ok_refund:
+                        _pop_task_billed_credits(poll_task_id)
                         logger.info(
                             "[MCP] 任务终态失败退款 task_id=%s credits=%s（与速推创建任务扣费对应）",
                             poll_task_id,
                             refund_amt,
                         )
-                    except Exception:
-                        logger.exception("[MCP] 任务失败退款接口失败 task_id=%s", poll_task_id)
+                    else:
+                        logger.error(
+                            "[MCP] 任务失败退款多次重试仍失败，已保留 task_id=%s 扣费缓存 credits=%s，避免未到账即丢弃记录",
+                            poll_task_id,
+                            refund_amt,
+                        )
             elif (
                 upstream_tool == "get_result"
                 and poll_task_id

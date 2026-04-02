@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from decimal import Decimal
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -30,6 +31,33 @@ from .auth import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _remap_sutui_chat_model(body: Dict[str, Any]) -> None:
+    """可选：将客户端传来的 model 映射为速推分销商侧实际有通道的 id（就地修改 body）。
+
+    环境变量 SUTUI_CHAT_MODEL_MAP_JSON：JSON 对象，键为入站 model 字符串，值为转发到 xskill 的 model。
+    典型场景：mcp/models 列出 deepseek/deepseek-chat，但 default 分销商组未挂该通道；网页智能对话能用的 id 不同，
+    则在此配置 {\"deepseek/deepseek-chat\":\"你在下拉/F12 里看到的真实 id\"}。
+    """
+    raw = (os.environ.get("SUTUI_CHAT_MODEL_MAP_JSON") or "").strip()
+    if not raw:
+        return
+    try:
+        m = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("[sutui-chat] SUTUI_CHAT_MODEL_MAP_JSON 不是合法 JSON，已忽略")
+        return
+    if not isinstance(m, dict):
+        return
+    mid = (body.get("model") or "").strip()
+    if not mid:
+        return
+    to_id = m.get(mid)
+    if isinstance(to_id, str) and to_id.strip():
+        logger.info("[sutui-chat] SUTUI_CHAT_MODEL_MAP_JSON 映射 model: %s -> %s", mid, to_id.strip())
+        body["model"] = to_id.strip()
+
 
 # 日志中单条响应最大字符（避免 choices 正文撑爆日志）
 _SUTUI_CHAT_LOG_BODY_MAX = 24_000
@@ -317,6 +345,8 @@ async def sutui_chat_completions(
         body: Dict[str, Any] = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="请求体须为 JSON")
+
+    _remap_sutui_chat_model(body)
 
     token = await next_sutui_server_token(is_admin=True)
     if not token:

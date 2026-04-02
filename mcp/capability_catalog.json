@@ -106,7 +106,7 @@
     }
   },
   "sutui.transfer_url": {
-    "description": "转存外部媒体 URL 到 CDN",
+    "description": "将公网媒体直链转存到速推 CDN（本机 save-url 拉取 v3-tasks 视频失败时也会自动调用）。速推接口的 type 仅有 image / audio：视频（含 .mp4、v3-tasks 成品链）也请传 type=image，并非误用；返回 URL 常见路径为 /mcp-images/、后缀可能为 .jpg，以实际文件内容与 Content-Type 为准。音频必须用 type=audio。",
     "upstream": "sutui",
     "upstream_tool": "transfer_url",
     "enabled": true,
@@ -114,8 +114,16 @@
     "arg_schema": {
       "type": "object",
       "properties": {
-        "url": { "type": "string" },
-        "type": { "type": "string", "enum": ["image", "audio"], "default": "image" }
+        "url": {
+          "type": "string",
+          "description": "公网可访问的直链。可为图片，也可为视频（如 cdn-video…/v3-tasks/…/*.mp4）。"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["image", "audio"],
+          "default": "image",
+          "description": "速推仅支持 image 与 audio。转存视频时请填 image；仅音频填 audio。"
+        }
       },
       "required": ["url"]
     }
