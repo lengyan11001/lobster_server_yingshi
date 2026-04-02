@@ -24,6 +24,30 @@ router = APIRouter()
 MCP_BACKEND_URL = os.environ.get("AI_TEST_PLATFORM_MCP_GATEWAY_BACKEND_URL", "http://127.0.0.1:8001/mcp").rstrip("/")
 MCP_TOKEN_TTL_SECONDS = int(os.environ.get("MCP_GATEWAY_TOKEN_TTL_SECONDS", "600"))
 
+# 转发 MCP 后端时禁止把浏览器整包 Cookie / 各类代理头带上去游，易触发边缘 nginx 400（典型 ~150B HTML）或无谓泄露。
+_UPSTREAM_HEADER_ALLOWLIST = frozenset(
+    {
+        "content-type",
+        "accept",
+        "accept-language",
+        "accept-encoding",
+        "user-agent",
+        "authorization",
+        "x-user-authorization",
+        "x-openclaw-agent-id",
+        "x-installation-id",
+    }
+)
+
+
+def _headers_for_upstream(request: Request) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k, v in request.headers.items():
+        if k.lower() in _UPSTREAM_HEADER_ALLOWLIST and v is not None:
+            out[k] = v
+    return out
+
+
 # agent_id -> (token, expiry_ts)
 _mcp_token_cache: dict[str, tuple[str, float]] = {}
 _cache_lock = threading.Lock()
@@ -93,19 +117,16 @@ async def mcp_gateway_proxy(request: Request) -> Response:
         logger.warning("mcp_gateway read body error: %s", e)
         return Response(content=b"", status_code=400)
     token = get_mcp_token_from_request(request)
-    headers = dict(request.headers)
-    # 去掉可能影响后端的 hop-by-hop 头，并注入用户 JWT
-    for h in ("host", "content-length", "connection", "transfer-encoding"):
-        headers.pop(h, None)
+    headers = _headers_for_upstream(request)
     if token:
         headers["Authorization"] = f"Bearer {token}"
         headers["x-user-authorization"] = f"Bearer {token}"
-    # 安装槽：显式透传，避免个别 ASGI/代理层对 dict(headers) 的键名处理差异导致丢失
+    # 安装槽：显式透传，避免个别 ASGI/代理层对键名处理差异导致丢失
     xi = (request.headers.get("X-Installation-Id") or request.headers.get("x-installation-id") or "").strip()
     if xi:
         headers["X-Installation-Id"] = xi
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
             r = await client.post(MCP_BACKEND_URL, content=body, headers=headers)
         # 只透传对 JSON-RPC 有用的响应头，避免 hop-by-hop 等干扰
         out_headers = {}
