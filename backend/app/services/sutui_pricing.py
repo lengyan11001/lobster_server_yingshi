@@ -1,4 +1,8 @@
-"""速推/xskill：从官方 docs 接口读取模型定价并估算预扣积分（与 model-pricing-guide.md 一致）。"""
+"""速推/xskill：从官方 docs 拉取 pricing 并估算预扣/结算积分。
+
+接口与字段语义与仓库文档一致：docs/model-pricing-guide.md
+（GET /api/v3/models/{model_id}/docs，pricing.price_type / base_price 等）。
+"""
 from __future__ import annotations
 
 import json

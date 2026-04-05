@@ -1,7 +1,7 @@
-"""速推调用前统一预检：只认官方 docs 定价表估算龙虾积分；无表/估不出则禁止调用上游。
+"""速推调用前统一预检：只认官方 docs 定价表（见 docs/model-pricing-guide.md）估算龙虾积分；无表/估不出则禁止调用上游。
 
-素材生成走 /capabilities/pre-deduct + estimate_pre_deduct_credits（同源定价逻辑）；
-LLM chat 在此处与同一规则对齐。实际扣费仍以速推响应为准，由各自路径记流水。"""
+素材生成走 /capabilities/pre-deduct；LLM chat 复用同一定价逻辑。
+实际扣费仍以速推响应为准，由 sutui_chat 与 record_call 等路径记流水。"""
 from __future__ import annotations
 
 from decimal import Decimal
