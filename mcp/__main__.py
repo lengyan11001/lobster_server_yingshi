@@ -3,10 +3,19 @@
 import logging
 import os
 import sys
+from pathlib import Path
+
 import uvicorn
 from . import http_server
 
 if __name__ == "__main__":
+    _root = Path(__file__).resolve().parent.parent
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_root / ".env")
+    except ImportError:
+        pass
     port = 8001
     for i, a in enumerate(sys.argv):
         if a == "--port" and i + 1 < len(sys.argv):

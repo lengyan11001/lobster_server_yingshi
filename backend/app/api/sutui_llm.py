@@ -48,9 +48,9 @@ async def get_sutui_llm_models(current_user: User = Depends(get_current_user)):
 
     if not models:
         try:
-            token = await next_sutui_server_token(is_admin=True)
+            token = await next_sutui_server_token()
             if not token:
-                raise RuntimeError("速推管理员 Token 池未配置，无法拉取 LLM 列表")
+                raise RuntimeError("速推 Token 未配置，无法拉取 LLM 列表")
             raw = await _fetch_mcp_models(token)
             filtered = filter_chat_models_for_api(raw)
             out = []

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from mcp.sutui_tokens import next_sutui_server_token
 
+from .auth import brand_mark_for_jwt_claim
 from ..core.config import settings
 from ..db import get_db
 from ..models import User
@@ -348,11 +349,12 @@ async def sutui_chat_completions(
 
     _remap_sutui_chat_model(body)
 
-    token = await next_sutui_server_token(is_admin=True)
+    bm = brand_mark_for_jwt_claim(getattr(current_user, "brand_mark", None))
+    token = await next_sutui_server_token(brand_mark=bm)
     if not token:
         raise HTTPException(
             status_code=503,
-            detail="服务器未配置速推 Token 池（请配置 SUTUI_SERVER_TOKENS_ADMIN / SUTUI_SERVER_TOKEN_ADMIN 或兼容项 SUTUI_SERVER_TOKEN）",
+            detail="服务器未配置速推 Token 池（请按品牌配置 SUTUI_SERVER_TOKENS_BIHUO / SUTUI_SERVER_TOKENS_YINGSHI 或兜底 SUTUI_SERVER_TOKENS_USER / SUTUI_SERVER_TOKEN）",
         )
 
     stream = bool(body.get("stream"))

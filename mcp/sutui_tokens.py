@@ -1,8 +1,9 @@
-"""服务器侧速推 Token 双池（管理员 / 普通用户）轮询负载均衡。
+"""服务器侧速推 Token 池：按品牌（bihuo / yingshi）分流，无管理员单独池。
 
 环境变量（显式池优先，否则回退到既有 SUTUI_SERVER_TOKENS / SUTUI_SERVER_TOKEN / sutui_config.json）：
-- 用户池：SUTUI_SERVER_TOKENS_USER、SUTUI_SERVER_TOKEN_USER
-- 管理员池：SUTUI_SERVER_TOKENS_ADMIN、SUTUI_SERVER_TOKEN_ADMIN
+- 北极火：SUTUI_SERVER_TOKENS_BIHUO、SUTUI_SERVER_TOKEN_BIHUO
+- 影视：SUTUI_SERVER_TOKENS_YINGSHI、SUTUI_SERVER_TOKEN_YINGSHI
+- 默认池（无品牌、其它品牌、或品牌池未配置时的兜底）：SUTUI_SERVER_TOKENS_USER、SUTUI_SERVER_TOKEN_USER
 - 兼容：SUTUI_SERVER_TOKENS、SUTUI_SERVER_TOKEN、sutui_config.json
 """
 from __future__ import annotations
@@ -11,13 +12,11 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
-_sutui_tokens_list_user: List[str] = []
-_sutui_token_index_user = 0
-_sutui_tokens_list_admin: List[str] = []
-_sutui_token_index_admin = 0
 _sutui_token_lock = asyncio.Lock()
+# 轮询游标：按池键区分（bihuo / yingshi / user）
+_sutui_pool_index: dict[str, int] = {}
 
 
 def _load_sutui_token_from_file() -> str:
@@ -65,33 +64,42 @@ def get_sutui_tokens_list_user() -> List[str]:
     return _legacy_sutui_tokens_list()
 
 
-def get_sutui_tokens_list_admin() -> List[str]:
-    a = _parse_pool("SUTUI_SERVER_TOKENS_ADMIN", "SUTUI_SERVER_TOKEN_ADMIN")
-    if a:
-        return a
+def get_sutui_tokens_list_bihuo() -> List[str]:
+    return _parse_pool("SUTUI_SERVER_TOKENS_BIHUO", "SUTUI_SERVER_TOKEN_BIHUO")
+
+
+def get_sutui_tokens_list_yingshi() -> List[str]:
+    return _parse_pool("SUTUI_SERVER_TOKENS_YINGSHI", "SUTUI_SERVER_TOKEN_YINGSHI")
+
+
+def _user_fallback_tokens() -> List[str]:
+    u = get_sutui_tokens_list_user()
+    if u:
+        return u
     return _legacy_sutui_tokens_list()
 
 
-async def next_sutui_server_token(*, is_admin: bool) -> Optional[str]:
-    """从对应池中轮询取下一条 Token。"""
-    global _sutui_tokens_list_user, _sutui_token_index_user
-    global _sutui_tokens_list_admin, _sutui_token_index_admin
-    if is_admin:
-        if not _sutui_tokens_list_admin:
-            _sutui_tokens_list_admin = get_sutui_tokens_list_admin()
-        lst = _sutui_tokens_list_admin
-        if not lst:
-            return None
-        async with _sutui_token_lock:
-            idx = _sutui_token_index_admin % len(lst)
-            _sutui_token_index_admin += 1
-            return lst[idx]
-    if not _sutui_tokens_list_user:
-        _sutui_tokens_list_user = get_sutui_tokens_list_user()
-    lst = _sutui_tokens_list_user
+def _tokens_and_pool_key(*, brand_mark: Optional[str]) -> Tuple[str, List[str]]:
+    b = (brand_mark or "").strip().lower()
+    if b == "bihuo":
+        lst = get_sutui_tokens_list_bihuo()
+        if lst:
+            return "bihuo", lst
+        return "user", _user_fallback_tokens()
+    if b == "yingshi":
+        lst = get_sutui_tokens_list_yingshi()
+        if lst:
+            return "yingshi", lst
+        return "user", _user_fallback_tokens()
+    return "user", _user_fallback_tokens()
+
+
+async def next_sutui_server_token(*, brand_mark: Optional[str] = None) -> Optional[str]:
+    """从对应池中轮询取下一条 Token。传 brand_mark 与 JWT / users.brand_mark 一致；不传则走默认用户池。"""
+    pool_key, lst = _tokens_and_pool_key(brand_mark=brand_mark)
     if not lst:
         return None
     async with _sutui_token_lock:
-        idx = _sutui_token_index_user % len(lst)
-        _sutui_token_index_user += 1
+        idx = _sutui_pool_index.get(pool_key, 0) % len(lst)
+        _sutui_pool_index[pool_key] = idx + 1
         return lst[idx]

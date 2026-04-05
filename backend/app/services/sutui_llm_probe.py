@@ -141,15 +141,15 @@ def _pick_recommended(candidates: List[Dict[str, Any]]) -> Optional[str]:
 
 
 async def run_sutui_llm_probe_once() -> Dict[str, Any]:
-    """执行一次探测并写入快照文件（仅国内实例；统一使用管理员 Token 池）。"""
+    """执行一次探测并写入快照文件（仅国内实例；使用默认速推 Token 池）。"""
     if not is_sutui_llm_probe_enabled_for_this_instance():
         raise RuntimeError("本实例未启用速推 LLM 探测（海外机请设 LOBSTER_SERVER_REGION=overseas，且不应执行探测）")
 
-    token = await next_sutui_server_token(is_admin=True)
+    token = await next_sutui_server_token()
     if not token:
         raise RuntimeError(
-            "速推管理员池 Token 未配置，无法探测 LLM（需 SUTUI_SERVER_TOKENS_ADMIN / SUTUI_SERVER_TOKEN_ADMIN，"
-            "或未拆分时沿用 SUTUI_SERVER_TOKEN / SUTUI_SERVER_TOKENS）"
+            "速推 Token 未配置，无法探测 LLM（需 SUTUI_SERVER_TOKENS_USER / SUTUI_SERVER_TOKEN 或兼容项 "
+            "SUTUI_SERVER_TOKEN / SUTUI_SERVER_TOKENS）"
         )
 
     raw_models = await _fetch_mcp_models(token)

@@ -88,6 +88,24 @@ def _normalize_brand_mark(raw: Optional[str]) -> Optional[str]:
     return s
 
 
+def brand_mark_for_jwt_claim(raw: Optional[str]) -> Optional[str]:
+    """写入 JWT 的品牌字段：非法或空则省略（不在此处抛错）。"""
+    if raw is None:
+        return None
+    s = (raw or "").strip().lower()
+    if not s or not _BRAND_MARK_RE.match(s):
+        return None
+    return s
+
+
+def access_token_claims(user: User) -> dict:
+    claims: dict = {"sub": str(user.id)}
+    bm = brand_mark_for_jwt_claim(getattr(user, "brand_mark", None))
+    if bm:
+        claims["brand_mark"] = bm
+    return claims
+
+
 class RegisterBody(BaseModel):
     account: str  # 字母开头，2～64 位，仅允许字母数字._-
     password: str
@@ -248,7 +266,7 @@ async def login(request: Request, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == account_lower).first()
     if not user or not verify_password(password, user.hashed_password):
         raise HTTPException(status_code=400, detail="账号或密码错误")
-    access_token = create_access_token(data={"sub": str(user.id)})
+    access_token = create_access_token(data=access_token_claims(user))
     iid = optional_installation_id_from_request(request)
     if iid:
         ensure_installation_slot(db, user.id, iid)
@@ -369,7 +387,7 @@ def register_phone(body: RegisterPhoneBody, request: Request, db: Session = Depe
     ):
         db.add(SkillUnlock(user_id=user.id, package_id=pkg_id))
     db.commit()
-    access_token = create_access_token(data={"sub": str(user.id)})
+    access_token = create_access_token(data=access_token_claims(user))
     if reg_iid:
         ensure_installation_slot(db, user.id, reg_iid)
     return Token(access_token=access_token)
@@ -520,7 +538,7 @@ def sutui_login_with_token(body: LoginWithTokenBody, db: Session = Depends(get_d
         db.flush()
     user.sutui_token = api_key
     db.commit()
-    access_token = create_access_token(data={"sub": str(user.id)})
+    access_token = create_access_token(data=access_token_claims(user))
     return Token(access_token=access_token, token_type="bearer")
 
 
@@ -716,7 +734,7 @@ def wechat_miniprogram_login(
         apply_installation_signup_bonus_for_new_user(db, user, wx_iid if slots else None)
         db.commit()
         db.refresh(user)
-    access_token = create_access_token(data={"sub": str(user.id)})
+    access_token = create_access_token(data=access_token_claims(user))
     entry = _miniprogram_scene_store.get(scene_id)
     if entry and entry["expires_at"] > time.time():
         entry["token"] = access_token
@@ -792,7 +810,7 @@ def wechat_callback(
         apply_installation_signup_bonus_for_new_user(db, user, wx_iid if slots else None)
         db.commit()
         db.refresh(user)
-    access_token = create_access_token(data={"sub": str(user.id)})
+    access_token = create_access_token(data=access_token_claims(user))
     # 跳转到前端地址并带 token，前端通过 ?token= 自动登录（见 init.js applyTokenFromUrl）
     front_base = (getattr(settings, "wechat_oa_frontend_url", None) or "").strip().rstrip("/")
     if not front_base and _use_wechat_oa_login():
@@ -868,7 +886,7 @@ def sutui_callback(
         db.flush()
     user.sutui_token = api_key
     db.commit()
-    access_token = create_access_token(data={"sub": str(user.id)})
+    access_token = create_access_token(data=access_token_claims(user))
     # 从 iframe 内回调时返回 HTML，由父页接收 token 并完成登录
     if from_iframe or (request.query_params.get("from") == "iframe"):
         token_js = json.dumps(access_token)

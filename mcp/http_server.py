@@ -23,6 +23,7 @@ from mcp.sutui_error_hints import (
     enhance_upstream_rest_error,
     hint_for_wrong_capability_model,
 )
+from mcp.jwt_brand import brand_mark_from_bearer
 from mcp.sutui_tokens import next_sutui_server_token
 
 from backend.app.services.credits_amount import quantize_credits
@@ -786,7 +787,7 @@ async def _call_upstream_mcp_tool(
     upstream_name: str = "",
     sutui_token: Optional[str] = None,
     lobster_capability_id: str = "",
-    sutui_pool_is_admin: bool = False,
+    brand_mark: Optional[str] = None,
 ) -> Dict[str, Any]:
     auth_headers: Dict[str, str] = {
         "Accept": "application/json, text/event-stream",
@@ -794,9 +795,9 @@ async def _call_upstream_mcp_tool(
     if upstream_name == "sutui":
         token = (sutui_token or "").strip()
         if not token:
-            token = await next_sutui_server_token(is_admin=sutui_pool_is_admin)
+            token = await next_sutui_server_token(brand_mark=brand_mark)
         if not token:
-            return {"error": {"message": "xskill/速推 Token 未配置。请在服务器配置 SUTUI_SERVER_TOKEN(S) 或 SUTUI_SERVER_TOKENS_USER / SUTUI_SERVER_TOKENS_ADMIN（逗号分隔多个，负载均衡）。"}}
+            return {"error": {"message": "xskill/速推 Token 未配置。请在服务器配置 SUTUI_SERVER_TOKEN(S) 或品牌池 SUTUI_SERVER_TOKENS_BIHUO / SUTUI_SERVER_TOKENS_YINGSHI，及兜底 SUTUI_SERVER_TOKENS_USER（逗号分隔多个，负载均衡）。MCP 需与 Backend 共用 SECRET_KEY 以解析 JWT 中的 brand_mark。"}}
         auth_headers["Authorization"] = f"Bearer {token}"
         # 实测 xskill MCP HTTP 在 generate 返回体序列化时抛 Decimal 错误；create/query 走 REST 稳定
         if tool_name in ("generate", "get_result"):
@@ -1897,6 +1898,9 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         ),
                     }
                 ], True
+            user_brand_mark = brand_mark_from_bearer(
+                (request.headers.get("Authorization") or request.headers.get("x-user-authorization") or "")
+            )
             if _capability_id_is_debug_only_in_registry(capability_id) and not await _fetch_is_skill_store_admin(token):
                 return [{"type": "text", "text": "该能力为调试中技能，当前账号不可用。"}], True
             cfg = catalog[capability_id]
@@ -1987,9 +1991,8 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
             if not upstream_url:
                 return [{"type": "text", "text": f"未配置上游网关: {upstream_name}，请在 .env 或技能商店中配置"}], True
-            # 统一走赞助/管理端速推 Token 池；不再使用客户端 X-Sutui-Token（与用户池解耦，算力由服务器池出）
+            # 按 JWT brand_mark 选择速推池（bihuo/yingshi）；兜底 USER/兼容项。不再使用客户端 X-Sutui-Token。
             sutui_token = None
-            is_admin_for_pool = True
 
             # 检测并转存内部图片 URL 到公开 CDN（图生视频/图生图需要）
             temp_ids_to_register = []  # 在外部作用域定义，用于后续注册
@@ -2124,7 +2127,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                                     upstream_name=upstream_name,
                                     sutui_token=sutui_token,
                                     lobster_capability_id=capability_id,
-                                    sutui_pool_is_admin=is_admin_for_pool,
+                                    brand_mark=user_brand_mark,
                                 )
                                 logger.info("[服务器端MCP-步骤C.6.2] sutui.transfer_url 调用完成 url_key=%s", url_key)
                                 if isinstance(transfer_resp, dict):
@@ -2242,7 +2245,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 upstream_name=upstream_name,
                 sutui_token=sutui_token,
                 lobster_capability_id=capability_id,
-                sutui_pool_is_admin=is_admin_for_pool,
+                brand_mark=user_brand_mark,
             )
             # task.get_result: 不再在此处轮询，由 backend chat 每 15s 轮询并写回对话
             latency_ms = int((time.perf_counter() - t0) * 1000)
