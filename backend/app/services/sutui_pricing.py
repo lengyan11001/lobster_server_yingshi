@@ -254,18 +254,57 @@ def extract_upstream_billing_snapshot(data: Optional[dict]) -> dict[str, Any]:
     return out
 
 
+_SKIP_UPSTREAM_CREDIT_RECURSE_KEYS = frozenset(
+    {
+        "choices",
+        "messages",
+        # 已在下面优先分支单独处理，避免在总遍历里与其它字段取 max 混算
+        "x_billing",
+        "x-billing",
+    }
+)
+
+
 def extract_upstream_reported_credits(obj: Any, _depth: int = 0) -> Decimal:
     """
     从速推 chat/completions 或任务类完整 JSON 中解析「本次消耗积分」（4 位小数）。
     与 mcp/http_server 计费解析字段集合对齐；优先于 docs 定价推算。
+
+    注意：不得遍历 OpenAI 样式的 ``choices``：助手/工具正文中常含 JSON，字段名 cost/price
+    可能是套餐价、内部参数等，若与全树 max 合并会把「本次消耗」抬到荒谬整数（如 25）。
+    速推官方账单一般以顶层 ``x_billing``（或 ``X-Billing``）为准，优先只信该子树。
     """
     if _depth > 42:
         return Decimal(0)
+    if isinstance(obj, dict):
+        xb = obj.get("x_billing")
+        if xb is None:
+            xb = obj.get("X-Billing")
+        if xb is not None:
+            if isinstance(xb, str):
+                xs = xb.strip()
+                if xs.startswith("{"):
+                    try:
+                        xb = json.loads(xs)
+                    except Exception:
+                        xb = None
+                else:
+                    pnum = _coerce_positive_credit_number(xs)
+                    if pnum is not None and pnum > 0:
+                        return pnum
+                    xb = None
+            if xb is not None:
+                sub = extract_upstream_reported_credits(xb, _depth + 1)
+                if sub > 0:
+                    return sub
+
     best = Decimal(0)
     if isinstance(obj, dict):
         balance_shape = _dict_looks_like_account_balance(obj)
         for k, v in obj.items():
             lk = str(k).lower()
+            if lk in _SKIP_UPSTREAM_CREDIT_RECURSE_KEYS:
+                continue
             if lk in (
                 "credits_used",
                 "credits_charged",
