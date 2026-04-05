@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 用 .env.deploy 登录 LOBSTER_DEPLOY_HOST，在远端执行一条命令（参数为整条 remote 命令）。
-# 与 deploy_from_local.sh 一致：若已 ssh-add 则直接用代理；否则加密私钥用 LOBSTER_SSH_KEY_PASSPHRASE + SSH_ASKPASS 非交互解锁。
+# 读本机 .env.deploy，非交互 SSH（与 deploy_from_local.sh 同款 SSH_ASKPASS）上机 tail 日志。
+# 密钥口令只放在 .env.deploy 的 LOBSTER_SSH_KEY_PASSPHRASE，勿提交该文件。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -10,7 +10,10 @@ if [ -f "$ROOT/.env.deploy" ]; then
   . "$ROOT/.env.deploy"
   set +a
 fi
-: "${LOBSTER_DEPLOY_HOST:?missing LOBSTER_DEPLOY_HOST}"
+: "${LOBSTER_DEPLOY_HOST:?missing LOBSTER_DEPLOY_HOST in .env.deploy}"
+
+REMOTE_DIR="${LOBSTER_DEPLOY_REMOTE_DIR:-/opt/lobster-server}"
+TAIL_LINES="${TAIL_LINES:-200}"
 
 SSH_BASE="-o StrictHostKeyChecking=accept-new"
 _ssh_agent_has_keys() {
@@ -42,9 +45,6 @@ if ! _ssh_agent_has_keys; then
     ssh-add "$LOBSTER_DEPLOY_SSH_KEY"
     rm -f "$AP"
     trap _deploy_cleanup_ssh_agent EXIT
-    if [ -n "${LOBSTER_DEPLOY_HOST_OVERSEAS:-}" ] && [ -n "${LOBSTER_DEPLOY_SSH_KEY_OVERSEAS:-}" ] && [ -r "$LOBSTER_DEPLOY_SSH_KEY_OVERSEAS" ]; then
-      ssh-add "$LOBSTER_DEPLOY_SSH_KEY_OVERSEAS" || true
-    fi
   fi
 fi
 
@@ -53,9 +53,17 @@ if ! _ssh_agent_has_keys; then
   [ -n "${LOBSTER_DEPLOY_SSH_KEY:-}" ] && [ -r "$LOBSTER_DEPLOY_SSH_KEY" ] && SSH_OPTS_MAIN="-i $LOBSTER_DEPLOY_SSH_KEY $SSH_BASE"
 fi
 
-if ! _ssh_agent_has_keys && [ -z "${LOBSTER_DEPLOY_SSH_KEY:-}" ]; then
-  echo "未检测到 ssh-agent 中的密钥，且未配置 LOBSTER_DEPLOY_SSH_KEY。" >&2
-  exit 1
-fi
-
-ssh $SSH_OPTS_MAIN "$LOBSTER_DEPLOY_HOST" "$@"
+ssh $SSH_OPTS_MAIN "$LOBSTER_DEPLOY_HOST" bash -s <<EOF
+cd $(printf %q "$REMOTE_DIR")
+echo "==== host \$(hostname) pwd \$(pwd) ===="
+for f in backend.log mcp.log; do
+  if [ -f "\$f" ]; then
+    echo "==== tail \$f (last $TAIL_LINES) ===="
+    tail -n $TAIL_LINES "\$f"
+  else
+    echo "==== (no \$f here) ===="
+  fi
+done
+echo "==== grep sutui-audit (last 50) ===="
+grep '\[sutui-audit\]' backend.log mcp.log 2>/dev/null | tail -n 50 || true
+EOF
