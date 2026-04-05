@@ -24,7 +24,11 @@ from mcp.sutui_error_hints import (
     hint_for_wrong_capability_model,
 )
 from mcp.jwt_brand import brand_mark_from_bearer
-from mcp.sutui_tokens import next_sutui_server_token
+from mcp.sutui_tokens import (
+    next_sutui_server_token,
+    next_sutui_server_token_with_pool,
+    sutui_token_ref_from_secret,
+)
 
 from backend.app.services.credits_amount import quantize_credits
 from backend.app.services.sutui_pricing import extract_upstream_reported_credits
@@ -463,10 +467,15 @@ async def _post_task_failure_refund_with_retries(
     poll_task_id: str,
     refund_amt: Decimal,
     request: Optional[Request],
+    sutui_pool: Optional[str] = None,
+    sutui_token_ref: Optional[str] = None,
 ) -> bool:
     """调用 backend /capabilities/refund；成功（HTTP<400）后由调用方 _pop 缓存。失败重试 3 次，避免瞬时网络导致「钱未退回」。"""
     url = f"{_capabilities_api_base()}/capabilities/refund"
-    body = {"capability_id": capability_id, "credits": float(quantize_credits(refund_amt))}
+    body: Dict[str, Any] = {"capability_id": capability_id, "credits": float(quantize_credits(refund_amt))}
+    if (sutui_pool or "").strip() and (sutui_token_ref or "").strip():
+        body["sutui_pool"] = sutui_pool.strip()
+        body["sutui_token_ref"] = sutui_token_ref.strip()
     headers = _backend_headers(token, request)
     for attempt in range(3):
         try:
@@ -924,7 +933,8 @@ async def _record_call(token: Optional[str], capability_id: str, success: bool, 
                        request_payload: Dict, response_payload: Optional[Dict], error_message: Optional[str],
                        credits_charged: Optional[float] = None, pre_deduct_applied: bool = False,
                        credits_pre_deducted: Optional[float] = None, credits_final: Optional[float] = None,
-                       request: Optional[Request] = None) -> None:
+                       request: Optional[Request] = None,
+                       sutui_pool: Optional[str] = None, sutui_token_ref: Optional[str] = None) -> None:
     if not token:
         return
     body = {
@@ -940,6 +950,9 @@ async def _record_call(token: Optional[str], capability_id: str, success: bool, 
         body["credits_pre_deducted"] = credits_pre_deducted
     if credits_final is not None:
         body["credits_final"] = credits_final
+    if (sutui_pool or "").strip() and (sutui_token_ref or "").strip():
+        body["sutui_pool"] = sutui_pool.strip()
+        body["sutui_token_ref"] = sutui_token_ref.strip()
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             await client.post(
@@ -1921,6 +1934,24 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                             ),
                         }
                     ], True
+            sutui_token: Optional[str] = None
+            sutui_pool_for_billing = ""
+            sutui_token_ref_for_billing = ""
+            if upstream_name == "sutui":
+                sutui_token, sutui_pool_for_billing = await next_sutui_server_token_with_pool(
+                    brand_mark=user_brand_mark
+                )
+                if not sutui_token:
+                    return [
+                        {
+                            "type": "text",
+                            "text": (
+                                "速推 Token 未配置或当前品牌池为空。请配置 SUTUI_SERVER_TOKENS_BIHUO / "
+                                "SUTUI_SERVER_TOKENS_YINGSHI 后重试。"
+                            ),
+                        }
+                    ], True
+                sutui_token_ref_for_billing = sutui_token_ref_from_secret(sutui_token)
             # 先规范化 payload（与上游一致），再按速推官方 docs 定价预扣积分
             original_model = payload.get("model") if isinstance(payload, dict) else None
             if capability_id == "image.generate":
@@ -1949,6 +1980,9 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     if upstream_name == "sutui" and upstream_tool == "generate":
                         pre_body["model"] = (payload.get("model") or "").strip()
                         pre_body["params"] = payload
+                    if upstream_name == "sutui" and sutui_pool_for_billing and sutui_token_ref_for_billing:
+                        pre_body["sutui_pool"] = sutui_pool_for_billing
+                        pre_body["sutui_token_ref"] = sutui_token_ref_for_billing
                     _pre_hdr = dict(_backend_headers(token, request))
                     _pre_hdr["X-Billing-Idempotency-Key"] = billing_idem
                     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -2003,8 +2037,6 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
             if not upstream_url:
                 return [{"type": "text", "text": f"未配置上游网关: {upstream_name}，请在 .env 或技能商店中配置"}], True
-            # 按 JWT brand_mark 选择速推池（bihuo/yingshi）；兜底 USER/兼容项。不再使用客户端 X-Sutui-Token。
-            sutui_token = None
 
             # 检测并转存内部图片 URL 到公开 CDN（图生视频/图生图需要）
             temp_ids_to_register = []  # 在外部作用域定义，用于后续注册
@@ -2299,6 +2331,8 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         poll_task_id=poll_task_id,
                         refund_amt=refund_amt,
                         request=request,
+                        sutui_pool=sutui_pool_for_billing if upstream_name == "sutui" else None,
+                        sutui_token_ref=sutui_token_ref_for_billing if upstream_name == "sutui" else None,
                     )
                     if ok_refund:
                         _pop_task_billed_credits(poll_task_id)
@@ -2374,6 +2408,8 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     credits_pre_deducted=pre_deduct_amount,
                     credits_final=cf_out,
                     request=request,
+                    sutui_pool=sutui_pool_for_billing if upstream_name == "sutui" else None,
+                    sutui_token_ref=sutui_token_ref_for_billing if upstream_name == "sutui" else None,
                 )
             else:
                 bill_credits = actual_used
@@ -2388,6 +2424,8 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     credits_charged=(bill_credits if bill_credits > 0 else None),
                     pre_deduct_applied=pre_applied_flag,
                     request=request,
+                    sutui_pool=sutui_pool_for_billing if upstream_name == "sutui" else None,
+                    sutui_token_ref=sutui_token_ref_for_billing if upstream_name == "sutui" else None,
                 )
             if (
                 upstream_tool == "generate"

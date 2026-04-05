@@ -127,12 +127,36 @@ class RecordCallIn(BaseModel):
     credits_pre_deducted: Optional[float] = None
     """速推返回的实际消耗积分；与预扣差额多退少补。"""
     credits_final: Optional[float] = None
+    """站内对账：本次上游选用的池与 token 指纹（仅 MCP 本机计费传入；不入用户 API）。"""
+    sutui_pool: Optional[str] = None
+    sutui_token_ref: Optional[str] = None
 
 
 class PreDeductIn(BaseModel):
     capability_id: str
     model: Optional[str] = None
     params: Optional[dict] = None
+    sutui_pool: Optional[str] = None
+    sutui_token_ref: Optional[str] = None
+
+
+def _sutui_recon_for_ledger(
+    request: Request,
+    *,
+    upstream: str,
+    sutui_pool: Optional[str],
+    sutui_token_ref: Optional[str],
+) -> dict:
+    """写入 meta._recon；仅本机 MCP 计费且 upstream 为 sutui 时采纳。"""
+    if not _billing_request_may_mutate_balance(request):
+        return {}
+    if (upstream or "").strip() != "sutui":
+        return {}
+    sp = (sutui_pool or "").strip()
+    ref = (sutui_token_ref or "").strip()
+    if not sp or not ref:
+        return {}
+    return {"_recon": {"sutui_pool": sp, "sutui_token_ref": ref}}
 
 
 def _billing_idempotency_key(request: Request) -> str:
@@ -234,6 +258,12 @@ def pre_deduct(
             )
         current_user.credits = user_balance_decimal(current_user) - est_d
         bal = quantize_credits(current_user.credits)
+        _recon = _sutui_recon_for_ledger(
+            request,
+            upstream=upstream,
+            sutui_pool=body.sutui_pool,
+            sutui_token_ref=body.sutui_token_ref,
+        )
         append_credit_ledger(
             db,
             current_user.id,
@@ -243,6 +273,7 @@ def pre_deduct(
             description="能力预扣（按模型估价）",
             ref_type="capability",
             meta={
+                **(_recon or {}),
                 "capability_id": body.capability_id,
                 "model": model,
                 "pre_estimated": est,
@@ -265,6 +296,12 @@ def pre_deduct(
         )
     current_user.credits = user_balance_decimal(current_user) - uc
     bal = quantize_credits(current_user.credits)
+    _recon_u = _sutui_recon_for_ledger(
+        request,
+        upstream=upstream,
+        sutui_pool=body.sutui_pool,
+        sutui_token_ref=body.sutui_token_ref,
+    )
     append_credit_ledger(
         db,
         current_user.id,
@@ -273,7 +310,11 @@ def pre_deduct(
         bal,
         description="能力预扣（按 unit_credits）",
         ref_type="capability",
-        meta={"capability_id": body.capability_id, "unit_credits": unit_credits},
+        meta={
+            **(_recon_u or {}),
+            "capability_id": body.capability_id,
+            "unit_credits": unit_credits,
+        },
     )
     db.commit()
     out = {"credits_charged": unit_credits}
@@ -284,6 +325,8 @@ def pre_deduct(
 class RefundIn(BaseModel):
     capability_id: str
     credits: float
+    sutui_pool: Optional[str] = None
+    sutui_token_ref: Optional[str] = None
 
 
 @router.post("/capabilities/refund", summary="调用失败时退还预扣积分")
@@ -301,6 +344,12 @@ def refund_credits(
     refund_amt = quantize_credits(body.credits)
     current_user.credits = user_balance_decimal(current_user) + refund_amt
     bal = quantize_credits(current_user.credits)
+    _recon_rf = _sutui_recon_for_ledger(
+        request,
+        upstream="sutui",
+        sutui_pool=body.sutui_pool,
+        sutui_token_ref=body.sutui_token_ref,
+    )
     append_credit_ledger(
         db,
         current_user.id,
@@ -309,7 +358,11 @@ def refund_credits(
         bal,
         description="预扣/任务失败退款",
         ref_type="capability",
-        meta={"capability_id": body.capability_id, "refund_credits": float(refund_amt)},
+        meta={
+            **(_recon_rf or {}),
+            "capability_id": body.capability_id,
+            "refund_credits": float(refund_amt),
+        },
     )
     db.commit()
     return {"ok": True, "refunded": float(refund_amt)}
@@ -416,6 +469,12 @@ def record_call(
     balance_after = quantize_credits(current_user.credits)
     ldelta = balance_after - balance_before
     if ledger_kind:
+        _recon_r = _sutui_recon_for_ledger(
+            request,
+            upstream=upstream_rc,
+            sutui_pool=body.sutui_pool,
+            sutui_token_ref=body.sutui_token_ref,
+        )
         append_credit_ledger(
             db,
             current_user.id,
@@ -426,6 +485,7 @@ def record_call(
             ref_type="capability_call_log",
             ref_id=str(log.id),
             meta={
+                **(_recon_r or {}),
                 **(ledger_meta or {}),
                 "success": body.success,
                 "credits_charged": credits_json_float(credits_charged),

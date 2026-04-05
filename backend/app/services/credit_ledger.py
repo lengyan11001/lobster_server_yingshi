@@ -12,6 +12,17 @@ from .credits_amount import quantize_credits, quantize_credits_signed
 
 logger = logging.getLogger(__name__)
 
+# 仅入库、供运营对账；用户侧接口应剥掉后再返回
+_LEDGER_RECON_KEY = "_recon"
+
+
+def public_ledger_meta(meta: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """从流水 meta 中移除站内对账字段，避免通过 API 暴露给用户。"""
+    if not meta or _LEDGER_RECON_KEY not in meta:
+        return meta
+    out = {k: v for k, v in meta.items() if k != _LEDGER_RECON_KEY}
+    return out or None
+
 
 def append_credit_ledger(
     db: Session,

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from mcp.sutui_tokens import next_sutui_server_token
+from mcp.sutui_tokens import next_sutui_server_token_with_pool, sutui_token_recon_meta
 
 from .auth import brand_mark_for_jwt_claim
 from ..core.config import settings
@@ -270,6 +270,8 @@ def _apply_chat_deduct(
     model: str,
     usage: Optional[dict],
     response_body: Optional[Dict[str, Any]] = None,
+    *,
+    billing_recon: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not _should_deduct_credits():
         return
@@ -318,6 +320,13 @@ def _apply_chat_deduct(
         )
     current_user.credits = bal - credits
     bal_after = quantize_credits(current_user.credits)
+    meta_chat = {
+        "model": model,
+        "usage": usage,
+        "deduct_credits": credits_json_float(credits),
+    }
+    if billing_recon:
+        meta_chat = {**meta_chat, **billing_recon}
     append_credit_ledger(
         db,
         current_user.id,
@@ -326,11 +335,7 @@ def _apply_chat_deduct(
         bal_after,
         description=f"速推 LLM 对话扣费 model={model}",
         ref_type="sutui_chat",
-        meta={
-            "model": model,
-            "usage": usage,
-            "deduct_credits": credits_json_float(credits),
-        },
+        meta=meta_chat,
     )
     db.commit()
     logger.info("[sutui-chat] 已扣积分 user_id=%s model=%s credits=%s", current_user.id, model, credits)
@@ -355,12 +360,13 @@ async def sutui_chat_completions(
             status_code=403,
             detail="当前账号未绑定必火/影视品牌，无法使用速推对话；无通用兜底。请使用对应品牌客户端注册或联系管理员补全品牌后重新登录。",
         )
-    token = await next_sutui_server_token(brand_mark=bm)
+    token, sutui_pool = await next_sutui_server_token_with_pool(brand_mark=bm)
     if not token:
         raise HTTPException(
             status_code=503,
             detail="服务器未配置当前品牌对应的速推 Token（SUTUI_SERVER_TOKENS_BIHUO 或 SUTUI_SERVER_TOKENS_YINGSHI）",
         )
+    chat_billing_recon = sutui_token_recon_meta(token, sutui_pool)
 
     stream = bool(body.get("stream"))
     url = f"{_api_base()}/v1/chat/completions"
@@ -405,6 +411,7 @@ async def sutui_chat_completions(
                 model_id,
                 usage if isinstance(usage, dict) else None,
                 data if isinstance(data, dict) else None,
+                billing_recon=chat_billing_recon,
             )
 
         out = _normalize_upstream_402_for_client(data) if r.status_code == 402 else data
@@ -516,6 +523,7 @@ async def sutui_chat_completions(
                     model_id,
                     usage_for_deduct if isinstance(usage_for_deduct, dict) else None,
                     resp_for_bill,
+                    billing_recon=chat_billing_recon,
                 )
             except HTTPException as exc:
                 if exc.status_code == 402:

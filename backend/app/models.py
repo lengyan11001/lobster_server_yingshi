@@ -329,3 +329,21 @@ class CreditLedger(Base):
     ref_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SutuiReconciliationRun(Base):
+    """定时对账：每把速推 server token 的远端余额变动 vs 本地带 _recon 的积分流水（运营用，不对用户展示）。"""
+
+    __tablename__ = "sutui_reconciliation_runs"
+    __table_args__ = (Index("ix_sutui_recon_ref_created", "sutui_token_ref", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    pool: Mapped[str] = mapped_column(String(32), nullable=False)
+    sutui_token_ref: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    balance_remote: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True)
+    remote_delta: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True)
+    local_net_credits: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True)
+    diff: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="ok")
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

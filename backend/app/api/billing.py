@@ -19,7 +19,7 @@ from ..core.config import settings, get_effective_public_base_url
 from ..db import get_db
 from .auth import get_current_user
 from ..models import CapabilityCallLog, CreditLedger, RechargeOrder, User
-from ..services.credit_ledger import append_credit_ledger
+from ..services.credit_ledger import append_credit_ledger, public_ledger_meta
 from ..services.credits_amount import (
     credits_json_float,
     credits_json_float_signed,
@@ -312,7 +312,7 @@ def get_credit_ledger(
                 "description": r.description or "",
                 "ref_type": r.ref_type or "",
                 "ref_id": r.ref_id or "",
-                "meta": r.meta,
+                "meta": public_ledger_meta(r.meta if isinstance(r.meta, dict) else None),
                 "time": r.created_at.isoformat() if r.created_at else "",
             }
             for r in rows

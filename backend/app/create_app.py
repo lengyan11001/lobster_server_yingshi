@@ -3,6 +3,7 @@ import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import List
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,6 +46,7 @@ from .core.config import settings
 from .db import Base, engine, SessionLocal
 from . import models  # noqa: F401
 from .services.sutui_llm_probe import is_sutui_llm_probe_enabled_for_this_instance, sutui_llm_probe_loop_forever
+from .services.sutui_reconcile import is_sutui_reconcile_enabled, sutui_reconcile_loop_forever
 
 logger = logging.getLogger(__name__)
 
@@ -552,16 +554,20 @@ def _backfill_installation_signup_bonus_claims():
 
 @asynccontextmanager
 async def _app_lifespan(app: FastAPI):
-    probe_task = None
+    bg_tasks: List[asyncio.Task] = []
     if is_sutui_llm_probe_enabled_for_this_instance():
-        probe_task = asyncio.create_task(sutui_llm_probe_loop_forever(3600.0))
+        bg_tasks.append(asyncio.create_task(sutui_llm_probe_loop_forever(3600.0)))
     else:
         logger.info("[启动] 速推 LLM 定时探测已关闭（海外实例：LOBSTER_SERVER_REGION=overseas）")
+    if is_sutui_reconcile_enabled():
+        bg_tasks.append(asyncio.create_task(sutui_reconcile_loop_forever(3600.0)))
+    else:
+        logger.info("[启动] 速推对账任务已关闭（海外实例或 LOBSTER_SUTUI_RECONCILE_ENABLED=0）")
     yield
-    if probe_task is not None:
-        probe_task.cancel()
+    for t in bg_tasks:
+        t.cancel()
         try:
-            await probe_task
+            await t
         except asyncio.CancelledError:
             pass
 
