@@ -23,10 +23,43 @@ fi
 REMOTE_DIR="${LOBSTER_DEPLOY_REMOTE_DIR:-/opt/lobster-server}"
 REMOTE_DIR_OS="${LOBSTER_DEPLOY_REMOTE_DIR_OVERSEAS:-$REMOTE_DIR}"
 SSH_BASE="-o StrictHostKeyChecking=accept-new"
-# 若本机已 ssh-add 解锁密钥，不要用 -i（否则会再次读盘加密私钥、非交互易失败）
+# 若本机已 ssh-add 解锁密钥，不要用 -i（否则会再次读盘加密私钥、易弹窗索要口令）
 _ssh_agent_has_keys() {
   [ -n "${SSH_AUTH_SOCK:-}" ] && ssh-add -l >/dev/null 2>&1
 }
+
+_DEPLOY_SSH_AGENT_STARTED=0
+_deploy_cleanup_ssh_agent() {
+  if [ "$_DEPLOY_SSH_AGENT_STARTED" = 1 ]; then
+    eval "$(ssh-agent -k)" 2>/dev/null || true
+    _DEPLOY_SSH_AGENT_STARTED=0
+  fi
+}
+
+# 加密私钥：若 .env.deploy 中有 LOBSTER_SSH_KEY_PASSPHRASE，用 SSH_ASKPASS 非交互 ssh-add，避免 GUI/终端弹窗
+if ! _ssh_agent_has_keys; then
+  if [ -n "$LOBSTER_DEPLOY_SSH_KEY" ] && [ -r "$LOBSTER_DEPLOY_SSH_KEY" ] && [ -n "${LOBSTER_SSH_KEY_PASSPHRASE:-}" ]; then
+    AP="$(mktemp)"
+    {
+      echo '#!/usr/bin/env sh'
+      echo 'printf %s\\n "$LOBSTER_SSH_KEY_PASSPHRASE"'
+    } > "$AP"
+    chmod +x "$AP"
+    trap 'rm -f "$AP"; _deploy_cleanup_ssh_agent' EXIT
+    eval "$(ssh-agent -s)"
+    _DEPLOY_SSH_AGENT_STARTED=1
+    export SSH_ASKPASS_REQUIRE=force
+    export SSH_ASKPASS="$AP"
+    export DISPLAY="${DISPLAY:-localhost:0}"
+    ssh-add "$LOBSTER_DEPLOY_SSH_KEY"
+    rm -f "$AP"
+    trap _deploy_cleanup_ssh_agent EXIT
+    if [ -n "$LOBSTER_DEPLOY_HOST_OVERSEAS" ] && [ -n "${LOBSTER_DEPLOY_SSH_KEY_OVERSEAS:-}" ] && [ -r "$LOBSTER_DEPLOY_SSH_KEY_OVERSEAS" ]; then
+      ssh-add "$LOBSTER_DEPLOY_SSH_KEY_OVERSEAS" || true
+    fi
+  fi
+fi
+
 SSH_OPTS_MAIN="$SSH_BASE"
 if ! _ssh_agent_has_keys; then
   [ -n "$LOBSTER_DEPLOY_SSH_KEY" ] && [ -r "$LOBSTER_DEPLOY_SSH_KEY" ] && SSH_OPTS_MAIN="-i $LOBSTER_DEPLOY_SSH_KEY $SSH_BASE"
