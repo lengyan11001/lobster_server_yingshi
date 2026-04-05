@@ -285,17 +285,14 @@ def _credits_for_sutui_chat(
     usage: Optional[dict],
     response_body: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Decimal, str]:
-    """LLM 实扣：上游显式价字段 → 速推返回的 usage 折算 → docs 定价+usage → 其余兜底。"""
+    """LLM 实扣：上游显式价字段 → docs 定价+usage（与速推官方一致）→ 无 docs 时才按 usage×fallback。"""
     if response_body and isinstance(response_body, dict):
         reported = extract_upstream_reported_credits(response_body)
         if reported > 0:
             return quantize_credits(reported), "upstream价字段优先"
 
-    if usage and isinstance(usage, dict) and _total_tokens_in_usage(usage) > 0:
-        fb_usage = credits_from_chat_usage_when_no_docs_pricing(usage)
-        if fb_usage > 0:
-            return fb_usage, "速推usage折算"
-
+    # 注意：fallback（SUTUI_CHAT_FALLBACK_CREDITS_PER_1K 常为 1）必须在 docs 定价之后，
+    # 否则「每千 token 1 积分」会先命中（如 24k token→25），永远轮不到 token_based 真实单价（往往≈0.0x/千）。
     pricing = fetch_model_pricing(model)
     params: Dict[str, Any] = {}
     if usage and isinstance(usage, dict):
@@ -308,15 +305,17 @@ def _credits_for_sutui_chat(
         est2, err = estimate_pre_deduct_credits(model, None)
         if not err and est2 > 0:
             return quantize_credits(est2), "docs定价(默认参)"
-        fb2 = credits_from_chat_usage_when_no_docs_pricing(usage)
-        if fb2 > 0:
-            return fb2, "usage折算(docs未算出)"
+        if usage and isinstance(usage, dict) and _total_tokens_in_usage(usage) > 0:
+            fb2 = credits_from_chat_usage_when_no_docs_pricing(usage)
+            if fb2 > 0:
+                return fb2, "usage折算(docs未算出)"
         logger.warning("[sutui-chat] 有 pricing 结构但仍无法扣费 model=%s usage=%s", model, usage)
         return Decimal(0), "未扣费"
 
-    fb3 = credits_from_chat_usage_when_no_docs_pricing(usage)
-    if fb3 > 0:
-        return fb3, "usage折算(无docs定价)"
+    if usage and isinstance(usage, dict) and _total_tokens_in_usage(usage) > 0:
+        fb3 = credits_from_chat_usage_when_no_docs_pricing(usage)
+        if fb3 > 0:
+            return fb3, "usage折算(无docs定价)"
     logger.warning(
         "[sutui-chat] 无定价且 usage 无法折算（可调高 SUTUI_CHAT_FALLBACK_CREDITS_PER_1K 或配置 SUTUI_CHAT_MODEL_MAP） model=%s usage=%s",
         model,
