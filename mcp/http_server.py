@@ -23,7 +23,7 @@ from mcp.sutui_error_hints import (
     enhance_upstream_rest_error,
     hint_for_wrong_capability_model,
 )
-from mcp.jwt_brand import brand_mark_from_bearer
+from mcp.jwt_brand import resolve_brand_mark_for_request
 from mcp.sutui_tokens import (
     next_sutui_server_token,
     next_sutui_server_token_with_pool,
@@ -1911,7 +1911,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         ),
                     }
                 ], True
-            user_brand_mark = brand_mark_from_bearer(
+            user_brand_mark = resolve_brand_mark_for_request(
                 (request.headers.get("Authorization") or request.headers.get("x-user-authorization") or "")
             )
             if _capability_id_is_debug_only_in_registry(capability_id) and not await _fetch_is_skill_store_admin(token):
