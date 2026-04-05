@@ -93,6 +93,34 @@ def log_xskill_http(
             _upstream_body_for_audit(upstream_response),
         )
 
+    # 固定给人看的两行：本请求用的哪把 sk、对方完整返回（grep [sutui-exchange]）
+    if upstream_response is not None:
+        _exchange_body = _upstream_body_for_audit(upstream_response)
+    elif (error_message or "").strip():
+        em = (error_message or "").strip()
+        _exchange_body = em[:_UPSTREAM_AUDIT_MAX] + (
+            f"... [truncated total_len={len(em)}]" if len(em) > _UPSTREAM_AUDIT_MAX else ""
+        )
+    elif billing_snapshot:
+        _exchange_body = _json_clip(billing_snapshot, _UPSTREAM_AUDIT_MAX)
+    else:
+        _exchange_body = "-"
+    logger.info(
+        "[sutui-exchange] 本请求使用的 Bearer（完整 token）=%s pool=%s token_ref=%s phase=%s",
+        tok_out,
+        pool,
+        ref,
+        phase,
+    )
+    logger.info(
+        "[sutui-exchange] %s %s HTTP=%s cap_or_model=%s 对方返回正文=%s",
+        method,
+        url,
+        http_status,
+        capability_or_model or "-",
+        _exchange_body,
+    )
+
 
 def maybe_log_credit_ledger_append(
     *,
