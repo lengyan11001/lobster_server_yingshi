@@ -26,6 +26,12 @@ def main() -> None:
     if not (ROOT / "backend").is_dir():
         print("请在 lobster_server 项目根目录运行。", file=sys.stderr)
         sys.exit(2)
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(ROOT / ".env", override=False)
+    except Exception:
+        pass
     from backend.app.services.sutui_reconcile import seed_sutui_reconciliation_baseline
 
     out = seed_sutui_reconciliation_baseline()
