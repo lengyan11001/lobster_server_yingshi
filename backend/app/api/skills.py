@@ -31,6 +31,13 @@ _SKILL_STORE_ADMIN_LOGIN_ACCOUNTS = frozenset(
 )
 
 
+def _skill_store_admin_extra_from_env() -> frozenset:
+    raw = (getattr(settings, "lobster_skill_store_admin_accounts", None) or "").strip()
+    if not raw:
+        return frozenset()
+    return frozenset(x.strip().lower() for x in raw.split(",") if x.strip())
+
+
 def _skill_store_admin(user: User) -> bool:
     """技能商店：管理员可见「调试中」包；role=admin 或登录账号在白名单内。
 
@@ -39,7 +46,7 @@ def _skill_store_admin(user: User) -> bool:
     if (getattr(user, "role", None) or "").strip() == "admin":
         return True
     login_account = (getattr(user, "email", None) or "").strip().lower()
-    return login_account in _SKILL_STORE_ADMIN_LOGIN_ACCOUNTS
+    return login_account in (_SKILL_STORE_ADMIN_LOGIN_ACCOUNTS | _skill_store_admin_extra_from_env())
 
 
 def _pkg_store_visibility(pkg: dict) -> str:

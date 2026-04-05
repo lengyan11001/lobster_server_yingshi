@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     lobster_edition: str = "online"
     """在线版为 True 时：登录注册与充值全部自维护，不走速推；速推算力由服务器配置的 SUTUI_SERVER_TOKEN(S) 负载均衡，扣用户积分。"""
     lobster_independent_auth: bool = True
+    """逗号分隔登录账号（与 User.email 存的一致），额外视为技能商店管理员（可见 store_visibility=debug 的包、调试用能力）。与代码内建白名单合并。"""
+    lobster_skill_store_admin_accounts: Optional[str] = None
     """完成充值订单时需在请求头 X-Admin-Secret 携带此值（仅服务端/管理员使用）。"""
     lobster_recharge_admin_secret: Optional[str] = None
     """充值创建订单后展示给用户的付款说明。"""
@@ -46,6 +48,8 @@ class Settings(BaseSettings):
     sutui_oauth_login_url: Optional[str] = None
     """速推 API 根地址，用于 apikeys/list、balance 等（仅 online 使用）"""
     sutui_api_base: str = "https://api.xskill.ai"
+    # sutui-chat：docs 无定价时按上游 usage 每千 token 事后扣费（ceil）；0=禁用兜底
+    sutui_chat_fallback_credits_per_1k: float = 1.0
     """服务器侧速推 Token：能力由服务器转发时使用，用户不直接走速推。MCP 从环境变量 SUTUI_SERVER_TOKEN 读取。"""
     sutui_server_token: Optional[str] = None
     """我方标识，登录时带在 URL 上供速推统计（仅 online 使用）"""

@@ -4,8 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import uuid
 from decimal import Decimal
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional, Tuple
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -21,6 +22,7 @@ from ..models import User
 from ..services.credit_ledger import append_credit_ledger
 from ..services.credits_amount import credits_json_float, quantize_credits, user_balance_decimal
 from ..services.sutui_pricing import (
+    credits_from_chat_usage_when_no_docs_pricing,
     estimate_credits_from_pricing,
     estimate_pre_deduct_credits,
     extract_upstream_billing_snapshot,
@@ -32,6 +34,8 @@ from .auth import get_current_user
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+TRACE_HEADER = "X-Lobster-Chat-Trace-Id"
 
 
 def _remap_sutui_chat_model(body: Dict[str, Any]) -> None:
@@ -203,6 +207,45 @@ def _chat_balance_precheck_params(body: Dict[str, Any]) -> Dict[str, Any]:
     return {"prompt_tokens": pt, "completion_tokens": ct}
 
 
+def _total_tokens_in_usage(usage: Optional[dict]) -> int:
+    """是否具备可用的 token 计数（用于判断能否依赖上游 usage 计费）。"""
+    if not usage or not isinstance(usage, dict):
+        return 0
+    tt = usage.get("total_tokens")
+    if tt is not None:
+        try:
+            t = int(tt)
+            if t > 0:
+                return t
+        except (TypeError, ValueError):
+            pass
+    try:
+        pt = int(usage.get("prompt_tokens") or 0)
+        ct = int(usage.get("completion_tokens") or 0)
+        return pt + ct
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ensure_chat_usage_for_billing(body: Dict[str, Any], usage: Optional[dict]) -> dict:
+    """
+    上游 OpenAI 兼容实现常省略 usage（或非流式仅返回 choices）；docs 又无定价时会导致事后 0 扣费。
+    与流式分支一致：缺省则用 messages/max_tokens 粗估，至少按 SUTUI_CHAT_FALLBACK_CREDITS_PER_1K 折算。
+    """
+    if _total_tokens_in_usage(usage) > 0:
+        return usage  # type: ignore[return-value]
+    sp = _chat_balance_precheck_params(body)
+    logger.info(
+        "[sutui-chat] billing_usage_fallback pt=%s ct=%s (upstream usage missing or all zero)",
+        sp["prompt_tokens"],
+        sp["completion_tokens"],
+    )
+    return {
+        "prompt_tokens": sp["prompt_tokens"],
+        "completion_tokens": sp["completion_tokens"],
+    }
+
+
 def _require_balance_before_upstream_chat(
     db: Session,
     current_user: User,
@@ -238,30 +281,39 @@ def _credits_for_sutui_chat(
     model: str,
     usage: Optional[dict],
     response_body: Optional[Dict[str, Any]] = None,
-):
-    """按上游响应内嵌的本次消耗（若有）优先；否则按速推 docs 定价 + usage 计算。返回 4 位小数积分。"""
+) -> Tuple[Decimal, str]:
+    """按上游价字段 → docs 定价+usage → usage 兜底（无 docs 定价）顺序计算本次扣费。返回 (积分, 计费来源说明)。"""
     if response_body and isinstance(response_body, dict):
         reported = extract_upstream_reported_credits(response_body)
         if reported > 0:
-            return quantize_credits(reported)
+            return quantize_credits(reported), "upstream价字段优先"
     pricing = fetch_model_pricing(model)
-    if not pricing:
-        est, err = estimate_pre_deduct_credits(model, None)
-        if err:
-            logger.warning("[sutui-chat] 无定价 model=%s err=%s", model, err)
-            return Decimal(0)
-        return quantize_credits(est)
     params: Dict[str, Any] = {}
     if usage and isinstance(usage, dict):
         params["prompt_tokens"] = usage.get("prompt_tokens", 0)
         params["completion_tokens"] = usage.get("completion_tokens", 0)
-    est = estimate_credits_from_pricing(pricing, params)
-    if est <= 0:
+    if pricing:
+        est = estimate_credits_from_pricing(pricing, params)
+        if est > 0:
+            return quantize_credits(est), "docs定价+usage"
         est2, err = estimate_pre_deduct_credits(model, None)
-        if err:
-            return Decimal(0)
-        return quantize_credits(est2)
-    return quantize_credits(est)
+        if not err and est2 > 0:
+            return quantize_credits(est2), "docs定价(默认参)"
+        fb = credits_from_chat_usage_when_no_docs_pricing(usage)
+        if fb > 0:
+            return fb, "usage折算(docs未算出)"
+        logger.warning("[sutui-chat] 有 pricing 结构但仍无法扣费 model=%s usage=%s", model, usage)
+        return Decimal(0), "未扣费"
+    # 无 docs 定价：事前可不预扣；事后必须能按 usage 兜底则扣（见 settings.sutui_chat_fallback_credits_per_1k）
+    fb = credits_from_chat_usage_when_no_docs_pricing(usage)
+    if fb > 0:
+        return fb, "usage折算(无docs定价)"
+    logger.warning(
+        "[sutui-chat] 无定价且 usage 无法折算（可调高 SUTUI_CHAT_FALLBACK_CREDITS_PER_1K 或配置 SUTUI_CHAT_MODEL_MAP） model=%s usage=%s",
+        model,
+        usage,
+    )
+    return Decimal(0), "未扣费"
 
 
 def _apply_chat_deduct(
@@ -272,18 +324,22 @@ def _apply_chat_deduct(
     response_body: Optional[Dict[str, Any]] = None,
     *,
     billing_recon: Optional[Dict[str, Any]] = None,
+    trace_id: Optional[str] = None,
 ) -> None:
+    tid = trace_id or "-"
     if not _should_deduct_credits():
+        logger.info(
+            "[chat_trace] trace_id=%s path=sutui_chat_deduct result=skipped reason=no_user_deduct "
+            "edition=%s independent_auth=%s",
+            tid,
+            getattr(settings, "lobster_edition", None),
+            getattr(settings, "lobster_independent_auth", True),
+        )
         return
     reported_raw = None
     if response_body and isinstance(response_body, dict):
         reported_raw = extract_upstream_reported_credits(response_body)
-    credits = _credits_for_sutui_chat(model, usage, response_body)
-    billing_src = (
-        "upstream价字段优先"
-        if reported_raw and reported_raw > 0
-        else ("docs定价+usage或兜底" if credits > 0 else "未扣费")
-    )
+    credits, billing_src = _credits_for_sutui_chat(model, usage, response_body)
     snap = extract_upstream_billing_snapshot(response_body if isinstance(response_body, dict) else None)
     try:
         snap_json = json.dumps(snap, ensure_ascii=False, default=str)
@@ -301,12 +357,23 @@ def _apply_chat_deduct(
         _sutui_chat_upstream_body_for_log(response_body if isinstance(response_body, dict) else None),
     )
     if credits <= 0:
+        logger.info(
+            "[chat_trace] trace_id=%s path=sutui_chat_deduct result=skipped reason=credits_zero "
+            "user_id=%s model=%s billing_src=%s computed_credits=%s usage=%s",
+            tid,
+            current_user.id,
+            model,
+            billing_src,
+            credits,
+            usage,
+        )
         return
     db.refresh(current_user)
     bal = user_balance_decimal(current_user)
     if bal < credits:
         logger.error(
-            "[sutui-chat] 扣积分失败（余额不足），上游已成功返回，不向客户端透传正文 user_id=%s model=%s need=%s have=%s",
+            "[sutui-chat] 扣积分失败（余额不足），上游已成功返回，不向客户端透传正文 trace_id=%s user_id=%s model=%s need=%s have=%s",
+            tid,
             current_user.id,
             model,
             credits,
@@ -324,6 +391,7 @@ def _apply_chat_deduct(
         "model": model,
         "usage": usage,
         "deduct_credits": credits_json_float(credits),
+        "billing_src": billing_src,
     }
     if billing_recon:
         meta_chat = {**meta_chat, **billing_recon}
@@ -338,7 +406,15 @@ def _apply_chat_deduct(
         meta=meta_chat,
     )
     db.commit()
-    logger.info("[sutui-chat] 已扣积分 user_id=%s model=%s credits=%s", current_user.id, model, credits)
+    logger.info(
+        "[chat_trace] trace_id=%s path=sutui_chat_deduct result=ok ledger=sutui_chat user_id=%s model=%s credits=%s balance_after=%s",
+        tid,
+        current_user.id,
+        model,
+        credits,
+        bal_after,
+    )
+    logger.info("[sutui-chat] 已扣积分 trace_id=%s user_id=%s model=%s credits=%s", tid, current_user.id, model, credits)
 
 
 @router.post("/api/sutui-chat/completions", summary="速推 LLM 对话代理（需登录）")
@@ -351,6 +427,18 @@ async def sutui_chat_completions(
         body: Dict[str, Any] = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="请求体须为 JSON")
+
+    trace_id = (
+        (request.headers.get(TRACE_HEADER) or request.headers.get(TRACE_HEADER.lower()) or "").strip()
+        or uuid.uuid4().hex
+    )
+    logger.info(
+        "[chat_trace] trace_id=%s path=sutui_chat_completions enter user_id=%s stream=%s model_in=%s",
+        trace_id,
+        current_user.id,
+        bool(body.get("stream")),
+        (body.get("model") or "-"),
+    )
 
     _remap_sutui_chat_model(body)
 
@@ -377,6 +465,13 @@ async def sutui_chat_completions(
     }
 
     model_id = (body.get("model") or "").strip()
+    logger.info(
+        "[chat_trace] trace_id=%s path=sutui_chat_completions forward brand=%s model_after_remap=%s sutui_pool=%s",
+        trace_id,
+        bm,
+        model_id or "-",
+        sutui_pool or "-",
+    )
 
     _require_balance_before_upstream_chat(db, current_user, model_id, body)
 
@@ -403,19 +498,44 @@ async def sutui_chat_completions(
         except Exception:
             raise HTTPException(status_code=502, detail=(r.text or "")[:2000])
 
+        logger.info(
+            "[chat_trace] trace_id=%s path=sutui_chat upstream_xskill roundtrip http=%s model=%s summary=%s",
+            trace_id,
+            r.status_code,
+            model_id or "-",
+            _sutui_chat_upstream_body_for_log(data if isinstance(data, dict) else None),
+        )
+
         if r.status_code == 200 and model_id:
-            usage = data.get("usage") if isinstance(data, dict) else None
+            usage_raw = data.get("usage") if isinstance(data, dict) else None
+            usage_bill = _ensure_chat_usage_for_billing(
+                body,
+                usage_raw if isinstance(usage_raw, dict) else None,
+            )
             _apply_chat_deduct(
                 db,
                 current_user,
                 model_id,
-                usage if isinstance(usage, dict) else None,
+                usage_bill,
                 data if isinstance(data, dict) else None,
                 billing_recon=chat_billing_recon,
+                trace_id=trace_id,
+            )
+        else:
+            logger.info(
+                "[chat_trace] trace_id=%s path=sutui_chat deduct=skipped_nonstream reason=%s http=%s model_id=%r",
+                trace_id,
+                "upstream_not_200" if r.status_code != 200 else "empty_model_id",
+                r.status_code,
+                model_id,
             )
 
         out = _normalize_upstream_402_for_client(data) if r.status_code == 402 else data
-        return JSONResponse(content=out, status_code=r.status_code)
+        return JSONResponse(
+            content=out,
+            status_code=r.status_code,
+            headers={TRACE_HEADER: trace_id},
+        )
 
     # 流式：边下边解析 SSE 行，取最后一个含 usage 的 data JSON；若无则按与预检一致的保守 usage 估算扣费。
 
@@ -428,6 +548,12 @@ async def sutui_chat_completions(
                 async with client.stream("POST", url, json=body, headers=headers) as resp:
                     if resp.status_code >= 400:
                         txt = (await resp.aread()).decode("utf-8", errors="replace")
+                        logger.info(
+                            "[chat_trace] trace_id=%s path=sutui_chat upstream_xskill stream_fail http=%s preview=%s",
+                            trace_id,
+                            resp.status_code,
+                            txt[:500].replace("\n", " "),
+                        )
                         if resp.status_code == 402:
                             try:
                                 parsed = json.loads(txt) if txt.strip().startswith("{") else {}
@@ -455,6 +581,11 @@ async def sutui_chat_completions(
                         yield f"data: {err}\n\n".encode("utf-8")
                         return
                     stream_completed_ok = True
+                    logger.info(
+                        "[chat_trace] trace_id=%s path=sutui_chat upstream_xskill stream_started http=200 model=%s",
+                        trace_id,
+                        model_id or "-",
+                    )
                     async for chunk in resp.aiter_bytes():
                         yield chunk
                         line_buf.extend(chunk)
@@ -507,15 +638,18 @@ async def sutui_chat_completions(
             yield f"data: {err}\n\n".encode("utf-8")
         finally:
             if not stream_completed_ok or not model_id or not _should_deduct_credits():
+                logger.info(
+                    "[chat_trace] trace_id=%s path=sutui_chat stream_deduct=skipped stream_ok=%s model_id=%r "
+                    "should_deduct=%s had_usage_chunk=%s",
+                    trace_id,
+                    stream_completed_ok,
+                    model_id,
+                    _should_deduct_credits(),
+                    last_usage is not None,
+                )
                 return
-            usage_for_deduct: Optional[Dict[str, Any]] = last_usage
-            if not usage_for_deduct:
-                sp = _chat_balance_precheck_params(body)
-                usage_for_deduct = {
-                    "prompt_tokens": sp["prompt_tokens"],
-                    "completion_tokens": sp["completion_tokens"],
-                }
-            resp_for_bill: Dict[str, Any] = {"usage": last_usage} if last_usage else {"usage": usage_for_deduct}
+            usage_for_deduct = _ensure_chat_usage_for_billing(body, last_usage)
+            resp_for_bill: Dict[str, Any] = {"usage": usage_for_deduct}
             try:
                 _apply_chat_deduct(
                     db,
@@ -524,20 +658,34 @@ async def sutui_chat_completions(
                     usage_for_deduct if isinstance(usage_for_deduct, dict) else None,
                     resp_for_bill,
                     billing_recon=chat_billing_recon,
+                    trace_id=trace_id,
                 )
             except HTTPException as exc:
                 if exc.status_code == 402:
                     logger.error(
-                        "[sutui-chat] 流式结束后扣费失败 user_id=%s model=%s detail=%s",
+                        "[chat_trace] trace_id=%s path=sutui_chat stream_deduct=failed_insufficient user_id=%s model=%s detail=%s",
+                        trace_id,
+                        current_user.id,
+                        model_id,
+                        exc.detail,
+                    )
+                    logger.error(
+                        "[sutui-chat] 流式结束后扣费失败 trace_id=%s user_id=%s model=%s detail=%s",
+                        trace_id,
                         current_user.id,
                         model_id,
                         exc.detail,
                     )
                 else:
                     logger.exception(
-                        "[sutui-chat] 流式结束后扣费异常 user_id=%s model=%s",
+                        "[sutui-chat] 流式结束后扣费异常 trace_id=%s user_id=%s model=%s",
+                        trace_id,
                         current_user.id,
                         model_id,
                     )
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={TRACE_HEADER: trace_id},
+    )

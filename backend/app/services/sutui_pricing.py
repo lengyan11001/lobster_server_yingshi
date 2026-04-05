@@ -133,6 +133,39 @@ def estimate_credits_from_pricing(pricing: dict, params: Optional[dict]) -> int:
     return _quantize_credits(float(base))
 
 
+def credits_from_chat_usage_when_no_docs_pricing(usage: Optional[dict]) -> Decimal:
+    """
+    docs 无定价或定价无法用于本次扣费时：按上游 chat/completions 返回的 usage 事后折算积分。
+    与 SUTUI_CHAT_MODEL_MAP 等无关，只看 token 计数；预检阶段仍可不拦截（无 pricing 时 _require_balance_before_upstream_chat 直接 return）。
+    """
+    try:
+        rate = float(getattr(settings, "sutui_chat_fallback_credits_per_1k", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    if rate <= 0:
+        return Decimal(0)
+    if not usage or not isinstance(usage, dict):
+        return Decimal(0)
+    total = 0
+    tt = usage.get("total_tokens")
+    if tt is not None:
+        try:
+            total = int(tt)
+        except (TypeError, ValueError):
+            total = 0
+    if total <= 0:
+        try:
+            pt = int(usage.get("prompt_tokens") or 0)
+            ct = int(usage.get("completion_tokens") or 0)
+            total = pt + ct
+        except (TypeError, ValueError):
+            total = 0
+    if total <= 0:
+        return Decimal(0)
+    units = math.ceil(total / 1000.0)
+    return quantize_credits(units * rate)
+
+
 def estimate_pre_deduct_credits(model_id: str, params: Optional[dict]) -> Tuple[int, Optional[str]]:
     """
     返回 (预扣积分, 错误文案)。错误非空表示不允许调用（无定价或无法估算）。
