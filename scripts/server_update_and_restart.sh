@@ -16,6 +16,10 @@ else
   exit 1
 fi
 
+echo "[日志] 截断 $ROOT/mcp.log / backend.log（若存在；便于本轮只看新输出如 [sutui-audit]）"
+: > "$ROOT/mcp.log" 2>/dev/null || true
+: > "$ROOT/backend.log" 2>/dev/null || true
+
 if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files --type=service 2>/dev/null | grep -q lobster-backend; then
   echo "[重启] systemctl restart lobster-backend lobster-mcp ..."
   sudo systemctl restart lobster-backend lobster-mcp

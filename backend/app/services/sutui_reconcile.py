@@ -47,26 +47,74 @@ def _api_base() -> str:
     )
 
 
-def fetch_sutui_balance_server_token_sync(token: str) -> Tuple[Optional[Decimal], str]:
+def fetch_sutui_balance_server_token_sync(token: str, *, pool_label: str = "") -> Tuple[Optional[Decimal], str]:
     """使用服务器 sk 拉取速推余额；先 Bearer，失败再 api_key 查询参数（与 openclaw 用户接口一致）。"""
     t = (token or "").strip()
+    pool = (pool_label or "").strip()
     if not t:
         return None, "empty_token"
     base = _api_base()
     url = f"{base}/api/v3/balance"
+
+    def _audit(
+        *,
+        http_status: int,
+        billing_snapshot: Optional[Dict[str, Any]],
+        err: str,
+        upstream: Any,
+    ) -> None:
+        try:
+            from .sutui_api_audit import log_xskill_http
+
+            log_xskill_http(
+                phase="balance_query",
+                method="GET",
+                url=url,
+                http_status=http_status,
+                capability_or_model="-",
+                billing_snapshot=billing_snapshot,
+                error_message=err,
+                extra={"pool": pool or None},
+                bearer_token=t,
+                sutui_pool=pool,
+                upstream_response=upstream,
+            )
+        except Exception:
+            pass
+
     try:
         with httpx.Client(timeout=25.0, trust_env=True) as client:
             r = client.get(url, headers={"Authorization": f"Bearer {t}", "Accept": "application/json"})
             if r.status_code >= 400:
                 r = client.get(url, params={"api_key": t}, headers={"Accept": "application/json"})
+        raw_text = (r.text or "") if r.content else ""
         try:
             data = r.json() if r.content else {}
-        except Exception:
+        except Exception as ej:
+            _audit(
+                http_status=r.status_code,
+                billing_snapshot=None,
+                err=f"bad_json: {ej}",
+                upstream=raw_text or None,
+            )
             return None, f"bad_json_http_{r.status_code}"
         if not isinstance(data, dict):
+            _audit(
+                http_status=r.status_code,
+                billing_snapshot=None,
+                err="not_dict",
+                upstream=data,
+            )
             return None, "not_dict"
         if data.get("code") != 200:
-            return None, (data.get("detail") or data.get("msg") or f"code_{data.get('code')}")[:500]
+            msg = (data.get("detail") or data.get("msg") or f"code_{data.get('code')}")[:500]
+            _audit(
+                http_status=r.status_code,
+                billing_snapshot={"code": data.get("code"), "message": str(msg)[:1500]},
+                err=str(msg),
+                upstream=data,
+            )
+            return None, msg
         d = data.get("data") if isinstance(data.get("data"), dict) else {}
         raw = d.get("balance")
         if raw is None:
@@ -75,6 +123,19 @@ def fetch_sutui_balance_server_token_sync(token: str) -> Tuple[Optional[Decimal]
             bal = quantize_credits(raw)
         except Exception:
             bal = quantize_credits(0)
+        _audit(
+            http_status=r.status_code,
+            billing_snapshot={
+                "balance": float(bal),
+                "raw_balance": raw,
+                "data_keys": list(d.keys()) if isinstance(d, dict) else [],
+            },
+            err="",
+            upstream=data,
+        )
+        return bal, ""
+    except Exception as e:
+        logger.warning("[sutui-reconcile] balance 请求失败: %s", e)
         try:
             from .sutui_api_audit import log_xskill_http
 
@@ -82,20 +143,14 @@ def fetch_sutui_balance_server_token_sync(token: str) -> Tuple[Optional[Decimal]
                 phase="balance_query",
                 method="GET",
                 url=url,
-                http_status=r.status_code,
-                capability_or_model="-",
-                billing_snapshot={
-                    "balance": float(bal),
-                    "raw_balance": raw,
-                    "data_keys": list(d.keys()) if isinstance(d, dict) else [],
-                },
-                error_message="",
+                http_status=0,
+                error_message=str(e)[:8000],
+                bearer_token=t,
+                sutui_pool=pool,
+                upstream_response=None,
             )
         except Exception:
             pass
-        return bal, ""
-    except Exception as e:
-        logger.warning("[sutui-reconcile] balance 请求失败: %s", e)
         return None, str(e)[:500]
 
 
@@ -181,7 +236,7 @@ def seed_sutui_reconciliation_baseline() -> Dict[str, Any]:
     db = SessionLocal()
     try:
         for pool, secret, ref in tokens:
-            bal, err = fetch_sutui_balance_server_token_sync(secret)
+            bal, err = fetch_sutui_balance_server_token_sync(secret, pool_label=pool)
             item: Dict[str, Any] = {
                 "pool": pool,
                 "sutui_token_ref": ref,
@@ -252,7 +307,7 @@ def run_sutui_reconcile_sync() -> Dict[str, Any]:
                 .first()
             )
             window_start = prev_row.created_at if prev_row else (now - timedelta(minutes=65))
-            bal, err = fetch_sutui_balance_server_token_sync(secret)
+            bal, err = fetch_sutui_balance_server_token_sync(secret, pool_label=pool)
 
             local_net = _local_net_credits_for_ref(db, ref, window_start, now)
             prev_bal = prev_row.balance_remote if prev_row else None

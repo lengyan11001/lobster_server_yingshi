@@ -84,17 +84,33 @@ async def _fetch_mcp_models(token: str) -> List[Dict[str, Any]]:
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
+    url_models = f"{base}/api/v3/mcp/models"
     async with httpx.AsyncClient(timeout=120.0) as client:
-        r = await client.get(f"{base}/api/v3/mcp/models", headers=headers)
+        r = await client.get(url_models, headers=headers)
+    up_models: Any = None
+    if r.content:
+        try:
+            up_models = r.json()
+        except Exception:
+            up_models = r.text or ""
+    models_count: Optional[int] = None
+    if isinstance(up_models, dict):
+        data_o = up_models.get("data")
+        if isinstance(data_o, dict):
+            ml = data_o.get("models")
+            if isinstance(ml, list):
+                models_count = len(ml)
     try:
         log_xskill_http(
             phase="mcp_models_list",
             method="GET",
-            url=f"{base}/api/v3/mcp/models",
+            url=url_models,
             http_status=r.status_code,
             capability_or_model="-",
-            billing_snapshot={"models_count": None},
-            error_message=(r.text or "")[:1500] if r.status_code >= 400 else "",
+            billing_snapshot={"models_count": models_count},
+            error_message=(r.text or "")[:8000] if r.status_code >= 400 else "",
+            bearer_token=token,
+            upstream_response=up_models,
         )
     except Exception:
         pass
@@ -131,9 +147,11 @@ async def _probe_one_chat(token: str, model_id: str) -> tuple[bool, int]:
             r = await client.post(url, json=body, headers=headers)
         try:
             preview: Dict[str, Any] = {}
+            up_probe: Any = None
             if r.content:
                 try:
                     j = r.json()
+                    up_probe = j
                     if isinstance(j, dict):
                         preview["detail"] = j.get("detail")
                         err = j.get("error")
@@ -144,6 +162,7 @@ async def _probe_one_chat(token: str, model_id: str) -> tuple[bool, int]:
                                 if err.get(k) is not None
                             }
                 except Exception:
+                    up_probe = r.text or ""
                     preview["text_prefix"] = (r.text or "")[:800]
             log_xskill_http(
                 phase="llm_probe",
@@ -152,7 +171,9 @@ async def _probe_one_chat(token: str, model_id: str) -> tuple[bool, int]:
                 http_status=r.status_code,
                 capability_or_model=model_id,
                 billing_snapshot=preview if preview else None,
-                error_message=(r.text or "")[:2000] if r.status_code != 200 else "",
+                error_message=(r.text or "")[:8000] if r.status_code != 200 else "",
+                bearer_token=token,
+                upstream_response=up_probe,
             )
         except Exception:
             pass

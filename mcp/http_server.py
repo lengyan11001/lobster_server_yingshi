@@ -735,7 +735,9 @@ async def _call_upstream_sutui_tasks_rest(
                 http_status=r.status_code,
                 capability_or_model=lobster_capability_id or model_for_hint or "-",
                 billing_snapshot=None,
-                error_message=err_body[:2500],
+                error_message=err_body[:8000],
+                bearer_token=token,
+                upstream_response=err_body,
             )
             logger.warning(
                 "[速推完整响应] %s | tool=%s | lobster_capability=%s | REST HTTP=%s\n%s",
@@ -764,6 +766,17 @@ async def _call_upstream_sutui_tasks_rest(
                 e,
                 raw,
             )
+            log_xskill_http(
+                phase=f"tasks_rest.{tool_name}",
+                method="POST",
+                url=url,
+                http_status=r.status_code,
+                capability_or_model=lobster_capability_id or model_for_hint or "-",
+                billing_snapshot=None,
+                error_message=f"非JSON: {e}",
+                bearer_token=token,
+                upstream_response=raw,
+            )
             return {"error": {"message": f"上游 REST 非 JSON: {e}"}}
         if not isinstance(payload, dict):
             logger.warning(
@@ -772,6 +785,17 @@ async def _call_upstream_sutui_tasks_rest(
                 tool_name,
                 lobster_capability_id or "(无)",
                 (r.text or "")[:800],
+            )
+            log_xskill_http(
+                phase=f"tasks_rest.{tool_name}",
+                method="POST",
+                url=url,
+                http_status=r.status_code,
+                capability_or_model=lobster_capability_id or model_for_hint or "-",
+                billing_snapshot=None,
+                error_message="上游 REST 返回非对象",
+                bearer_token=token,
+                upstream_response=(r.text or "")[:_SUTUI_UPSTREAM_LOG_MAX],
             )
             return {"error": {"message": "上游 REST 返回非对象"}}
         code = payload.get("code")
@@ -784,7 +808,9 @@ async def _call_upstream_sutui_tasks_rest(
                 http_status=200,
                 capability_or_model=lobster_capability_id or model_for_hint or "-",
                 billing_snapshot={"code": code, "message": str(msg)[:1500]},
-                error_message=str(msg)[:2500],
+                error_message=str(msg)[:8000],
+                bearer_token=token,
+                upstream_response=_sanitize_for_json(payload),
             )
             _log_sutui_upstream_full_response(
                 "sutui", tool_name, lobster_capability_id, _sanitize_for_json(payload)
@@ -805,6 +831,8 @@ async def _call_upstream_sutui_tasks_rest(
                 capability_or_model=lobster_capability_id or "-",
                 billing_snapshot=None,
                 error_message=f"无 data 对象: {str(payload)[:800]}",
+                bearer_token=token,
+                upstream_response=_sanitize_for_json(payload),
             )
             _log_sutui_upstream_full_response(
                 "sutui", tool_name, lobster_capability_id, _sanitize_for_json(payload)
@@ -827,6 +855,8 @@ async def _call_upstream_sutui_tasks_rest(
                 "model": data.get("model"),
             },
             error_message="",
+            bearer_token=token,
+            upstream_response=_sanitize_for_json(payload),
         )
         return _sanitize_for_json(data)
 

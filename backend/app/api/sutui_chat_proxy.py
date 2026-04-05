@@ -541,6 +541,9 @@ async def sutui_chat_completions(
             billing_snapshot=_audit_snap if _audit_snap else None,
             error_message=_audit_err,
             extra={"trace_id": trace_id, "user_id": current_user.id, "stream": False},
+            bearer_token=token,
+            sutui_pool=sutui_pool or "",
+            upstream_response=data if isinstance(data, dict) else (r.text or None),
         )
 
         if r.status_code == 200 and model_id:
@@ -598,8 +601,11 @@ async def sutui_chat_completions(
                             http_status=resp.status_code,
                             capability_or_model=model_id or "-",
                             billing_snapshot=None,
-                            error_message=txt[:3000],
+                            error_message=txt[:8000],
                             extra={"trace_id": trace_id, "user_id": current_user.id, "stream": True},
+                            bearer_token=token,
+                            sutui_pool=sutui_pool or "",
+                            upstream_response=txt,
                         )
                         if resp.status_code == 402:
                             try:
@@ -642,6 +648,12 @@ async def sutui_chat_completions(
                         billing_snapshot={"note": "stream started; usage/x_billing 在流结束后扣费日志中"},
                         error_message="",
                         extra={"trace_id": trace_id, "user_id": current_user.id, "stream": True},
+                        bearer_token=token,
+                        sutui_pool=sutui_pool or "",
+                        upstream_response={
+                            "note": "SSE 流已开始，完整 chunks 不在此条；请用 trace_id 对齐后续扣费流水",
+                            "trace_id": trace_id,
+                        },
                     )
                     async for chunk in resp.aiter_bytes():
                         yield chunk

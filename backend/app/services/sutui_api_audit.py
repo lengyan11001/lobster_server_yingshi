@@ -1,12 +1,15 @@
 """速推相关：出站 HTTP 与积分流水审计日志（[sutui-audit] 前缀，便于 grep）。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from decimal import Decimal
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("sutui_audit")
+
+_UPSTREAM_AUDIT_MAX = 500_000
 
 _AUDITED_LEDGER_ENTRY_TYPES = frozenset(
     {
@@ -31,6 +34,23 @@ def _json_clip(obj: Any, max_len: int = 12000) -> str:
     return s
 
 
+def _token_ref(secret: str) -> str:
+    t = (secret or "").strip()
+    if not t:
+        return ""
+    return hashlib.sha256(t.encode("utf-8")).hexdigest()[:12]
+
+
+def _upstream_body_for_audit(obj: Any) -> str:
+    """对方返回正文：字符串原样截断，对象则 JSON（与 mcp 侧 _SUTUI_UPSTREAM_LOG_MAX 量级一致）。"""
+    if isinstance(obj, str):
+        s = obj
+        if len(s) > _UPSTREAM_AUDIT_MAX:
+            return s[:_UPSTREAM_AUDIT_MAX] + f"... [truncated total_len={len(s)}]"
+        return s
+    return _json_clip(obj, _UPSTREAM_AUDIT_MAX)
+
+
 def log_xskill_http(
     *,
     phase: str,
@@ -41,19 +61,37 @@ def log_xskill_http(
     billing_snapshot: Optional[Dict[str, Any]] = None,
     error_message: str = "",
     extra: Optional[Dict[str, Any]] = None,
+    bearer_token: Optional[str] = None,
+    sutui_pool: str = "",
+    upstream_response: Optional[Any] = None,
 ) -> None:
-    """记录每一次发往 xskill 的 HTTP（或等价）调用结果与计费快照。"""
+    """记录每一次发往 xskill 的 HTTP（或等价）调用：池、完整 sk、token 摘要、计费快照与对方响应。"""
+    tok = (bearer_token or "").strip()
+    ref = _token_ref(tok) or "-"
+    pool = (sutui_pool or "").strip() or "-"
+    tok_out = tok if tok else "-"
     logger.info(
-        "[sutui-audit] http phase=%s %s %s http=%s cap_or_model=%s billing=%s err=%s extra=%s",
+        "[sutui-audit] http phase=%s %s %s http=%s pool=%s sutui_token_ref=%s bearer_token=%s cap_or_model=%s billing=%s err=%s extra=%s",
         phase,
         method,
         url,
         http_status,
+        pool,
+        ref,
+        tok_out,
         capability_or_model or "-",
         _json_clip(billing_snapshot) if billing_snapshot else "-",
-        (error_message or "-")[:3000],
-        _json_clip(extra, 4000) if extra else "-",
+        (error_message or "-")[:8000],
+        _json_clip(extra, 12000) if extra else "-",
     )
+    if upstream_response is not None:
+        logger.info(
+            "[sutui-audit] upstream_body phase=%s pool=%s sutui_token_ref=%s body=%s",
+            phase,
+            pool,
+            ref,
+            _upstream_body_for_audit(upstream_response),
+        )
 
 
 def maybe_log_credit_ledger_append(
@@ -73,9 +111,15 @@ def maybe_log_credit_ledger_append(
     if et not in _AUDITED_LEDGER_ENTRY_TYPES:
         if rt not in ("capability_call_log", "sutui_chat") and not (rt == "capability" and et == "pre_deduct"):
             return
+    trace_hint = ""
+    if isinstance(meta, dict):
+        tid = meta.get("trace_id")
+        if tid:
+            trace_hint = str(tid)[:128]
     logger.info(
-        "[sutui-audit] db credit_ledger user_id=%s entry_type=%s delta=%s balance_after=%s "
+        "[sutui-audit] db credit_ledger trace_id=%s user_id=%s entry_type=%s delta=%s balance_after=%s "
         "ref_type=%s ref_id=%s description=%s meta=%s",
+        trace_hint or "-",
         user_id,
         et,
         delta,
