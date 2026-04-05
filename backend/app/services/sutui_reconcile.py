@@ -102,6 +102,26 @@ def _collect_unique_server_tokens() -> List[Tuple[str, str, str]]:
     return out
 
 
+def collect_bihuo_yingshi_server_tokens() -> List[Tuple[str, str, str]]:
+    """仅必火/影视 server 池（不含 legacy），同一 sk 只保留一条。用于双账户基线快照。"""
+    seen_ref: set[str] = set()
+    out: List[Tuple[str, str, str]] = []
+    for pool_label, lst in (
+        ("bihuo", get_sutui_tokens_list_bihuo()),
+        ("yingshi", get_sutui_tokens_list_yingshi()),
+    ):
+        for tok in lst:
+            tok = (tok or "").strip()
+            if not tok:
+                continue
+            ref = sutui_token_ref_from_secret(tok)
+            if not ref or ref in seen_ref:
+                continue
+            seen_ref.add(ref)
+            out.append((pool_label, tok, ref))
+    return out
+
+
 def _local_net_credits_for_ref(db: Session, token_ref: str, t0: datetime, t1: datetime) -> Decimal:
     """窗口内：与本 token_ref 关联的积分变动净值（用户侧消耗为正）。"""
     q = (
@@ -121,6 +141,73 @@ def _local_net_credits_for_ref(db: Session, token_ref: str, t0: datetime, t1: da
             continue
         net = quantize_credits(net - row.delta)
     return net
+
+
+def seed_sutui_reconciliation_baseline() -> Dict[str, Any]:
+    """
+    手动拉取必火/影视两把（或多把）server sk 的速推余额，写入 sutui_reconciliation_runs（status=baseline_seed）
+    与 data/sutui_reconcile_baseline.json。后续定时对账会以最新一条 balance_remote 为上一档口径算 remote_delta。
+    """
+    tokens = collect_bihuo_yingshi_server_tokens()
+    summary: Dict[str, Any] = {
+        "at": datetime.utcnow().isoformat() + "Z",
+        "kind": "baseline_seed",
+        "pools": ["bihuo", "yingshi"],
+        "items": [],
+    }
+    if not tokens:
+        summary["error"] = "未配置 SUTUI_SERVER_TOKENS_BIHUO / SUTUI_SERVER_TOKENS_YINGSHI"
+        logger.warning("[sutui-reconcile] baseline_seed 跳过：无必火/影视 token")
+        return summary
+
+    db = SessionLocal()
+    try:
+        for pool, secret, ref in tokens:
+            bal, err = fetch_sutui_balance_server_token_sync(secret)
+            item: Dict[str, Any] = {
+                "pool": pool,
+                "sutui_token_ref": ref,
+                "balance_remote": float(bal) if bal is not None else None,
+                "ok": bal is not None,
+                "error": err or None,
+            }
+            summary["items"].append(item)
+            if bal is None:
+                logger.warning("[sutui-reconcile] baseline_seed 跳过入库 pool=%s ref=%s err=%s", pool, ref, err)
+                continue
+            row = SutuiReconciliationRun(
+                pool=pool,
+                sutui_token_ref=ref,
+                balance_remote=bal,
+                remote_delta=None,
+                local_net_credits=quantize_credits(0),
+                diff=None,
+                status="baseline_seed",
+                detail="手动基线：记录远端余额供后续对账",
+            )
+            db.add(row)
+            db.commit()
+            logger.info(
+                "[sutui-reconcile] baseline_seed 已写入 pool=%s ref=%s balance_remote=%s",
+                pool,
+                ref,
+                bal,
+            )
+    except Exception as e:
+        logger.exception("[sutui-reconcile] baseline_seed 异常: %s", e)
+        summary["exception"] = str(e)[:500]
+        db.rollback()
+    finally:
+        db.close()
+
+    try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        path = _DATA_DIR / "sutui_reconcile_baseline.json"
+        path.write_text(json.dumps(summary, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception as e:
+        logger.debug("[sutui-reconcile] 写 baseline json: %s", e)
+
+    return summary
 
 
 def run_sutui_reconcile_sync() -> Dict[str, Any]:
