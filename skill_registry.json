@@ -80,51 +80,6 @@
       "capabilities": {},
       "tags": ["messenger", "meta", "chat", "reply"]
     },
-    "comfly_veo_skill": {
-      "name": "Comfly Veo 带货视频",
-      "description": "本机经 Comfly 调用 Google Veo 图生视频：上传商品图、生成英文 prompt、提交与轮询任务。仅技能商店管理员可见；无需积分解锁。安装后在本机配置 Comfly API Key（或 .env COMFLY_API_KEY / 用户设置）。",
-      "type": "builtin",
-      "store_visibility": "debug",
-      "status": "available",
-      "package_config": {
-        "comfly_api_base": "https://ai.comfly.chat",
-        "video_model": "veo3.1-fast",
-        "analysis_model": "gemini-2.5-pro",
-        "aspect_ratio": "9:16",
-        "enhance_prompt": true,
-        "storyboard_image_model": "nano-banana-2"
-      },
-      "capabilities": {
-        "comfly.veo": {
-          "description": "Comfly + Veo 图生视频（invoke_capability capability_id=comfly.veo，payload.action=upload|generate_prompts|submit_video|poll_video）",
-          "upstream": "local",
-          "upstream_tool": "invoke",
-          "enabled": true,
-          "is_default": false,
-          "unit_credits": 0,
-          "arg_schema": {
-            "type": "object",
-            "properties": {
-              "action": {
-                "type": "string",
-                "enum": ["upload", "generate_prompts", "submit_video", "poll_video"],
-                "description": "upload: 本机 asset_id 上传得 image_url；generate_prompts: 从 image_url 生成 5 条英文视频 prompt；submit_video: 提交 Veo 任务；poll_video: 查询 task_id 状态与 output"
-              },
-              "asset_id": { "type": "string", "description": "upload 时必填" },
-              "image_url": { "type": "string", "description": "generate_prompts/submit_video 时可用" },
-              "prompt": { "type": "string", "description": "submit_video 视频提示词" },
-              "task_id": { "type": "string", "description": "poll_video 必填" },
-              "video_model": { "type": "string", "description": "覆盖卡片默认 Veo 模型" },
-              "analysis_model": { "type": "string", "description": "覆盖卡片默认分析模型" },
-              "aspect_ratio": { "type": "string", "description": "如 9:16、16:9" },
-              "enhance_prompt": { "type": "boolean", "description": "非英文 prompt 时是否增强" }
-            },
-            "required": ["action"]
-          }
-        }
-      },
-      "tags": ["video", "comfly", "veo", "i2v"]
-    },
     "media_edit_skill": {
       "name": "素材剪辑",
       "description": "对素材库视频/图片做叠字、裁剪、画幅、静音、配乐、静图转视频、抽帧；需本机已安装 ffmpeg。1000 积分解锁后可在对话中用自然语言描述剪辑意图（须给出可解析参数）。",

@@ -1,0 +1,11 @@
+﻿Agent pid 2256
+bash.exe : Identity added: /d/maczhuji (158253524@qq.com)
+所在位置 C:\Users\Administrator\AppData\Local\Temp\ps-script-8305298d-2ce2-4af0-9dfb-25fd7476a300.ps1:90 字符: 1
++ & "C:\Program Files\Git\bin\bash.exe" -lc $bash 2>&1 | Out-File -File ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Identity added:...8253524@qq.com):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+** WARNING: connection is not using a post-quantum key exchange algorithm.
+** This session may be vulnerable to "store now, decrypt later" attacks.
+** The server may need to be upgraded. See https://openssh.com/pq.html
