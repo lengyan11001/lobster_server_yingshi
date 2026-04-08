@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import uuid
 from decimal import Decimal
@@ -1045,7 +1046,12 @@ def _payload_get_aspect_ratio(payload: Dict[str, Any]) -> Any:
     """速推 / 前端可能用 ratio 或 aspect_ratio。"""
     if payload.get("aspect_ratio") is not None:
         return payload.get("aspect_ratio")
-    return payload.get("ratio")
+    if payload.get("ratio") is not None:
+        return payload.get("ratio")
+    for k in ("size", "image_size"):
+        if payload.get(k) is not None:
+            return payload.get(k)
+    return None
 
 
 def _payload_get_duration_raw(payload: Dict[str, Any]) -> Any:
@@ -1074,9 +1080,12 @@ def _coerce_video_aspect_ratio_for_upstream(raw: Any) -> str:
     if low in ("square", "1x1"):
         return "1:1"
     if "x" in ar and ":" not in ar:
-        parts = ar.lower().replace(" ", "").split("x", 1)
+        parts = ar.lower().replace(" ", "").replace("×", "x").split("x", 1)
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            ar = f"{parts[0]}:{parts[1]}"
+            w, h = int(parts[0]), int(parts[1])
+            if w > 0 and h > 0:
+                g = math.gcd(w, h)
+                ar = f"{w // g}:{h // g}"
     ar = ar.replace("：", ":").strip()
     if ar in _VIDEO_ASPECT_RATIOS:
         return ar
@@ -1329,7 +1338,11 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     # 模型名称到标准 ID 的映射（将界面展示名转换为速推/xskill 标准模型 ID）
     # 注意：这里只处理常见的展示名，标准 ID 格式（如 fal-ai/xxx）直接透传
     model_lower = model.lower()
-    
+    if re.match(r"^wan/v2\.7/", model_lower):
+        model = "wan/v2.6/image-to-video" if has_image else "wan/v2.6/text-to-video"
+        model_lower = model.lower()
+        logger.info("[MCP] video.generate wan v2.7 已归一为 v2.6（has_image=%s）", has_image)
+
     if "/" not in model or not model.startswith(("fal-ai/", "st-ai/", "wan/", "jimeng-", "openai/", "anthropic/", "google/", "xai/")):
         # 可能是展示名，尝试映射到标准模型 ID
         if "sora" in model_lower and ("2" in model or "pub" in model_lower or "vip" in model_lower or "pro" in model_lower):
@@ -1993,6 +2006,30 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             payload = args.get("payload") or {}
             if not isinstance(payload, dict):
                 payload = {}
+            if capability_id == "publish_content":
+                logger.warning(
+                    "[MCP] invoke_capability 误用 capability_id=publish_content，已转发为 publish_content"
+                )
+                pub_args: Dict[str, Any] = dict(payload)
+                for k in (
+                    "asset_id",
+                    "account_nickname",
+                    "account_id",
+                    "title",
+                    "description",
+                    "tags",
+                    "options",
+                    "cover_asset_id",
+                    "platform",
+                ):
+                    if k in args and k not in ("capability_id", "payload"):
+                        v = args[k]
+                        if v is None:
+                            continue
+                        cur = pub_args.get(k)
+                        if cur is None or (isinstance(cur, str) and not cur.strip()):
+                            pub_args[k] = v
+                return await _call_tool("publish_content", pub_args, token, request)
             if not capability_id or capability_id not in catalog:
                 return [{"type": "text", "text": f"能力未找到: {capability_id}"}], True
             if not (token or "").strip():
