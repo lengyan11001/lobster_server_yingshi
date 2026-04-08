@@ -39,13 +39,31 @@ router = APIRouter()
 TRACE_HEADER = "X-Lobster-Chat-Trace-Id"
 
 
-def _remap_sutui_chat_model(body: Dict[str, Any]) -> None:
-    """可选：将客户端传来的 model 映射为速推分销商侧实际有通道的 id（就地修改 body）。
+_SUTUI_PROVIDER_PREFIXES = ("anthropic/", "openai/", "google/", "deepseek/", "meta/", "mistral/", "cohere/")
 
-    环境变量 SUTUI_CHAT_MODEL_MAP_JSON：JSON 对象，键为入站 model 字符串，值为转发到 xskill 的 model。
-    典型场景：mcp/models 列出 deepseek/deepseek-chat，但 default 分销商组未挂该通道；网页智能对话能用的 id 不同，
-    则在此配置 {\"deepseek/deepseek-chat\":\"你在下拉/F12 里看到的真实 id\"}。
+
+def _strip_provider_prefix(mid: str) -> str:
+    """速推 model id 不带 provider 前缀（如 claude-opus-4-6 而非 anthropic/claude-opus-4-6）。"""
+    for pfx in _SUTUI_PROVIDER_PREFIXES:
+        if mid.startswith(pfx):
+            return mid[len(pfx):]
+    return mid
+
+
+def _remap_sutui_chat_model(body: Dict[str, Any]) -> None:
+    """将客户端传来的 model 映射为速推分销商侧实际有通道的 id（就地修改 body）。
+
+    1. 自动剥离 provider 前缀（anthropic/、openai/ 等）
+    2. 环境变量 SUTUI_CHAT_MODEL_MAP_JSON：JSON 对象，键为入站 model 字符串，值为转发到 xskill 的 model。
     """
+    mid = (body.get("model") or "").strip()
+    if not mid:
+        return
+    stripped = _strip_provider_prefix(mid)
+    if stripped != mid:
+        logger.info("[sutui-chat] 自动剥离 provider 前缀: %s -> %s", mid, stripped)
+        body["model"] = stripped
+        mid = stripped
     raw = (os.environ.get("SUTUI_CHAT_MODEL_MAP_JSON") or "").strip()
     if not raw:
         return
@@ -55,9 +73,6 @@ def _remap_sutui_chat_model(body: Dict[str, Any]) -> None:
         logger.warning("[sutui-chat] SUTUI_CHAT_MODEL_MAP_JSON 不是合法 JSON，已忽略")
         return
     if not isinstance(m, dict):
-        return
-    mid = (body.get("model") or "").strip()
-    if not mid:
         return
     to_id = m.get(mid)
     if isinstance(to_id, str) and to_id.strip():
@@ -160,9 +175,9 @@ def _xskill_upstream_pool_quota_error(data: Any) -> bool:
 
 
 def _parse_sutui_chat_fallback_chain_env() -> List[str]:
-    """主→备模型顺序：默认仅 deepseek-chat；可用 SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON 覆盖添加更多。"""
+    """主→备模型顺序：默认 deepseek-chat → claude-opus-4-6；可用 SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON 覆盖。"""
     raw = (os.environ.get("SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON") or "").strip()
-    default = ["deepseek-chat"]
+    default = ["deepseek-chat", "claude-opus-4-6"]
     if not raw:
         return default
     try:
