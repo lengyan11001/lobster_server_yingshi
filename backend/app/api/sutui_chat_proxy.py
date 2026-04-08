@@ -160,9 +160,9 @@ def _xskill_upstream_pool_quota_error(data: Any) -> bool:
 
 
 def _parse_sutui_chat_fallback_chain_env() -> List[str]:
-    """主→备模型顺序：默认同 deepseek-chat → Opus 4；可用 SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON 覆盖。"""
+    """主→备模型顺序：默认仅 deepseek-chat；可用 SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON 覆盖添加更多。"""
     raw = (os.environ.get("SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON") or "").strip()
-    default = ["deepseek-chat", "anthropic/claude-opus-4-6"]
+    default = ["deepseek-chat"]
     if not raw:
         return default
     try:
