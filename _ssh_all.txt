@@ -1,1 +1,0 @@
-bash: /d/lobster-server/_run_ssh.sh: No such file or directory
