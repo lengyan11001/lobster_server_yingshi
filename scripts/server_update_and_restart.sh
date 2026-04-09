@@ -4,9 +4,16 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+PREV_COMMIT="$(git rev-parse HEAD)"
+echo "$PREV_COMMIT" > "$ROOT/.deploy_rollback_commit"
+echo "[备份] 当前版本 $PREV_COMMIT 已记录到 .deploy_rollback_commit"
+
 echo "[更新] 拉取 origin main ..."
 git fetch origin main
 git pull origin main
+
+NEW_COMMIT="$(git rev-parse HEAD)"
+echo "[版本] $PREV_COMMIT → $NEW_COMMIT"
 
 if [ -x "$ROOT/.venv/bin/pip" ]; then
   echo "[依赖] .venv pip install -r requirements.txt ..."

@@ -53,6 +53,10 @@ _last_video_generate_invoke: contextvars.ContextVar[Optional[Dict[str, Any]]] = 
 # 上游 fal/网关以 JSON 返回 Unexpected status code: 504 时，自动重新提交视频任务的最多次数
 _UPSTREAM_504_VIDEO_RESUBMIT_MAX = 3
 
+_POLL_MAX_WAIT_IMAGE = 30 * 60   # 图片生成轮询上限 30 分钟
+_POLL_MAX_WAIT_VIDEO = 60 * 60   # 视频生成轮询上限 60 分钟（Seedance 等慢模型需要更久）
+_POLL_MAX_WAIT_GENERIC = 60 * 60 # task.get_result 通用轮询上限 60 分钟
+
 _PROVIDERS: Dict[str, Dict[str, str]] = {
     "deepseek":  {"base_url": "https://api.deepseek.com",  "env": "DEEPSEEK_API_KEY"},
     "openai":    {"base_url": "https://api.openai.com",    "env": "OPENAI_API_KEY"},
@@ -298,10 +302,9 @@ async def _exec_tool(
     t0 = time.perf_counter()
     success = True
     result_text = ""
-    # task.get_result may poll upstream for up to 30 min (video generation)
     timeout = 120.0
     if name == "invoke_capability" and (args.get("capability_id") or "").strip() == "task.get_result":
-        timeout = 35 * 60.0  # 35 min
+        timeout = 65 * 60.0  # 单次 get_result 调用超时，须大于 _POLL_MAX_WAIT_VIDEO
 
     def _friendly_tool_error(err: Exception) -> str:
         raw = str(err or "")
@@ -1096,7 +1099,7 @@ async def _chat_openai(
                     if task_id:
                         get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                         poll_interval = 15
-                        max_wait_sec = 20 * 60
+                        max_wait_sec = _POLL_MAX_WAIT_IMAGE
                         res = await _poll_task_until_terminal_then_retry_video_on_504(
                             initial_res=res,
                             get_result_args_base=get_result_args,
@@ -1138,7 +1141,7 @@ async def _chat_openai(
                     if task_id:
                         get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                         poll_interval = 15
-                        max_wait_sec = 20 * 60
+                        max_wait_sec = _POLL_MAX_WAIT_VIDEO
                         video_args = copy.deepcopy(a)
                         res = await _poll_task_until_terminal_then_retry_video_on_504(
                             initial_res=res,
@@ -1178,7 +1181,7 @@ async def _chat_openai(
                     and _is_task_result_in_progress(res)
                 ):
                     poll_interval = 15
-                    max_wait_sec = 20 * 60
+                    max_wait_sec = _POLL_MAX_WAIT_GENERIC
                     task_id = (a.get("task_id") or a.get("payload", {}).get("task_id") or "").strip() if isinstance(a.get("payload"), dict) else (a.get("task_id") or "").strip()
                     logger.info("[素材] task.get_result 自动轮询开始 task_id=%s interval=%ds max_wait=%ds", task_id or "(无)", poll_interval, max_wait_sec)
                     res = await _poll_task_until_terminal_then_retry_video_on_504(
@@ -1247,7 +1250,7 @@ async def _chat_openai(
                     if task_id:
                         get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                         poll_interval = 15
-                        max_wait_sec = 20 * 60
+                        max_wait_sec = _POLL_MAX_WAIT_IMAGE
                         res = await _poll_task_until_terminal_then_retry_video_on_504(
                             initial_res=res,
                             get_result_args_base=get_result_args,
@@ -1289,7 +1292,7 @@ async def _chat_openai(
                     if task_id:
                         get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                         poll_interval = 15
-                        max_wait_sec = 20 * 60
+                        max_wait_sec = _POLL_MAX_WAIT_VIDEO
                         video_args = copy.deepcopy(tc_info["arguments"])
                         res = await _poll_task_until_terminal_then_retry_video_on_504(
                             initial_res=res,
@@ -1329,7 +1332,7 @@ async def _chat_openai(
                     and _is_task_result_in_progress(res)
                 ):
                     poll_interval = 15
-                    max_wait_sec = 20 * 60
+                    max_wait_sec = _POLL_MAX_WAIT_GENERIC
                     args = tc_info["arguments"]
                     task_id = (args.get("task_id") or ((args.get("payload") or {}).get("task_id") if isinstance(args.get("payload"), dict) else None) or "").strip()
                     logger.info("[素材] task.get_result 自动轮询开始(text_calls) task_id=%s interval=%ds", task_id or "(无)", poll_interval)
@@ -1430,7 +1433,7 @@ async def _chat_openai(
                             if task_id:
                                 get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                                 poll_interval = 15
-                                max_wait_sec = 20 * 60
+                                max_wait_sec = _POLL_MAX_WAIT_IMAGE
                                 logger.info("[素材] image.generate 自动轮询开始(forced) task_id=%s", task_id)
                                 res = await _poll_task_until_terminal_then_retry_video_on_504(
                                     initial_res=res,
@@ -1473,7 +1476,7 @@ async def _chat_openai(
                             if task_id:
                                 get_result_args = {"capability_id": "task.get_result", "payload": {"task_id": task_id}}
                                 poll_interval = 15
-                                max_wait_sec = 20 * 60
+                                max_wait_sec = _POLL_MAX_WAIT_VIDEO
                                 video_args = copy.deepcopy(a)
                                 logger.info("[素材] video.generate 自动轮询开始(forced) task_id=%s", task_id)
                                 res = await _poll_task_until_terminal_then_retry_video_on_504(
@@ -1877,7 +1880,13 @@ def _build_user_content_with_attachments(
             pairs.append((aid, u))
         if pairs:
             logger.info("[CHAT] 注入素材 URL: asset_ids=%s", [p[0] for p in pairs])
-            user_content += "\n\n【用户本条消息上传的素材】图生视频时你不要在 video.generate 的 payload 里填 image_url/media_files，由系统自动注入。理解视频/图片时请用以下 URL 作为 sutui.understand_video 的 video_url。\n"
+            user_content += (
+                "\n\n【用户本条消息上传的素材】\n"
+                "- 图生视频：你不要在 video.generate 的 payload 里填 image_url/media_files，由系统自动注入。\n"
+                "- 图生图 / 图片编辑：调用 image.generate，在 payload 里设 image_url 为下方 URL，并指定编辑模型（wan/v2.7/edit、seedream/v4.5/edit 等）。\n"
+                "- 理解图片：调用 image.understand，在 payload 里设 image_url 为下方 URL，prompt 为用户的要求。\n"
+                "- 理解视频：调用 video.understand，在 payload 里设 video_url 为下方 URL，prompt 为用户的要求。\n"
+            )
             user_content += "\n".join(f"- asset_id: {aid}  URL: {u}" for aid, u in pairs)
     return user_content or "（无文字）"
 
@@ -2002,7 +2011,17 @@ async def chat_endpoint(
             "  → 返回 task_id 后必须调 task.get_result(task_id) 轮询，视频通常 30–120 秒完成\n"
             "生成并发布：先 invoke_capability 生成 → 拿 asset_id → 调 publish_content\n"
             "当用户要求「发到某账号」「发布到抖音」「上传小红书」等时，在 task.get_result 返回成功（含 saved_assets 或 result 中的 asset_id）后，立即调用 publish_content(asset_id, account_nickname, ...)，无需等用户再次确认或点击。\n"
-            "理解视频/图片：当用户发送视频或图片并说「理解一下」「总结」「描述画面」「这段视频讲了什么」时，先取用户本条消息附图的公网 URL（见【用户本条消息上传的素材】），再调用 invoke_capability(capability_id=\"sutui.understand_video\", payload={\"video_url\": \"该 URL\", \"prompt\": \"用户的要求或默认描述\"})，将返回的 result 文本融入你的回复。\n"
+            "【图片编辑 / 图生图】用户上传图片并说「编辑」「改成…风格」「换背景」「把图片变成…」时，调用 image.generate，payload 中 image_url 填附件 URL，model 填编辑模型：\n"
+            "  - wan/v2.7/edit（标准）、wan/v2.7/pro/edit（增强）：prompt 中用 image 1 引用输入图\n"
+            "  - fal-ai/bytedance/seedream/v4.5/edit、fal-ai/bytedance/seedream/v5/lite/edit：prompt 中用 Figure 1 引用\n"
+            "  - fal-ai/qwen-image-edit-2511-multiple-angles：多角度生成\n"
+            "  → 与文生图一样返回 task_id，用 task.get_result 取结果\n"
+            "【理解图片】用户上传图片并说「理解一下」「描述」「这张图是什么」「看看这张图」「识别一下」时：\n"
+            "  调用 invoke_capability(capability_id=\"image.understand\", payload={\"image_url\": \"附件URL\", \"prompt\": \"用户的要求或 请详细描述这张图片的内容\"})\n"
+            "  → 返回 task_id，用 task.get_result 取结果文本，融入你的回复。\n"
+            "【理解视频】用户上传视频并说「这段视频讲了什么」「总结视频」「分析这个视频」时：\n"
+            "  调用 invoke_capability(capability_id=\"video.understand\", payload={\"video_url\": \"附件URL\", \"prompt\": \"用户的要求或 请详细描述视频内容\"})\n"
+            "  → 返回 task_id，用 task.get_result 取结果文本，融入你的回复。\n"
             "【发布约束】\n"
             "- 发布必须由你调用 publish_content 等工具完成，不得要求用户「点加号」「到发布页」「准备好后告诉我」等手动操作。\n"
             "- task.get_result 返回成功且用户要求发布时，必须**在同一轮**紧接着调用 publish_content（或先 list_publish_accounts 再 publish_content），禁止只回复「图片/视频已生成，现在去发布」「让我检查某账号是否存在」等文字而不调用工具；若需确认账号，先调 list_publish_accounts，拿到结果后立即调 publish_content。\n"
@@ -2015,6 +2034,13 @@ async def chat_endpoint(
             "打开浏览器：open_account_browser(account_nickname=\"xxx\")\n"
             "检查登录：check_account_login(account_nickname=\"xxx\")\n"
             "查素材：list_assets  查账号：list_publish_accounts\n"
+            "【Instagram / Facebook 发布】\n"
+            "- 查 IG/FB 账号：list_meta_social_accounts\n"
+            "- 发布到 IG/FB：publish_meta_social(account_id, platform, content_type, asset_id/image_url/video_url, caption, tags)\n"
+            "  Instagram 支持 photo/video/carousel/reel/story；Facebook 支持 photo/video/link\n"
+            "- 查 IG/FB 数据：get_meta_social_data(account_id?, platform?) — 返回帖子列表与 Insights 指标\n"
+            "- 同步最新 IG/FB 数据：sync_meta_social_data(account_id?) — 先同步再用 get_meta_social_data 读取\n"
+            "- 用户问 IG/FB 表现、数据、互动率时：先 sync 再 get，用返回 JSON 直接分析，勿编造数字\n"
             "【素材指代与确认】\n"
             "用户说「用我上传的」「刚才那张」「上次传的」「上次生成的」「用这张图」时，可能指：本条消息附带的图、本会话中之前某条消息附带的图、或 list_assets 返回的最近素材。若不唯一或无法确定指哪张，禁止猜测。\n"
             "正确做法：先 list_assets（或结合本条消息已附带的素材）得到候选；若有多个候选或不确定，在回复中列出每条候选的「素材 ID」和「图片/视频链接」（便于用户点击查看），并明确问用户「您指的是哪一张？是不是这张？」待用户确认后再用该 asset_id 继续生成或发布。\n"
@@ -2186,7 +2212,17 @@ async def _chat_stream_events(
                 "  → 返回 task_id 后必须调 task.get_result(task_id) 轮询，视频通常 30–120 秒完成\n"
                 "生成并发布：先 invoke_capability 生成 → 拿 asset_id → 调 publish_content\n"
                 "当用户要求「发到某账号」「发布到抖音」「上传小红书」等时，在 task.get_result 返回成功（含 saved_assets 或 result 中的 asset_id）后，立即调用 publish_content(asset_id, account_nickname, ...)，无需等用户再次确认或点击。\n"
-                "理解视频/图片：当用户发送视频或图片并说「理解一下」「总结」「描述画面」「这段视频讲了什么」时，先取用户本条消息附图的公网 URL（见【用户本条消息上传的素材】），再调用 invoke_capability(capability_id=\"sutui.understand_video\", payload={\"video_url\": \"该 URL\", \"prompt\": \"用户的要求或默认描述\"})，将返回的 result 文本融入你的回复。\n"
+                "【图片编辑 / 图生图】用户上传图片并说「编辑」「改成…风格」「换背景」「把图片变成…」时，调用 image.generate，payload 中 image_url 填附件 URL，model 填编辑模型：\n"
+            "  - wan/v2.7/edit（标准）、wan/v2.7/pro/edit（增强）：prompt 中用 image 1 引用输入图\n"
+            "  - fal-ai/bytedance/seedream/v4.5/edit、fal-ai/bytedance/seedream/v5/lite/edit：prompt 中用 Figure 1 引用\n"
+            "  - fal-ai/qwen-image-edit-2511-multiple-angles：多角度生成\n"
+            "  → 与文生图一样返回 task_id，用 task.get_result 取结果\n"
+            "【理解图片】用户上传图片并说「理解一下」「描述」「这张图是什么」「看看这张图」「识别一下」时：\n"
+            "  调用 invoke_capability(capability_id=\"image.understand\", payload={\"image_url\": \"附件URL\", \"prompt\": \"用户的要求或 请详细描述这张图片的内容\"})\n"
+            "  → 返回 task_id，用 task.get_result 取结果文本，融入你的回复。\n"
+            "【理解视频】用户上传视频并说「这段视频讲了什么」「总结视频」「分析这个视频」时：\n"
+            "  调用 invoke_capability(capability_id=\"video.understand\", payload={\"video_url\": \"附件URL\", \"prompt\": \"用户的要求或 请详细描述视频内容\"})\n"
+            "  → 返回 task_id，用 task.get_result 取结果文本，融入你的回复。\n"
                 "【发布约束】\n"
                 "- 发布必须由你调用 publish_content 等工具完成，不得要求用户「点加号」「到发布页」「准备好后告诉我」等手动操作。\n"
                 "- task.get_result 返回成功且用户要求发布时，必须**在同一轮**紧接着调用 publish_content（或先 list_publish_accounts 再 publish_content），禁止只回复「图片/视频已生成，现在去发布」「让我检查某账号是否存在」等文字而不调用工具；若需确认账号，先调 list_publish_accounts，拿到结果后立即调 publish_content。\n"

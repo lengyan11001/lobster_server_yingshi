@@ -48,6 +48,40 @@
       "required": ["task_id"]
     }
   },
+  "image.understand": {
+    "description": "理解/分析图片内容（i2t）。通过多模态 LLM（Gemini / Claude 等）描述、识别、解读图片。返回文本而非图片。",
+    "upstream": "sutui",
+    "upstream_tool": "generate",
+    "enabled": true,
+    "is_default": true,
+    "arg_schema": {
+      "type": "object",
+      "properties": {
+        "prompt": { "type": "string", "description": "提问/指令，如「详细描述这张图片」「图中有什么文字」" },
+        "image_url": { "type": "string", "description": "单张图片 URL（会自动转为 image_urls 数组）" },
+        "image_urls": { "type": "array", "description": "图片 URL 数组（最多 10 张）" },
+        "model": { "type": "string", "description": "底层 LLM，默认 google/gemini-3-pro-preview" }
+      },
+      "required": ["prompt"]
+    }
+  },
+  "video.understand": {
+    "description": "理解/分析视频内容（v2t）。通过多模态 LLM（Gemini / Claude 等）描述、总结、解读视频。返回文本而非视频。",
+    "upstream": "sutui",
+    "upstream_tool": "generate",
+    "enabled": true,
+    "is_default": true,
+    "arg_schema": {
+      "type": "object",
+      "properties": {
+        "prompt": { "type": "string", "description": "提问/指令，如「这个视频讲了什么」「总结视频内容」" },
+        "video_url": { "type": "string", "description": "单个视频 URL（会自动转为 video_urls 数组）" },
+        "video_urls": { "type": "array", "description": "视频 URL 数组（最多 5 个，支持 mp4/mov/webm）" },
+        "model": { "type": "string", "description": "底层 LLM，默认 google/gemini-3-pro-preview" }
+      },
+      "required": ["prompt"]
+    }
+  },
   "sutui.search_models": {
     "description": "搜索速推可用模型与参数 Schema",
     "upstream": "sutui",

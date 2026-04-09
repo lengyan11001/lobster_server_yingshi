@@ -35,6 +35,7 @@ from .api.messenger import router as messenger_router
 from .api.twilio_whatsapp import router as twilio_whatsapp_router
 from .api.privacy_policy import router as privacy_policy_router
 from .api.oauth_public_pages import router as oauth_public_pages_router
+from .api.meta_social_publish import router as meta_social_publish_router
 try:
     from .api.wecom import router as wecom_router
 except Exception as e:
@@ -47,6 +48,7 @@ from .db import Base, engine, SessionLocal
 from . import models  # noqa: F401
 from .services.sutui_llm_probe import is_sutui_llm_probe_enabled_for_this_instance, sutui_llm_probe_loop_forever
 from .services.sutui_reconcile import is_sutui_reconcile_enabled, sutui_reconcile_loop_forever
+from .services.meta_social_schedule_runner import meta_social_schedule_background_loop
 
 logger = logging.getLogger(__name__)
 
@@ -659,6 +661,9 @@ async def _app_lifespan(app: FastAPI):
         bg_tasks.append(asyncio.create_task(sutui_reconcile_loop_forever(3600.0)))
     else:
         logger.info("[启动] 速推对账任务已关闭（海外实例或 LOBSTER_SUTUI_RECONCILE_ENABLED=0）")
+    if settings.meta_app_id and settings.meta_app_secret:
+        bg_tasks.append(asyncio.create_task(meta_social_schedule_background_loop()))
+        logger.info("[启动] Meta Social 定时发布后台已启动")
     yield
     for t in bg_tasks:
         t.cancel()
@@ -739,6 +744,7 @@ def create_app() -> FastAPI:
     app.include_router(wechat_oa_router, prefix="")
     app.include_router(messenger_router, prefix="")
     app.include_router(twilio_whatsapp_router, prefix="")
+    app.include_router(meta_social_publish_router, prefix="")
     if wecom_router is not None:
         app.include_router(wecom_router, prefix="")
     else:

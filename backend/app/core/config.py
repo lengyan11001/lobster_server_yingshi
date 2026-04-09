@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     """互亿无线 APIKEY，对应 Submit.json 请求参数 password"""
     ihuyi_sms_password: Optional[str] = None
 
+    # ── Meta Social（Instagram / Facebook 发布）──
+    """Facebook App ID（在 developers.facebook.com 创建 App 后获取）"""
+    meta_app_id: Optional[str] = None
+    """Facebook App Secret"""
+    meta_app_secret: Optional[str] = None
+
     def cors_origins_list(self) -> List[str]:
         if self.cors_origins.strip() == "*":
             return ["*"]

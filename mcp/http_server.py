@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from mcp.video_model_resolve import resolve_video_model_id
 from mcp.sutui_error_hints import (
     append_capability_model_hint,
     enhance_upstream_rest_error,
@@ -393,6 +394,75 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admi
                 },
                 "required": ["asset_id", "account_nickname"],
             },
+        },
+        # ── Meta Social（Instagram / Facebook）──
+        {
+            "name": "list_meta_social_accounts",
+            "description": "列出已连接的 Instagram / Facebook 账号。每条含 id、label、平台信息；发布或查询数据时需先获取 account_id。",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "publish_meta_social",
+            "description": (
+                "发布内容到 Instagram 或 Facebook 主页。"
+                "Instagram 支持 photo/video/carousel/reel/story；Facebook 支持 photo/video/link。"
+                "asset_id 填素材库 ID，系统自动解析公网 URL；也可直接传 image_url/video_url。"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer", "description": "Meta 账号 ID（来自 list_meta_social_accounts）"},
+                    "platform": {"type": "string", "enum": ["instagram", "facebook"], "description": "目标平台"},
+                    "content_type": {
+                        "type": "string",
+                        "enum": ["photo", "video", "carousel", "reel", "story", "link"],
+                        "description": "内容类型",
+                    },
+                    "asset_id": {"type": "string", "description": "素材库 asset_id（优先使用）"},
+                    "image_url": {"type": "string", "description": "图片直链（无 asset_id 时使用）"},
+                    "video_url": {"type": "string", "description": "视频直链（无 asset_id 时使用）"},
+                    "caption": {"type": "string", "description": "文案 / 描述"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "话题标签"},
+                    "link": {"type": "string", "description": "链接（仅 Facebook link 类型）"},
+                    "title": {"type": "string", "description": "标题（仅 Facebook 视频）"},
+                },
+                "required": ["account_id", "platform", "content_type"],
+            },
+        },
+        {
+            "name": "get_meta_social_data",
+            "description": (
+                "读取已同步的 Instagram / Facebook 数据：帖子列表（含 likes、comments、reach 等指标）+ 账号级 Insights。"
+                "用户问 IG/FB 表现、数据、互动率时使用；若需最新数据，先调 sync_meta_social_data 再调本工具。"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer", "description": "可选，指定账号；不填返回全部"},
+                    "platform": {"type": "string", "enum": ["instagram", "facebook"], "description": "可选，筛选平台"},
+                },
+            },
+        },
+        {
+            "name": "sync_meta_social_data",
+            "description": (
+                "从 Instagram / Facebook API 拉取最新帖子列表与 Insights 数据到本地（耗时数秒到十几秒）。"
+                "同步完成后用 get_meta_social_data 读取结果。"
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer", "description": "可选，指定账号；不填同步全部"},
+                },
+            },
+        },
+        {
+            "name": "get_social_report",
+            "description": (
+                "跨平台数据报告：聚合 Instagram + Facebook 所有已连接账号的数据摘要（帖子数、总 likes/comments/reach 等）。"
+                "用户问「所有平台表现」「数据总览」「跨平台对比」时使用。数据基于最近一次同步快照。"
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
         },
     ]
     if not is_skill_store_admin and _DEBUG_ONLY_MCP_TOOL_NAMES:
@@ -1264,8 +1334,7 @@ def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     payload = dict(payload)
     model = (payload.get("model") or payload.get("model_id") or "").strip()
     if not model:
-        model = (os.environ.get("SUTUI_DEFAULT_IMAGE_MODEL") or "fal-ai/flux-2/flash").strip()
-        logger.info("[MCP] image.generate 未传 model，默认 %s", model)
+        raise ValueError("请指定图片模型（model），例如 flux-2/flash、seedream、nano-banana-pro、jimeng-4.5、gemini 等。")
     payload["model"] = model
     prompt = (payload.get("prompt") or "").strip()
     image_url = (payload.get("image_url") or "").strip()
@@ -1289,7 +1358,27 @@ def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
             out["image_urls"] = [image_url]
         return out
 
-    # fal-ai/bytedance/seedream/*：prompt, image_size, num_images
+    # ── i2i 编辑模型：wan/v2.7/edit、seedream/*/edit、qwen-image-edit ──
+    _is_edit = "/edit" in model or "image-edit" in model
+    if _is_edit or "wan/v2.7" in model:
+        _imgs = payload.get("image_urls") or ([image_url] if image_url else [])
+        if isinstance(_imgs, str):
+            _imgs = [_imgs]
+        out = {"model": model, "prompt": prompt}
+        if _imgs:
+            out["image_urls"] = _imgs
+        if image_size:
+            out["image_size"] = image_size
+        elif "seedream" in model:
+            out["image_size"] = "auto_2K"
+        if "qwen-image-edit" not in model:
+            out["num_images"] = num_images
+        neg = (payload.get("negative_prompt") or "").strip()
+        if neg:
+            out["negative_prompt"] = neg
+        return out
+
+    # fal-ai/bytedance/seedream/* (文生图)：prompt, image_size, num_images
     if "seedream" in model:
         return {"model": model, "prompt": prompt, "image_size": image_size or "auto_2K", "num_images": num_images}
 
@@ -1317,6 +1406,35 @@ def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     return out
 
 
+def _normalize_understand_payload(
+    payload: Dict[str, Any],
+    media_key: str = "image_urls",
+    default_model: str = "openrouter/router/vision",
+) -> Dict[str, Any]:
+    """将 image.understand / video.understand 的统一 payload 转成速推 generate 所需格式。"""
+    if not payload or not isinstance(payload, dict):
+        payload = {}
+    payload = dict(payload)
+    prompt = (payload.get("prompt") or "").strip() or "请详细描述内容。"
+    model = (payload.get("model") or "").strip() or default_model
+
+    urls = payload.get(media_key)
+    if not urls:
+        singular = media_key.replace("_urls", "_url")
+        single = (payload.get(singular) or payload.get("image_url") or payload.get("video_url") or "").strip()
+        if single:
+            urls = [single]
+    if isinstance(urls, str):
+        urls = [urls]
+    out: Dict[str, Any] = {"model": model, "prompt": prompt}
+    if urls:
+        out[media_key] = urls
+    for k in ("system_prompt", "max_tokens", "temperature", "reasoning"):
+        if k in payload:
+            out[k] = payload[k]
+    return out
+
+
 def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     按视频模型把「统一 payload」转成该模型 API 需要的参数，与 lobster 对齐：支持 backend 注入的 filePaths/media_files。
@@ -1324,81 +1442,15 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     if not payload or not isinstance(payload, dict):
         return payload
     model = (payload.get("model") or payload.get("model_id") or "").strip()
+    if not model:
+        raise ValueError("请指定视频模型（model），例如 sora2、seedance2、hailuo、vidu、wan、veo、kling、grok、jimeng 等。")
     prompt = (payload.get("prompt") or "").strip()
     fp = payload.get("filePaths") or []
     image_url = (payload.get("image_url") or "").strip()
     mf = payload.get("media_files") or []
     has_image = bool(fp) or bool(image_url) or bool(mf)
 
-    # LLM 漏传 model 时与对话/capability 说明一致：默认 Seedance 2，避免上游 REST 报「generate 缺少 model」
-    if not model:
-        model = "st-ai/super-seed2"
-        logger.info("[MCP] video.generate 未传 model，默认 st-ai/super-seed2")
-
-    # 模型名称到标准 ID 的映射（将界面展示名转换为速推/xskill 标准模型 ID）
-    # 注意：这里只处理常见的展示名，标准 ID 格式（如 fal-ai/xxx）直接透传
-    model_lower = model.lower()
-    if re.match(r"^wan/v2\.7/", model_lower):
-        model = "wan/v2.6/image-to-video" if has_image else "wan/v2.6/text-to-video"
-        model_lower = model.lower()
-        logger.info("[MCP] video.generate wan v2.7 已归一为 v2.6（has_image=%s）", has_image)
-
-    if "/" not in model or not model.startswith(("fal-ai/", "st-ai/", "wan/", "jimeng-", "openai/", "anthropic/", "google/", "xai/")):
-        # 可能是展示名，尝试映射到标准模型 ID
-        if "sora" in model_lower and ("2" in model or "pub" in model_lower or "vip" in model_lower or "pro" in model_lower):
-            # Sora 2 系列：根据是否有图片决定是 i2v 还是 t2v
-            if "pub" in model_lower:
-                model = "fal-ai/sora-2/image-to-video" if has_image else "fal-ai/sora-2/text-to-video"
-            elif "vip" in model_lower:
-                model = "fal-ai/sora-2/vip/image-to-video" if has_image else "fal-ai/sora-2/vip/text-to-video"
-            elif "pro" in model_lower:
-                model = "fal-ai/sora-2/pro/image-to-video" if has_image else "fal-ai/sora-2/pro/text-to-video"
-            else:
-                # 默认 Sora 2
-                model = "fal-ai/sora-2/image-to-video" if has_image else "fal-ai/sora-2/text-to-video"
-        elif "seedance" in model_lower or ("seed" in model_lower and "seedream" not in model_lower):
-            if "2" in model or "2.0" in model:
-                model = "st-ai/super-seed2"
-            elif "1.5" in model:
-                # Seedance 1.5 需要根据 task_type 判断
-                if "text" in model_lower or "t2v" in model_lower:
-                    model = "fal-ai/bytedance/seedance/v1.5/pro/text-to-video"
-                else:
-                    model = "fal-ai/bytedance/seedance/v1.5/pro/image-to-video" if has_image else "fal-ai/bytedance/seedance/v1.5/pro/text-to-video"
-            elif "1" in model and "1.5" not in model:
-                if "fast" in model_lower:
-                    model = "fal-ai/bytedance/seedance/v1/pro/fast/image-to-video" if has_image else "fal-ai/bytedance/seedance/v1/pro/fast/text-to-video"
-                elif "lite" in model_lower:
-                    if "reference" in model_lower or "ref" in model_lower:
-                        model = "fal-ai/bytedance/seedance/v1/lite/reference-to-video"
-                    else:
-                        model = "fal-ai/bytedance/seedance/v1/lite/image-to-video" if has_image else "fal-ai/bytedance/seedance/v1/lite/text-to-video"
-                else:
-                    model = "fal-ai/bytedance/seedance/v1/pro/image-to-video" if has_image else "fal-ai/bytedance/seedance/v1/pro/text-to-video"
-        elif "kling" in model_lower:
-            if "o3" in model_lower and "pro" in model_lower:
-                model = "fal-ai/kling-video/o3/pro/image-to-video" if has_image else "fal-ai/kling-video/o3/pro/text-to-video"
-            elif "o3" in model_lower:
-                model = "fal-ai/kling-video/o3/image-to-video" if has_image else "fal-ai/kling-video/o3/text-to-video"
-            else:
-                model = "fal-ai/kling-video/image-to-video" if has_image else "fal-ai/kling-video/text-to-video"
-        elif "wan" in model_lower or "万" in model:
-            if "2.6" in model or "v2.6" in model_lower:
-                model = "wan/v2.6/image-to-video" if has_image else "wan/v2.6/text-to-video"
-            else:
-                model = "wan/v2.6/image-to-video" if has_image else "wan/v2.6/text-to-video"
-        elif "veo" in model_lower:
-            # 与速推/xskill 当前可用 ID 一致：fal-ai/veo3.1/*（勿用 google/veo-3.1/*，易 403/等候名单）
-            # 文生视频官方 ID 为 fal-ai/veo3.1（无 /text-to-video 后缀）
-            if "3.1" in model:
-                model = "fal-ai/veo3.1/image-to-video" if has_image else "fal-ai/veo3.1"
-            else:
-                model = "fal-ai/veo3.1/image-to-video" if has_image else "fal-ai/veo3.1"
-        elif "grok" in model_lower:
-            model = "xai/grok-imagine-video/image-to-video" if has_image else "xai/grok-imagine-video/text-to-video"
-        # 注意：即梦主要是图片模型，视频模型较少，这里先不处理
-    
-    # 更新 model_lower 以反映映射后的模型 ID
+    model = resolve_video_model_id(model, has_image)
     model_lower = model.lower()
     first_url = (str(fp[0]) if fp else "") or image_url or (str(mf[0]) if mf else "")
     if not first_url and image_url:
@@ -1421,8 +1473,8 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         _merge_common_video_ui_fields(out, payload)
         return out
 
-    # wan/v2.6/*：duration 为字符串，i2v 用 image_url，t2v 用 aspect_ratio
-    if "wan/v2.6" in model or "wan/" in model:
+    # wan（v2.6 / v2.7）：duration 为字符串，i2v 用 image_url，t2v 用 aspect_ratio
+    if model.startswith("wan/"):
         out = {"model": model, "prompt": prompt, "duration": str(duration_sec)}
         if "image-to-video" in model and first_url:
             out["image_url"] = first_url
@@ -1434,11 +1486,15 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         _merge_common_video_ui_fields(out, payload)
         return out
 
-    # fal-ai/minimax/hailuo*：prompt, image_url（i2v）
+    # fal-ai/minimax/hailuo*：Pro 无 duration（固定196积分），Standard 有 duration（字符串）
     if "hailuo" in model or "minimax" in model:
         out = {"model": model, "prompt": prompt}
         if first_url:
             out["image_url"] = first_url
+        if "standard" in model_lower:
+            out["duration"] = str(duration_sec)
+        if payload.get("prompt_optimizer") is not None:
+            out["prompt_optimizer"] = bool(payload["prompt_optimizer"])
         _merge_common_video_ui_fields(out, payload)
         return out
 
@@ -1525,7 +1581,7 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         _merge_common_video_ui_fields(out, payload)
         return out
 
-    # Kling 系列（kling-video, kling-o3）：i2v 用 image_url，支持 duration 和 resolution
+    # Kling 系列：duration 为字符串，音频参数为 generate_audio（非 audio）
     if "kling" in model.lower():
         out = {"model": model, "prompt": prompt}
         if first_url:
@@ -1533,13 +1589,11 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         _has_ar = _payload_get_aspect_ratio(payload) is not None
         if not first_url or _has_ar:
             out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
-        out["duration"] = duration_sec
-        _kr = _sanitize_video_resolution_value(payload.get("resolution"))
-        if _kr is not None:
-            out["resolution"] = _kr
-        for k in ["audio", "seed", "negative_prompt"]:
-            if k in payload:
-                out[k] = payload[k]
+        out["duration"] = str(duration_sec)
+        if payload.get("generate_audio") is not None:
+            out["generate_audio"] = bool(payload["generate_audio"])
+        elif payload.get("audio") is not None:
+            out["generate_audio"] = bool(payload["audio"])
         _merge_common_video_ui_fields(out, payload)
         return out
 
@@ -1573,7 +1627,9 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         _ver = _sanitize_video_resolution_value(payload.get("resolution"))
         if _ver is not None:
             out["resolution"] = _ver
-        for k in ["audio", "seed", "negative_prompt"]:
+        if payload.get("generate_audio") is not None:
+            out["generate_audio"] = bool(payload["generate_audio"])
+        for k in ["seed", "negative_prompt"]:
             if k in payload:
                 out[k] = payload[k]
         _merge_common_video_ui_fields(out, payload)
@@ -1597,21 +1653,13 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         _merge_common_video_ui_fields(out, payload)
         return out
 
-    # 即梦系列（jimeng）：i2v 用 image_url，支持 duration
+    # 即梦视频：只支持 prompt + image_url + end_image_url（无 duration/aspect_ratio）
     if "jimeng" in model.lower() or "即梦" in model:
         out = {"model": model, "prompt": prompt}
         if first_url:
             out["image_url"] = first_url
-        _has_ar = _payload_get_aspect_ratio(payload) is not None
-        if not first_url or _has_ar:
-            out["aspect_ratio"] = aspect_ratio if ratio_ok else "16:9"
-        out["duration"] = duration_sec
-        _jer = _sanitize_video_resolution_value(payload.get("resolution"))
-        if _jer is not None:
-            out["resolution"] = _jer
-        for k in ["audio", "seed", "negative_prompt"]:
-            if k in payload:
-                out[k] = payload[k]
+        if payload.get("end_image_url"):
+            out["end_image_url"] = str(payload["end_image_url"])
         _merge_common_video_ui_fields(out, payload)
         return out
 
@@ -2086,12 +2134,19 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             # 先规范化 payload（与上游一致），再按速推官方 docs 定价预扣积分
             original_model = payload.get("model") if isinstance(payload, dict) else None
             if capability_id == "image.generate":
-                payload = _normalize_image_generate_payload(payload)
+                try:
+                    payload = _normalize_image_generate_payload(payload)
+                except ValueError as e:
+                    return [{"type": "text", "text": f"image.generate 参数错误: {e}"}], True
             elif capability_id == "video.generate":
                 try:
                     payload = _normalize_video_generate_payload(payload)
                 except ValueError as e:
                     return [{"type": "text", "text": f"video.generate 参数错误: {e}"}], True
+            elif capability_id == "image.understand":
+                payload = _normalize_understand_payload(payload, media_key="image_urls", default_model="openrouter/router/vision")
+            elif capability_id == "video.understand":
+                payload = _normalize_understand_payload(payload, media_key="video_urls", default_model="openrouter/router/video")
 
             if capability_id in ("image.generate", "video.generate"):
                 _mid = (payload.get("model") or payload.get("model_id") or "").strip()
@@ -2660,6 +2715,120 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             data = r.json() if r.content else {}
             text = json.dumps(data, ensure_ascii=False, indent=2)
             return [{"type": "text", "text": text}], r.status_code >= 400
+
+        # ── Meta Social（Instagram / Facebook）工具 ──
+
+        if name == "list_meta_social_accounts":
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.get(f"{BASE_URL}/api/meta-social/accounts", headers=_backend_headers(token, request))
+            data = r.json() if r.content else []
+            text = json.dumps(data, ensure_ascii=False, indent=2)
+            return [{"type": "text", "text": text}], r.status_code >= 400
+
+        if name == "publish_meta_social":
+            body = {
+                "account_id": args.get("account_id"),
+                "platform": args.get("platform", "instagram"),
+                "content_type": args.get("content_type", "photo"),
+            }
+            for k in ("asset_id", "image_url", "video_url", "caption", "message", "link", "title", "tags"):
+                v = args.get(k)
+                if v is not None:
+                    body[k] = v
+            logger.info("[MCP] publish_meta_social body=%s", {k: v for k, v in body.items() if k != "caption"})
+            async with httpx.AsyncClient(timeout=600.0) as client:
+                r = await client.post(
+                    f"{BASE_URL}/api/meta-social/publish",
+                    headers=_backend_headers(token, request),
+                    json=body,
+                )
+            data = r.json() if r.content else {}
+            text = json.dumps(data, ensure_ascii=False, indent=2)
+            return [{"type": "text", "text": text}], r.status_code >= 400
+
+        if name == "get_meta_social_data":
+            params: Dict[str, Any] = {}
+            if args.get("account_id"):
+                params["account_id"] = args["account_id"]
+            if args.get("platform"):
+                params["platform"] = args["platform"]
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.get(
+                    f"{BASE_URL}/api/meta-social/data",
+                    headers=_backend_headers(token, request),
+                    params=params,
+                )
+            data = r.json() if r.content else {}
+            text = json.dumps(data, ensure_ascii=False, indent=2)
+            return [{"type": "text", "text": text}], r.status_code >= 400
+
+        if name == "sync_meta_social_data":
+            params_sync: Dict[str, Any] = {}
+            if args.get("account_id"):
+                params_sync["account_id"] = args["account_id"]
+            logger.info("[MCP] sync_meta_social_data params=%s", params_sync)
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                r = await client.post(
+                    f"{BASE_URL}/api/meta-social/sync",
+                    headers=_backend_headers(token, request),
+                    params=params_sync,
+                )
+            data = r.json() if r.content else {}
+            text = json.dumps(data, ensure_ascii=False, indent=2)
+            return [{"type": "text", "text": text}], r.status_code >= 400
+
+        if name == "get_social_report":
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                r = await client.get(
+                    f"{BASE_URL}/api/meta-social/data",
+                    headers=_backend_headers(token, request),
+                )
+            if r.status_code >= 400:
+                data = r.json() if r.content else {}
+                text = json.dumps(data, ensure_ascii=False, indent=2)
+                return [{"type": "text", "text": text}], True
+            all_data = r.json() if r.content else {}
+            entries = all_data.get("data", [])
+            if not entries:
+                return [{"type": "text", "text": json.dumps({"hint": "暂无已连接的 IG/FB 账号数据。请先连接账号并调用 sync_meta_social_data 同步数据。"}, ensure_ascii=False)}], False
+
+            report: Dict[str, Any] = {"platforms": {}, "summary": {}}
+            total_posts = 0
+            total_likes = 0
+            total_comments = 0
+            for entry in entries:
+                acct = entry.get("account", {})
+                plat = acct.get("platform", "unknown")
+                label = acct.get("label") or acct.get("username") or acct.get("page_name") or ""
+                posts = entry.get("posts", [])
+                metrics = entry.get("account_metrics", {})
+
+                plat_likes = sum(p.get("like_count", 0) or p.get("likes", 0) for p in posts)
+                plat_comments = sum(p.get("comments_count", 0) or p.get("comments", 0) for p in posts)
+
+                key = f"{plat}_{acct.get('id', '')}"
+                report["platforms"][key] = {
+                    "platform": plat,
+                    "label": label,
+                    "post_count": len(posts),
+                    "total_likes": plat_likes,
+                    "total_comments": plat_comments,
+                    "account_metrics": metrics,
+                    "top_posts": sorted(posts, key=lambda p: (p.get("like_count", 0) or p.get("likes", 0)), reverse=True)[:3],
+                    "fetched_at": entry.get("fetched_at"),
+                }
+                total_posts += len(posts)
+                total_likes += plat_likes
+                total_comments += plat_comments
+
+            report["summary"] = {
+                "total_platforms": len(report["platforms"]),
+                "total_posts": total_posts,
+                "total_likes": total_likes,
+                "total_comments": total_comments,
+            }
+            text = json.dumps(report, ensure_ascii=False, indent=2)
+            return [{"type": "text", "text": text}], False
 
         if name == "list_publish_accounts":
             async with httpx.AsyncClient(timeout=30.0) as client:

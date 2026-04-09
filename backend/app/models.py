@@ -333,6 +333,84 @@ class CreditLedger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+# ── Meta Social（Instagram / Facebook）发布 + 数据同步 ────────────────────────
+
+
+class MetaSocialAccount(Base):
+    """Meta 社交账号：一条 = 一个 Facebook 主页（及其关联的 Instagram Business 账号）。"""
+
+    __tablename__ = "meta_social_accounts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "facebook_page_id", name="uq_meta_social_user_page"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    label: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+
+    # ── Facebook 主页 ──
+    facebook_page_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    facebook_page_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    page_access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # ── Instagram Business（关联到该主页）──
+    instagram_business_account_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    instagram_username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    # ── 代理（防风控，每账号独立）──
+    proxy_server: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    proxy_username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    proxy_password: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
+    # ── 元数据 ──
+    scopes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    meta_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class SocialPublishSchedule(Base):
+    """IG / FB 定时发布队列：每条绑定一个 MetaSocialAccount + 平台，从 asset_ids_json 先进先出。"""
+
+    __tablename__ = "social_publish_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    meta_account_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)  # instagram / facebook
+    content_type: Mapped[str] = mapped_column(String(32), default="photo", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    interval_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    asset_ids_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    caption: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tags: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    privacy_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_run_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_post_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SocialContentSnapshot(Base):
+    """IG / FB 数据快照：每次同步写入一行，供 LLM 查询工具读取。"""
+
+    __tablename__ = "social_content_snapshots"
+    __table_args__ = (Index("ix_social_snap_user_account", "user_id", "meta_account_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    meta_account_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)  # instagram / facebook
+    items: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    account_insights: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    sync_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    meta_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
 class SutuiReconciliationRun(Base):
     """定时对账：每把速推 server token 的远端余额变动 vs 本地带 _recon 的积分流水（运营用，不对用户展示）。
 

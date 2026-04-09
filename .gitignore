@@ -35,6 +35,9 @@ assets/
 installed_packages.json
 mcp/capability_catalog.local.json
 
+# 部署回滚
+.deploy_rollback_commit
+
 # 系统/编辑器
 .DS_Store
 Thumbs.db
