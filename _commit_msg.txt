@@ -1,0 +1,5 @@
+fix: IG/FB carousel in schedule runner, MCP carousel_items forwarding, tags in schedule
+
+- meta_social_schedule_runner: support carousel (multi-asset from queue), apply tags to caption
+- meta_social_publish: allow carousel in schedule content_type
+- mcp/http_server: forward carousel_items in publish_meta_social tool

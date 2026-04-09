@@ -654,7 +654,7 @@ async def meta_social_data(
 class SocialSchedulePut(BaseModel):
     meta_account_id: int
     platform: Literal["instagram", "facebook"] = "instagram"
-    content_type: Literal["photo", "video", "reel", "story", "link"] = "photo"
+    content_type: Literal["photo", "video", "reel", "story", "link", "carousel"] = "photo"
     enabled: bool = False
     interval_minutes: int = Field(60, ge=1, le=10080)
     asset_ids: List[str] = Field(default_factory=list)

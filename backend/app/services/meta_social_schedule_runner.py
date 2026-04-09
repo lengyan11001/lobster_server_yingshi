@@ -15,6 +15,7 @@ from ..services.meta_graph_api import (
     fb_publish_link,
     fb_publish_photo,
     fb_publish_video,
+    ig_publish_carousel,
     ig_publish_photo,
     ig_publish_reel,
     ig_publish_story,
@@ -73,6 +74,22 @@ async def _run_one(db: Session, sch: SocialPublishSchedule, now: datetime) -> No
     caption = sch.caption or ""
     ct = sch.content_type or "photo"
 
+    if sch.tags:
+        tag_str = " ".join(f"#{t.strip().lstrip('#')}" for t in sch.tags.split(",") if t.strip())
+        if tag_str:
+            caption = f"{caption}\n{tag_str}" if caption else tag_str
+
+    is_carousel = ct == "carousel" and sch.platform == "instagram"
+    carousel_assets = []
+    if is_carousel:
+        carousel_ids = [asset_id] + rest[:9]
+        rest = rest[len(carousel_ids) - 1:]
+        for cid in carousel_ids:
+            ca = db.query(Asset).filter(Asset.asset_id == cid).first()
+            if ca and (ca.source_url or "").strip():
+                is_vid = ca.media_type in ("video", "video/mp4")
+                carousel_assets.append({"video_url" if is_vid else "image_url": (ca.source_url or "").strip()})
+
     task = PublishTask(
         user_id=sch.user_id,
         asset_id=asset_id,
@@ -94,7 +111,11 @@ async def _run_one(db: Session, sch: SocialPublishSchedule, now: datetime) -> No
             if not ig_id:
                 raise RuntimeError("该主页未关联 Instagram Business 账号")
 
-            if ct == "photo" and not is_video:
+            if ct == "carousel":
+                if len(carousel_assets) < 2:
+                    raise RuntimeError("轮播至少需要 2 张素材")
+                post_id = await ig_publish_carousel(ig_id, token, carousel_assets, caption, proxy)
+            elif ct == "photo" and not is_video:
                 post_id = await ig_publish_photo(ig_id, token, src_url, caption, proxy)
             elif ct == "video" or (ct == "photo" and is_video):
                 post_id = await ig_publish_video(ig_id, token, src_url, caption, proxy)

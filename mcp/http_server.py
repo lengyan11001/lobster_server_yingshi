@@ -425,6 +425,11 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admi
                     "tags": {"type": "array", "items": {"type": "string"}, "description": "话题标签"},
                     "link": {"type": "string", "description": "链接（仅 Facebook link 类型）"},
                     "title": {"type": "string", "description": "标题（仅 Facebook 视频）"},
+                    "carousel_items": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": '轮播子项（仅 IG carousel）：[{"image_url":"..."} 或 {"video_url":"..."}]',
+                    },
                 },
                 "required": ["account_id", "platform", "content_type"],
             },
@@ -2731,7 +2736,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 "platform": args.get("platform", "instagram"),
                 "content_type": args.get("content_type", "photo"),
             }
-            for k in ("asset_id", "image_url", "video_url", "caption", "message", "link", "title", "tags"):
+            for k in ("asset_id", "image_url", "video_url", "caption", "message", "link", "title", "tags", "carousel_items"):
                 v = args.get(k)
                 if v is not None:
                     body[k] = v
