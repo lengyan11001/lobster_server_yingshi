@@ -358,6 +358,10 @@ class MetaSocialAccount(Base):
     instagram_business_account_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     instagram_username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
+    # ── Facebook App 凭据（per-user，OAuth 授权时用户自行填写）──
+    meta_app_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    meta_app_secret: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # ── 代理（防风控，每账号独立）──
     proxy_server: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     proxy_username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)

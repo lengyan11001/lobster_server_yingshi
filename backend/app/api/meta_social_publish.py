@@ -1,7 +1,8 @@
 """Meta Social：Instagram / Facebook 自动发布 + 数据同步。
 
 OAuth 流程、账号 CRUD、发布路由、数据同步路由。
-回调地址等固定参数由系统自动拼接，用户只需在 .env 配 META_APP_ID / META_APP_SECRET。
+支持 per-user Facebook App 凭据：用户通过前端输入自己的 App ID / Secret，服务器中转 OAuth。
+也兼容全局 .env 配置的 META_APP_ID / META_APP_SECRET。
 """
 from __future__ import annotations
 
@@ -64,12 +65,24 @@ def _oauth_redirect_uri() -> str:
     return f"{_public_base()}/api/meta-social/oauth/callback"
 
 
-def _require_meta_config() -> None:
-    if not settings.meta_app_id or not settings.meta_app_secret:
-        raise HTTPException(
-            status_code=501,
-            detail="未配置 META_APP_ID / META_APP_SECRET，请在 .env 中填写 Facebook App 凭据。",
-        )
+def _resolve_app_credentials(
+    app_id: Optional[str] = None,
+    app_secret: Optional[str] = None,
+    acct: Optional[MetaSocialAccount] = None,
+) -> tuple:
+    """Resolve Facebook App credentials: explicit params > account record > global settings."""
+    aid = (app_id or "").strip()
+    asec = (app_secret or "").strip()
+    if aid and asec:
+        return aid, asec
+    if acct and acct.meta_app_id and acct.meta_app_secret:
+        return acct.meta_app_id, acct.meta_app_secret
+    if settings.meta_app_id and settings.meta_app_secret:
+        return settings.meta_app_id, settings.meta_app_secret
+    raise HTTPException(
+        status_code=400,
+        detail="请提供 Facebook App ID 和 App Secret（在页面中填写，或联系管理员在服务器 .env 配置）。",
+    )
 
 
 def _prune_states() -> None:
@@ -116,9 +129,12 @@ def _resolve_user_from_query_token(token: str, db: Session):
 async def meta_oauth_start(
     request: Request,
     token: Optional[str] = Query(None),
+    app_id: Optional[str] = Query(None, alias="app_id"),
+    app_secret: Optional[str] = Query(None, alias="app_secret"),
     db: Session = Depends(get_db),
 ):
-    """Browser-redirect friendly: accepts ?token=JWT **or** Authorization header."""
+    """Browser-redirect friendly: accepts ?token=JWT **or** Authorization header.
+    Accepts per-user ?app_id=&app_secret= or falls back to global .env."""
     if token:
         current_user = _resolve_user_from_query_token(token, db)
     else:
@@ -127,24 +143,26 @@ async def meta_oauth_start(
         raw = await _scheme(request)
         current_user = await get_current_user(raw, db)
 
-    _require_meta_config()
+    resolved_id, resolved_secret = _resolve_app_credentials(app_id, app_secret)
     _prune_states()
 
     state = secrets.token_urlsafe(32)
     _oauth_states[state] = {
         "user_id": current_user.id,
+        "app_id": resolved_id,
+        "app_secret": resolved_secret,
         "expires": time.time() + _OAUTH_STATE_TTL,
     }
 
     fb_url = (
         f"https://www.facebook.com/v21.0/dialog/oauth"
-        f"?client_id={settings.meta_app_id}"
+        f"?client_id={resolved_id}"
         f"&redirect_uri={_oauth_redirect_uri()}"
         f"&scope={META_OAUTH_SCOPES}"
         f"&state={state}"
         f"&response_type=code"
     )
-    return {"login_url": fb_url}
+    return {"login_url": fb_url, "redirect_uri": _oauth_redirect_uri()}
 
 
 @router.get("/api/meta-social/oauth/callback", response_class=HTMLResponse)
@@ -165,12 +183,14 @@ async def meta_oauth_callback(
     if not st:
         return HTMLResponse("<h2>授权失败</h2><p>state 无效或已过期，请重新发起授权。</p>", status_code=400)
     user_id = st["user_id"]
-
-    _require_meta_config()
+    cb_app_id = st.get("app_id") or settings.meta_app_id
+    cb_app_secret = st.get("app_secret") or settings.meta_app_secret
+    if not cb_app_id or not cb_app_secret:
+        return HTMLResponse("<h2>授权失败</h2><p>缺少 Facebook App 凭据。</p>", status_code=400)
 
     try:
         token_data = await exchange_code_for_token(
-            settings.meta_app_id, settings.meta_app_secret,
+            cb_app_id, cb_app_secret,
             _oauth_redirect_uri(), code,
         )
         short_token = token_data.get("access_token", "")
@@ -178,7 +198,7 @@ async def meta_oauth_callback(
             return HTMLResponse(f"<h2>授权失败</h2><p>未获取到 access_token: {token_data}</p>", status_code=500)
 
         ll_data = await exchange_long_lived_token(
-            settings.meta_app_id, settings.meta_app_secret, short_token,
+            cb_app_id, cb_app_secret, short_token,
         )
         long_token = ll_data.get("access_token", short_token)
         expires_in = ll_data.get("expires_in", 5184000)
@@ -218,6 +238,8 @@ async def meta_oauth_callback(
             existing.token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
             existing.scopes = META_OAUTH_SCOPES
             existing.status = "active"
+            existing.meta_app_id = cb_app_id
+            existing.meta_app_secret = cb_app_secret
             existing.updated_at = datetime.utcnow()
         else:
             acct = MetaSocialAccount(
@@ -229,6 +251,8 @@ async def meta_oauth_callback(
                 token_expires_at=datetime.utcnow() + timedelta(seconds=expires_in),
                 instagram_business_account_id=ig_id or None,
                 instagram_username=ig_username or None,
+                meta_app_id=cb_app_id,
+                meta_app_secret=cb_app_secret,
                 scopes=META_OAUTH_SCOPES,
                 status="active",
             )
@@ -249,6 +273,14 @@ async def meta_oauth_callback(
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def _mask_secret(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    if len(s) <= 8:
+        return "*" * len(s)
+    return s[:4] + "..." + s[-4:]
+
+
 class MetaAccountOut(BaseModel):
     id: int
     label: str = ""
@@ -256,10 +288,14 @@ class MetaAccountOut(BaseModel):
     facebook_page_name: str = ""
     instagram_business_account_id: str = ""
     instagram_username: str = ""
+    meta_app_id: str = ""
+    meta_app_secret_masked: str = ""
+    has_app_credentials: bool = False
     proxy_server_masked: str = ""
     status: str = "active"
     token_expires_at: Optional[str] = None
     created_at: str = ""
+    oauth_redirect_uri: str = ""
 
     @classmethod
     def from_orm_row(cls, row: MetaSocialAccount) -> "MetaAccountOut":
@@ -270,10 +306,14 @@ class MetaAccountOut(BaseModel):
             facebook_page_name=row.facebook_page_name or "",
             instagram_business_account_id=row.instagram_business_account_id or "",
             instagram_username=row.instagram_username or "",
+            meta_app_id=row.meta_app_id or "",
+            meta_app_secret_masked=_mask_secret(row.meta_app_secret),
+            has_app_credentials=bool(row.meta_app_id and row.meta_app_secret),
             proxy_server_masked=_mask_proxy(row.proxy_server),
             status=row.status or "active",
             token_expires_at=row.token_expires_at.isoformat() if row.token_expires_at else None,
             created_at=row.created_at.isoformat() if row.created_at else "",
+            oauth_redirect_uri=_oauth_redirect_uri(),
         )
 
 
@@ -342,6 +382,58 @@ async def delete_meta_social_account(
     db.delete(row)
     db.commit()
     return {"ok": True}
+
+
+@router.get("/api/meta-social/accounts/{account_id}/reauth")
+async def meta_social_account_reauth(
+    account_id: int,
+    request: Request,
+    token: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Re-authorize an existing account using its stored app credentials."""
+    if token:
+        current_user = _resolve_user_from_query_token(token, db)
+    else:
+        from fastapi.security import OAuth2PasswordBearer as _OPB
+        _scheme = _OPB(tokenUrl="/auth/login")
+        raw = await _scheme(request)
+        current_user = await get_current_user(raw, db)
+
+    row = (
+        db.query(MetaSocialAccount)
+        .filter(MetaSocialAccount.id == account_id, MetaSocialAccount.user_id == current_user.id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="账号不存在")
+
+    resolved_id, resolved_secret = _resolve_app_credentials(acct=row)
+    _prune_states()
+
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = {
+        "user_id": current_user.id,
+        "app_id": resolved_id,
+        "app_secret": resolved_secret,
+        "expires": time.time() + _OAUTH_STATE_TTL,
+    }
+
+    fb_url = (
+        f"https://www.facebook.com/v21.0/dialog/oauth"
+        f"?client_id={resolved_id}"
+        f"&redirect_uri={_oauth_redirect_uri()}"
+        f"&scope={META_OAUTH_SCOPES}"
+        f"&state={state}"
+        f"&response_type=code"
+    )
+    return {"login_url": fb_url}
+
+
+@router.get("/api/meta-social/oauth/redirect-uri")
+async def meta_social_redirect_uri():
+    """Return the OAuth callback URL so frontend can display it to users."""
+    return {"redirect_uri": _oauth_redirect_uri()}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

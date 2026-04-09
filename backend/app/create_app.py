@@ -75,6 +75,24 @@ def _migrate_capability_configs_extra_config():
         logger.warning("Migration capability_configs.extra_config skipped: %s", e)
 
 
+def _migrate_meta_social_app_credentials():
+    """Add per-user meta_app_id / meta_app_secret to meta_social_accounts if missing."""
+    from sqlalchemy import text, inspect as sa_inspect
+
+    try:
+        insp = sa_inspect(engine)
+        if not insp.has_table("meta_social_accounts"):
+            return
+        cols = [c["name"] for c in insp.get_columns("meta_social_accounts")]
+        with engine.begin() as conn:
+            if "meta_app_id" not in cols:
+                conn.execute(text("ALTER TABLE meta_social_accounts ADD COLUMN meta_app_id VARCHAR(128)"))
+            if "meta_app_secret" not in cols:
+                conn.execute(text("ALTER TABLE meta_social_accounts ADD COLUMN meta_app_secret TEXT"))
+    except Exception as e:
+        logger.warning("Migration meta_social_accounts app credentials skipped: %s", e)
+
+
 def _seed_capability_catalog():
     """Import capability catalog from mcp/capability_catalog.json on first run."""
     catalog_path = Path(__file__).resolve().parent.parent.parent / "mcp" / "capability_catalog.json"
@@ -661,9 +679,8 @@ async def _app_lifespan(app: FastAPI):
         bg_tasks.append(asyncio.create_task(sutui_reconcile_loop_forever(3600.0)))
     else:
         logger.info("[启动] 速推对账任务已关闭（海外实例或 LOBSTER_SUTUI_RECONCILE_ENABLED=0）")
-    if settings.meta_app_id and settings.meta_app_secret:
-        bg_tasks.append(asyncio.create_task(meta_social_schedule_background_loop()))
-        logger.info("[启动] Meta Social 定时发布后台已启动")
+    bg_tasks.append(asyncio.create_task(meta_social_schedule_background_loop()))
+    logger.info("[启动] Meta Social 定时发布后台已启动")
     yield
     for t in bg_tasks:
         t.cancel()
@@ -689,6 +706,7 @@ def create_app() -> FastAPI:
     _backfill_installation_signup_bonus_claims()
     _migrate_sutui_recon_balance_remote_prev()
     _migrate_capability_configs_extra_config()
+    _migrate_meta_social_app_credentials()
     _ensure_default_user()
     _seed_capability_catalog()
     _upsert_missing_capabilities_from_catalog()
