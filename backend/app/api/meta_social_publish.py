@@ -47,7 +47,7 @@ from ..services.meta_graph_api import (
     ig_publish_video,
     get_user_pages,
 )
-from .auth import get_current_user
+from .auth import get_current_user, ALGORITHM
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -97,10 +97,36 @@ def _mask_proxy(url: Optional[str]) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def _resolve_user_from_query_token(token: str, db: Session):
+    """Allow OAuth start to authenticate via ?token= query param (browser redirect)."""
+    from jose import JWTError, jwt as _jwt
+    try:
+        payload = _jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
+        uid = int(payload.get("sub"))
+    except (JWTError, ValueError, TypeError):
+        raise HTTPException(status_code=401, detail="无法验证凭证（token 无效或已过期）")
+    from ..models import User
+    user = db.query(User).filter(User.id == uid).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="用户不存在")
+    return user
+
+
 @router.get("/api/meta-social/oauth/start")
 async def meta_oauth_start(
-    current_user=Depends(get_current_user),
+    request: Request,
+    token: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
 ):
+    """Browser-redirect friendly: accepts ?token=JWT **or** Authorization header."""
+    if token:
+        current_user = _resolve_user_from_query_token(token, db)
+    else:
+        from fastapi.security import OAuth2PasswordBearer as _OPB
+        _scheme = _OPB(tokenUrl="/auth/login")
+        raw = await _scheme(request)
+        current_user = await get_current_user(raw, db)
+
     _require_meta_config()
     _prune_states()
 
