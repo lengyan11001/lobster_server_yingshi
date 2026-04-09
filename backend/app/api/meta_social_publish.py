@@ -131,10 +131,14 @@ async def meta_oauth_start(
     token: Optional[str] = Query(None),
     app_id: Optional[str] = Query(None, alias="app_id"),
     app_secret: Optional[str] = Query(None, alias="app_secret"),
+    proxy_server: Optional[str] = Query(None),
+    proxy_username: Optional[str] = Query(None),
+    proxy_password: Optional[str] = Query(None),
     db: Session = Depends(get_db),
 ):
     """Browser-redirect friendly: accepts ?token=JWT **or** Authorization header.
-    Accepts per-user ?app_id=&app_secret= or falls back to global .env."""
+    Accepts per-user ?app_id=&app_secret= or falls back to global .env.
+    Optional ?proxy_server=&proxy_username=&proxy_password= for static IP proxy."""
     if token:
         current_user = _resolve_user_from_query_token(token, db)
     else:
@@ -146,11 +150,18 @@ async def meta_oauth_start(
     resolved_id, resolved_secret = _resolve_app_credentials(app_id, app_secret)
     _prune_states()
 
+    ps = (proxy_server or "").strip() or None
+    pu = (proxy_username or "").strip() or None
+    pp = (proxy_password or "").strip() or None
+
     state = secrets.token_urlsafe(32)
     _oauth_states[state] = {
         "user_id": current_user.id,
         "app_id": resolved_id,
         "app_secret": resolved_secret,
+        "proxy_server": ps,
+        "proxy_username": pu,
+        "proxy_password": pp,
         "expires": time.time() + _OAUTH_STATE_TTL,
     }
 
@@ -188,10 +199,16 @@ async def meta_oauth_callback(
     if not cb_app_id or not cb_app_secret:
         return HTMLResponse("<h2>授权失败</h2><p>缺少 Facebook App 凭据。</p>", status_code=400)
 
+    cb_proxy_server = st.get("proxy_server")
+    cb_proxy_username = st.get("proxy_username")
+    cb_proxy_password = st.get("proxy_password")
+    cb_proxy_url = build_httpx_proxy_url(cb_proxy_server, cb_proxy_username, cb_proxy_password)
+
     try:
         token_data = await exchange_code_for_token(
             cb_app_id, cb_app_secret,
             _oauth_redirect_uri(), code,
+            proxy_url=cb_proxy_url,
         )
         short_token = token_data.get("access_token", "")
         if not short_token:
@@ -199,11 +216,12 @@ async def meta_oauth_callback(
 
         ll_data = await exchange_long_lived_token(
             cb_app_id, cb_app_secret, short_token,
+            proxy_url=cb_proxy_url,
         )
         long_token = ll_data.get("access_token", short_token)
         expires_in = ll_data.get("expires_in", 5184000)
 
-        pages = await get_user_pages(long_token)
+        pages = await get_user_pages(long_token, proxy_url=cb_proxy_url)
         if not pages:
             return HTMLResponse("<h2>授权失败</h2><p>未找到授权的 Facebook 主页。请确认您在 Facebook 中管理至少一个主页。</p>", status_code=400)
 
@@ -240,6 +258,10 @@ async def meta_oauth_callback(
             existing.status = "active"
             existing.meta_app_id = cb_app_id
             existing.meta_app_secret = cb_app_secret
+            if cb_proxy_server:
+                existing.proxy_server = cb_proxy_server
+                existing.proxy_username = cb_proxy_username
+                existing.proxy_password = cb_proxy_password
             existing.updated_at = datetime.utcnow()
         else:
             acct = MetaSocialAccount(
@@ -253,6 +275,9 @@ async def meta_oauth_callback(
                 instagram_username=ig_username or None,
                 meta_app_id=cb_app_id,
                 meta_app_secret=cb_app_secret,
+                proxy_server=cb_proxy_server,
+                proxy_username=cb_proxy_username,
+                proxy_password=cb_proxy_password,
                 scopes=META_OAUTH_SCOPES,
                 status="active",
             )
@@ -416,6 +441,9 @@ async def meta_social_account_reauth(
         "user_id": current_user.id,
         "app_id": resolved_id,
         "app_secret": resolved_secret,
+        "proxy_server": row.proxy_server or None,
+        "proxy_username": row.proxy_username or None,
+        "proxy_password": row.proxy_password or None,
         "expires": time.time() + _OAUTH_STATE_TTL,
     }
 
