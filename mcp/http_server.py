@@ -339,19 +339,19 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admi
         },
         {
             "name": "publish_content",
-            "description": "发布素材到平台(抖音/B站等)。asset_id来自save_asset或get_result的saved_assets。",
+            "description": "发布内容到平台(抖音/B站/头条等)。有素材时传asset_id；纯文字文章可只传title+description不传asset_id。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "asset_id": {"type": "string", "description": "素材ID"},
+                    "asset_id": {"type": "string", "description": "素材ID(可选，纯文字不需要)"},
                     "account_nickname": {"type": "string", "description": "账号昵称"},
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
+                    "title": {"type": "string", "description": "标题"},
+                    "description": {"type": "string", "description": "正文内容"},
                     "tags": {"type": "string", "description": "逗号分隔"},
                     "cover_asset_id": {"type": "string"},
-                    "options": {"type": "object", "description": "平台参数(visibility/schedule等)"},
+                    "options": {"type": "object", "description": "平台参数(content_type:article/micro等)"},
                 },
-                "required": ["asset_id", "account_nickname"],
+                "required": ["account_nickname"],
             },
         },
         {
@@ -2808,8 +2808,6 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
         if name == "publish_content":
             asset_id = str(args.get("asset_id") or "").strip()
             account_nickname = str(args.get("account_nickname") or "").strip()
-            if not asset_id:
-                return [{"type": "text", "text": "请提供 asset_id（通过 save_asset 获得）"}], True
             if not account_nickname:
                 return [{"type": "text", "text": "请提供 account_nickname（通过 list_publish_accounts 查看）"}], True
             logger.info("[MCP] publish_content 调用: asset_id=%s account_nickname=%s", asset_id, account_nickname)

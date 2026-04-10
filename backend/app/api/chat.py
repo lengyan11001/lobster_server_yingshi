@@ -1999,7 +1999,7 @@ async def chat_endpoint(
             "IG/FB: list_meta_social_accounts → publish_meta_social(account_id, platform, content_type, ...)\n"
             "IG/FB数据: sync_meta_social_data → get_meta_social_data\n\n"
             "【prompt规则】用用户原话去掉指令(发布到/用某模型等)后的内容作prompt，不改写不臆造。模型名填payload.model。\n"
-            "【发布规则】生成成功后立即发布(同一轮)，asset_id用get_result返回的saved_assets中的ID。「用生成的」指上轮结果，直接publish。\n"
+            "【发布规则】有素材(图/视频)时asset_id用saved_assets中的ID发布。纯文字文章(笔记/头条文章等)不需要先生成图片，直接publish_content即可(asset_id留空或用已有素材)。用户说「不需要配图」时严禁调image.generate。「用生成的」指上轮结果，直接publish。\n"
             "【查询vs生成】task.get_result只查状态不新建任务，回复中禁止说「重新提交」。失败如实告知，禁止自行重试。\n"
             "【素材指代】不确定用户指哪个素材时，先list_assets列出候选让用户确认，禁止猜测。\n"
             if has_tools
@@ -2151,7 +2151,7 @@ async def _chat_stream_events(
                 "理解图片/视频: image.understand / video.understand\n"
                 "发布: publish_content(asset_id, account_nickname, title, description, tags) — 全自动，禁止要求用户手动操作\n\n"
                 "【prompt规则】用用户原话去掉指令后的内容作prompt，不改写不臆造。模型名填payload.model。\n"
-                "【发布规则】生成成功后立即发布(同一轮)，asset_id用get_result返回的saved_assets中的ID。\n"
+                "【发布规则】有素材(图/视频)时asset_id用saved_assets中的ID发布。纯文字文章不需要先生成图片，直接publish_content即可。用户说「不需要配图」时严禁调image.generate。\n"
                 "【查询vs生成】task.get_result只查状态不新建任务，禁止说「重新提交」。失败如实告知。\n"
                 "【素材指代】不确定时先list_assets列出候选让用户确认，禁止猜测。\n"
                 if has_tools
