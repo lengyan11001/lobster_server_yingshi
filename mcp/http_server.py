@@ -254,214 +254,156 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admi
     tools = [
         {
             "name": "list_capabilities",
-            "description": "列出龙虾当前可用的全部能力",
+            "description": "列出可用能力",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "invoke_capability",
-            "description": "调用龙虾能力（图片生成、视频解析、语音合成等）",
+            "description": "调用能力(图片生成/视频/语音等)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "capability_id": {
-                        "type": "string",
-                        "enum": capability_list,
-                        "description": "能力 ID",
-                    },
-                    "payload": {
-                        "type": "object",
-                        "description": "能力调用参数",
-                    },
+                    "capability_id": {"type": "string", "enum": capability_list},
+                    "payload": {"type": "object"},
                 },
                 "required": ["capability_id", "payload"],
             },
         },
         {
             "name": "manage_skills",
-            "description": (
-                "管理龙虾技能包：\n"
-                "- list_store: 浏览本地技能商店\n"
-                "- list_installed: 查看已安装技能\n"
-                "- install: 安装商店中的技能包 (需 package_id)\n"
-                "- uninstall: 卸载技能包 (需 package_id)\n"
-                "- search_online: 搜索全球 MCP 在线技能库 (需 query，如 'image', 'database', 'search')\n"
-                "- add_mcp: 添加 MCP 服务连接 (需 name + url)"
-            ),
+            "description": "管理技能包(list_store/list_installed/install/uninstall/search_online/add_mcp)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["list_store", "list_installed", "install", "uninstall", "search_online", "add_mcp"],
-                        "description": "操作类型",
-                    },
-                    "package_id": {
-                        "type": "string",
-                        "description": "技能包 ID（install/uninstall 时必填）",
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "搜索关键词（search_online 时使用，如 image, video, database, github）",
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "MCP 连接名称（add_mcp 时必填）",
-                    },
-                    "url": {
-                        "type": "string",
-                        "description": "MCP 服务地址（add_mcp 时必填）",
-                    },
+                    "action": {"type": "string", "enum": ["list_store", "list_installed", "install", "uninstall", "search_online", "add_mcp"]},
+                    "package_id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "name": {"type": "string"},
+                    "url": {"type": "string"},
                 },
                 "required": ["action"],
             },
         },
         {
             "name": "save_asset",
-            "description": "保存素材到本地（从URL下载图片/视频并存储，返回asset_id供后续引用和发布）",
+            "description": "保存素材到本地,返回asset_id",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "素材URL（图片或视频链接）"},
-                    "media_type": {"type": "string", "enum": ["image", "video", "audio"], "description": "素材类型"},
-                    "tags": {"type": "string", "description": "标签，逗号分隔"},
-                    "prompt": {"type": "string", "description": "生成该素材时使用的提示词"},
+                    "url": {"type": "string"},
+                    "media_type": {"type": "string", "enum": ["image", "video", "audio"]},
+                    "tags": {"type": "string"},
+                    "prompt": {"type": "string"},
                 },
                 "required": ["url"],
             },
         },
         {
             "name": "list_assets",
-            "description": "列出或搜索本地保存的素材（图片、视频等）",
+            "description": "列出/搜索本地素材",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "media_type": {"type": "string", "enum": ["image", "video", "audio"], "description": "按类型筛选"},
-                    "query": {"type": "string", "description": "搜索关键词（匹配标签、提示词、文件名）"},
-                    "limit": {"type": "integer", "description": "返回数量，默认20"},
+                    "media_type": {"type": "string", "enum": ["image", "video", "audio"]},
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
                 },
             },
         },
         {
             "name": "list_publish_accounts",
-            "description": "列出已配置的发布账号（抖音、B站等平台）",
+            "description": "列出发布账号(抖音/B站等)",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "open_account_browser",
-            "description": "打开指定账号的浏览器窗口（会激活到最前面）。如果未登录会显示登录页。用于：用户要求打开某账号浏览器、发布前需要登录等场景。",
+            "description": "打开账号浏览器窗口",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "account_nickname": {"type": "string", "description": "账号昵称"},
+                    "account_nickname": {"type": "string"},
                 },
                 "required": ["account_nickname"],
             },
         },
         {
             "name": "check_account_login",
-            "description": "检查指定账号是否已在浏览器中登录（不会打开新窗口，仅检查已打开的浏览器）。用户说'登录完了'时调用此工具验证。",
+            "description": "检查账号是否已登录",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "account_nickname": {"type": "string", "description": "账号昵称"},
+                    "account_nickname": {"type": "string"},
                 },
                 "required": ["account_nickname"],
             },
         },
         {
             "name": "publish_content",
-            "description": "将素材发布到指定平台账号（如抖音、B站）。asset_id 可来自：save_asset 保存的素材，或 task.get_result 返回的 saved_assets[0].asset_id（速推生成的视频/图片）。发布流程全自动，由本工具完成，不要要求用户点加号或手动操作。",
+            "description": "发布素材到平台(抖音/B站等)。asset_id来自save_asset或get_result的saved_assets。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "asset_id": {"type": "string", "description": "素材ID：来自 save_asset 或 task.get_result 返回的 saved_assets[0].asset_id（发布生成结果时必须用后者）"},
-                    "account_nickname": {"type": "string", "description": "发布账号昵称"},
-                    "title": {"type": "string", "description": "发布标题"},
-                    "description": {"type": "string", "description": "发布描述/文案"},
-                    "tags": {"type": "string", "description": "话题标签，逗号分隔"},
-                    "cover_asset_id": {"type": "string", "description": "可选：封面素材ID（图片），部分平台支持单独设置封面"},
-                    "options": {
-                        "type": "object",
-                        "description": (
-                            "可选：平台发布参数（抖音 best-effort）。常用字段示例：\n"
-                            "- visibility: public|friends|private\n"
-                            "- schedule_publish: {enabled:true, datetime:\"YYYY-MM-DD HH:mm\"}\n"
-                            "- location: \"深圳市南山区\"\n"
-                            "- allow_comment / allow_duet / allow_stitch: true|false\n"
-                            "- goods: {enabled:true, keyword:\"商品关键词\"}\n"
-                        ),
-                    },
+                    "asset_id": {"type": "string", "description": "素材ID"},
+                    "account_nickname": {"type": "string", "description": "账号昵称"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "tags": {"type": "string", "description": "逗号分隔"},
+                    "cover_asset_id": {"type": "string"},
+                    "options": {"type": "object", "description": "平台参数(visibility/schedule等)"},
                 },
                 "required": ["asset_id", "account_nickname"],
             },
         },
-        # ── Meta Social（Instagram / Facebook）──
         {
             "name": "list_meta_social_accounts",
-            "description": "列出已连接的 Instagram / Facebook 账号。每条含 id、label、平台信息；发布或查询数据时需先获取 account_id。",
+            "description": "列出IG/FB已连接账号",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "publish_meta_social",
-            "description": (
-                "发布内容到 Instagram 或 Facebook 主页。"
-                "Instagram 支持 photo/video/carousel/reel/story；Facebook 支持 photo/video/link。"
-                "asset_id 填素材库 ID，系统自动解析公网 URL；也可直接传 image_url/video_url。"
-            ),
+            "description": "发布到IG(photo/video/carousel/reel/story)或FB(photo/video/link)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "account_id": {"type": "integer", "description": "Meta 账号 ID（来自 list_meta_social_accounts）"},
-                    "platform": {"type": "string", "enum": ["instagram", "facebook"], "description": "目标平台"},
-                    "content_type": {
-                        "type": "string",
-                        "enum": ["photo", "video", "carousel", "reel", "story", "link"],
-                        "description": "内容类型",
-                    },
-                    "asset_id": {"type": "string", "description": "素材库 asset_id（优先使用）"},
-                    "image_url": {"type": "string", "description": "图片直链（无 asset_id 时使用）"},
-                    "video_url": {"type": "string", "description": "视频直链（无 asset_id 时使用）"},
-                    "caption": {"type": "string", "description": "文案 / 描述"},
-                    "tags": {"type": "array", "items": {"type": "string"}, "description": "话题标签"},
-                    "link": {"type": "string", "description": "链接（仅 Facebook link 类型）"},
-                    "title": {"type": "string", "description": "标题（仅 Facebook 视频）"},
+                    "account_id": {"type": "integer"},
+                    "platform": {"type": "string", "enum": ["instagram", "facebook"]},
+                    "content_type": {"type": "string", "enum": ["photo", "video", "carousel", "reel", "story", "link"]},
+                    "asset_id": {"type": "string"},
+                    "image_url": {"type": "string"},
+                    "video_url": {"type": "string"},
+                    "caption": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "link": {"type": "string"},
+                    "title": {"type": "string"},
+                    "carousel_items": {"type": "array", "items": {"type": "object"}},
                 },
                 "required": ["account_id", "platform", "content_type"],
             },
         },
         {
             "name": "get_meta_social_data",
-            "description": (
-                "读取已同步的 Instagram / Facebook 数据：帖子列表（含 likes、comments、reach 等指标）+ 账号级 Insights。"
-                "用户问 IG/FB 表现、数据、互动率时使用；若需最新数据，先调 sync_meta_social_data 再调本工具。"
-            ),
+            "description": "读取IG/FB帖子+Insights数据，先sync再get",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "account_id": {"type": "integer", "description": "可选，指定账号；不填返回全部"},
-                    "platform": {"type": "string", "enum": ["instagram", "facebook"], "description": "可选，筛选平台"},
+                    "account_id": {"type": "integer"},
+                    "platform": {"type": "string", "enum": ["instagram", "facebook"]},
                 },
             },
         },
         {
             "name": "sync_meta_social_data",
-            "description": (
-                "从 Instagram / Facebook API 拉取最新帖子列表与 Insights 数据到本地（耗时数秒到十几秒）。"
-                "同步完成后用 get_meta_social_data 读取结果。"
-            ),
+            "description": "从IG/FB API拉取最新数据到本地",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "account_id": {"type": "integer", "description": "可选，指定账号；不填同步全部"},
+                    "account_id": {"type": "integer"},
                 },
             },
         },
         {
             "name": "get_social_report",
-            "description": (
-                "跨平台数据报告：聚合 Instagram + Facebook 所有已连接账号的数据摘要（帖子数、总 likes/comments/reach 等）。"
-                "用户问「所有平台表现」「数据总览」「跨平台对比」时使用。数据基于最近一次同步快照。"
-            ),
+            "description": "跨平台数据报告：IG+FB聚合摘要",
             "inputSchema": {"type": "object", "properties": {}},
         },
     ]
@@ -2282,12 +2224,12 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         import ipaddress
                         parsed = urlparse(url_value)
                         hostname = (parsed.hostname or "").lower()
-                        # 内部地址检测：localhost、127.0.0.1、内网 IP、42.194.209.150 等
+                        # 内部地址检测：localhost、127.0.0.1、内网 IP、api.51ins.com 等
                         if not hostname:
                             is_internal = True
                         elif hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
                             is_internal = True
-                        elif "42.194.209.150" in hostname:
+                        elif "api.51ins.com" in hostname:
                             is_internal = True
                         else:
                             # 尝试解析为 IP 地址，判断是否为内网 IP
@@ -2731,7 +2673,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 "platform": args.get("platform", "instagram"),
                 "content_type": args.get("content_type", "photo"),
             }
-            for k in ("asset_id", "image_url", "video_url", "caption", "message", "link", "title", "tags"):
+            for k in ("asset_id", "image_url", "video_url", "caption", "message", "link", "title", "tags", "carousel_items"):
                 v = args.get(k)
                 if v is not None:
                     body[k] = v

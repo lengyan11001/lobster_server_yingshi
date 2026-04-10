@@ -100,6 +100,131 @@ def _is_model_tripped(model: str) -> bool:
 
 _SUTUI_PROVIDER_PREFIXES = ("anthropic/", "openai/", "google/", "deepseek/", "meta/", "mistral/", "cohere/")
 
+# ---------------------------------------------------------------------------
+# Request body optimiser — reduce prompt tokens sent to upstream LLM
+# ---------------------------------------------------------------------------
+_SLIM_MSG_MAX_TURNS = 12          # keep system + last N user/assistant turns
+_SLIM_MSG_MAX_CHARS = 800         # per-message content truncation
+_SLIM_TOOL_DESC_MAX = 120         # max chars for tool-level description
+_SLIM_PROP_DESC_MAX = 40          # max chars for property-level description; 0 to strip all
+_BASE64_RE = __import__("re").compile(r"data:[^;]{0,60};base64,[A-Za-z0-9+/=]{200,}")
+
+
+def _slim_tools(tools: list) -> list:
+    """Shorten tool definitions: truncate descriptions, strip verbose property docs."""
+    if not isinstance(tools, list):
+        return tools
+    out = []
+    for t in tools:
+        if not isinstance(t, dict):
+            out.append(t)
+            continue
+        fn = t.get("function", t)
+        if not isinstance(fn, dict):
+            out.append(t)
+            continue
+        fn2 = dict(fn)
+        desc = fn2.get("description", "")
+        if isinstance(desc, str) and len(desc) > _SLIM_TOOL_DESC_MAX:
+            fn2["description"] = desc[:_SLIM_TOOL_DESC_MAX].rstrip() + "…"
+        params = fn2.get("parameters") or fn2.get("inputSchema")
+        if isinstance(params, dict):
+            fn2["parameters" if "parameters" in fn2 else "inputSchema"] = _slim_schema(params)
+        if "function" in t:
+            out.append({**t, "function": fn2})
+        else:
+            out.append(fn2)
+    return out
+
+
+def _slim_schema(schema: dict) -> dict:
+    """Recursively compact a JSON-Schema: shorten / strip property descriptions."""
+    if not isinstance(schema, dict):
+        return schema
+    s = dict(schema)
+    props = s.get("properties")
+    if isinstance(props, dict):
+        new_props = {}
+        for k, v in props.items():
+            if not isinstance(v, dict):
+                new_props[k] = v
+                continue
+            v2 = dict(v)
+            pd = v2.get("description", "")
+            if isinstance(pd, str):
+                if _SLIM_PROP_DESC_MAX <= 0:
+                    v2.pop("description", None)
+                elif len(pd) > _SLIM_PROP_DESC_MAX:
+                    v2["description"] = pd[:_SLIM_PROP_DESC_MAX].rstrip() + "…"
+            if "properties" in v2:
+                v2 = _slim_schema(v2)
+            new_props[k] = v2
+        s["properties"] = new_props
+    return s
+
+
+def _slim_messages(messages: list) -> list:
+    """Trim conversation history: keep system msg + last N turns, truncate long content, strip base64."""
+    if not isinstance(messages, list) or len(messages) <= 2:
+        return messages
+    sys_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"]
+    non_sys = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
+    if len(non_sys) > _SLIM_MSG_MAX_TURNS:
+        non_sys = non_sys[-_SLIM_MSG_MAX_TURNS:]
+    result = []
+    for m in sys_msgs:
+        result.append(_truncate_msg(m))
+    for m in non_sys:
+        result.append(_truncate_msg(m))
+    return result
+
+
+def _truncate_msg(m: dict) -> dict:
+    if not isinstance(m, dict):
+        return m
+    c = m.get("content")
+    if isinstance(c, str):
+        c = _BASE64_RE.sub("[image]", c)
+        if len(c) > _SLIM_MSG_MAX_CHARS:
+            c = c[:_SLIM_MSG_MAX_CHARS] + "…(truncated)"
+        if c != m.get("content"):
+            return {**m, "content": c}
+    elif isinstance(c, list):
+        new_parts = []
+        for part in c:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+                if isinstance(url, str) and url.startswith("data:"):
+                    new_parts.append({"type": "text", "text": "[image attached]"})
+                    continue
+            new_parts.append(part)
+        if new_parts != c:
+            return {**m, "content": new_parts}
+    return m
+
+
+def _optimize_request_body(body: dict) -> int:
+    """Optimise body in-place before forwarding. Returns estimated token savings."""
+    import copy
+    orig_len = len(json.dumps(body, ensure_ascii=False, default=str))
+
+    tools = body.get("tools")
+    if isinstance(tools, list) and tools:
+        body["tools"] = _slim_tools(tools)
+
+    msgs = body.get("messages")
+    if isinstance(msgs, list):
+        body["messages"] = _slim_messages(msgs)
+
+    new_len = len(json.dumps(body, ensure_ascii=False, default=str))
+    saved_chars = orig_len - new_len
+    if saved_chars > 500:
+        logger.info(
+            "[body-slim] payload %d→%d chars (saved %d, ~%d tokens)",
+            orig_len, new_len, saved_chars, saved_chars // 3,
+        )
+    return saved_chars
+
 
 def _strip_provider_prefix(mid: str) -> str:
     """速推 model id 不带 provider 前缀（如 claude-opus-4-6 而非 anthropic/claude-opus-4-6）。"""
@@ -674,6 +799,7 @@ async def sutui_chat_completions(
     )
 
     _remap_sutui_chat_model(body)
+    _optimize_request_body(body)
 
     bm = brand_mark_for_jwt_claim(getattr(current_user, "brand_mark", None))
     if bm not in ("bihuo", "yingshi"):
@@ -795,12 +921,41 @@ async def sutui_chat_completions(
 
             if _openai_nonstream_completion_usable(data, r.status_code):
                 if _openai_completion_missing_tool_calls(data, body):
-                    logger.info(
-                        "[chat_trace] trace_id=%s path=sutui_chat tool_calls_missing model=%s "
-                        "(accepted as valid text response, no fallback)",
-                        trace_id,
-                        mid_try,
-                    )
+                    if not body.get("_tool_forced"):
+                        logger.info(
+                            "[chat_trace] trace_id=%s path=sutui_chat tool_calls_missing model=%s "
+                            "→ retry with tool_choice=required",
+                            trace_id, mid_try,
+                        )
+                        body["tool_choice"] = "required"
+                        body["_tool_forced"] = True
+                        try:
+                            r2 = await client.post(url, json=body, headers=headers)
+                            d2 = r2.json()
+                        except Exception as e2:
+                            logger.warning("[sutui-chat] tool_choice=required retry failed: %s", e2)
+                            d2 = None
+                        finally:
+                            body.pop("_tool_forced", None)
+                            body["tool_choice"] = "auto"
+                        if d2 and _openai_nonstream_completion_usable(d2, getattr(r2, "status_code", 0)):
+                            if not _openai_completion_missing_tool_calls(d2, body):
+                                data = d2
+                                r = r2
+                                logger.info(
+                                    "[chat_trace] trace_id=%s tool_choice=required succeeded model=%s",
+                                    trace_id, mid_try,
+                                )
+                            else:
+                                logger.info(
+                                    "[chat_trace] trace_id=%s tool_choice=required still no tools model=%s, accept text",
+                                    trace_id, mid_try,
+                                )
+                    else:
+                        logger.info(
+                            "[chat_trace] trace_id=%s tool_calls_missing model=%s (accepted after forced retry)",
+                            trace_id, mid_try,
+                        )
                 winning_model = mid_try
                 model_id = mid_try
                 break
