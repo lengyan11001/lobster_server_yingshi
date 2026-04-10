@@ -35,6 +35,18 @@ assets/
 installed_packages.json
 mcp/capability_catalog.local.json
 
+# OTA manifest（服务器独立维护，不随 git pull 覆盖）
+client_static/client_code/manifest.json
+client_static/skill_bundle/manifest.json
+client_static/client_code/bundles/
+client_static/skill_bundle/bundles/
+
+# 服务器运行时数据
+data/sutui_llm_catalog_from_api.json
+data/sutui_llm_snapshot.json
+data/sutui_reconcile_last.json
+temp_assets/
+
 # 部署回滚
 .deploy_rollback_commit
 
