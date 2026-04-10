@@ -78,19 +78,15 @@ class Settings(BaseSettings):
     wechat_oa_token: Optional[str] = None
     """服务号消息推送：EncodingAESKey（明文模式可不参与解密）"""
     wechat_oa_encoding_aes_key: Optional[str] = None
-    # 自建微信支付（不用速推）：商户号、APIv3 密钥，配置后充值可走微信 Native 扫码
-    wechat_mch_id: Optional[str] = None
-    wechat_pay_apiv3_key: Optional[str] = None
-    """微信支付商户证书序列号（回调验签用）"""
-    wechat_pay_serial_no: Optional[str] = None
-    """微信支付商户私钥文件路径（.pem）或 PEM 内容，统一下单签名用"""
-    wechat_pay_private_key_path: Optional[str] = None
-    """微信支付平台证书目录：SDK 会从此目录读取或下载平台证书。若 GET /v3/certificates 返回 404，可在此目录放置从商户平台下载的 cert.pem 后重试。"""
-    wechat_pay_cert_dir: Optional[str] = None
-    """微信支付公钥模式：公钥文件路径（商户平台-API安全-微信支付公钥-下载）。与 wechat_pay_public_key_id 同时配置则走公钥模式，不再请求 GET /v3/certificates。"""
-    wechat_pay_public_key_path: Optional[str] = None
-    """微信支付公钥模式：公钥ID（截图中的「公钥ID」，形如 PUB_KEY_ID_011736889298...）。勿与 APIv3 密钥混淆。"""
-    wechat_pay_public_key_id: Optional[str] = None
+    # ── 付呗聚合支付（替代自建微信支付）──
+    """付呗商户开放平台 API ID"""
+    fubei_app_id: Optional[str] = None
+    """付呗商户开放平台 AppSecret（签名用）"""
+    fubei_app_secret: Optional[str] = None
+    """付呗门店 ID（多门店时必填）"""
+    fubei_store_id: Optional[int] = None
+    """付呗网关地址（默认正式环境；测试环境用 https://shq-api-test.51fubei.com/gateway/agent）"""
+    fubei_gateway_url: str = "https://shq-api.51fubei.com/gateway/agent"
     openclaw_gateway_url: Optional[str] = None
     openclaw_gateway_token: Optional[str] = None
     openclaw_agent_id: str = "main"
@@ -114,6 +110,10 @@ class Settings(BaseSettings):
     ihuyi_sms_account: Optional[str] = None
     """互亿无线 APIKEY，对应 Submit.json 请求参数 password"""
     ihuyi_sms_password: Optional[str] = None
+
+    # ── 直连 LLM API（优先于 xskill.ai 中转）──
+    deepseek_api_key: Optional[str] = None
+    deepseek_api_base: str = "https://api.deepseek.com"
 
     # ── Meta Social（Instagram / Facebook 发布）──
     """Facebook App ID（在 developers.facebook.com 创建 App 后获取）"""

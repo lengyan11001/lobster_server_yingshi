@@ -22,8 +22,66 @@ _CACHE_TTL_SEC = 3600
 
 # 公开 docs 无条目的对话模型：流式常无 x_billing，仅能按 usage×费率估算；费率按与非流式 x_billing 同量级校准，可用 env JSON 覆盖。
 _BUILTIN_CHAT_USAGE_CREDITS_PER_1K_BY_MODEL: Dict[str, float] = {
-    "deepseek-chat": 0.062,
+    "deepseek-chat": 0.2,
 }
+
+# ---------------------------------------------------------------------------
+# DeepSeek 官方定价（1 元 = 100 积分）
+# https://api-docs.deepseek.com/quick_start/pricing/
+# ---------------------------------------------------------------------------
+_DEEPSEEK_OFFICIAL_CREDITS_PER_1M: Dict[str, Dict[str, float]] = {
+    "deepseek-chat": {
+        "input_cache_miss": 200.0,   # ¥2.0/1M → 200 credits/1M
+        "input_cache_hit":   20.0,   # ¥0.2/1M →  20 credits/1M
+        "output":           300.0,   # ¥3.0/1M → 300 credits/1M
+    },
+    "deepseek-reasoner": {
+        "input_cache_miss": 400.0,   # ¥4.0/1M
+        "input_cache_hit":  100.0,   # ¥1.0/1M
+        "output":          1600.0,   # ¥16.0/1M
+    },
+}
+
+
+def credits_from_direct_api_usage(model: str, usage: Optional[dict]) -> Decimal:
+    """按 DeepSeek 官方定价 + usage 中 cache hit/miss 精确计费。1 元 = 100 积分。"""
+    if not usage or not isinstance(usage, dict):
+        return Decimal(0)
+    mid = (model or "").strip()
+    pricing = _DEEPSEEK_OFFICIAL_CREDITS_PER_1M.get(mid)
+    if not pricing:
+        return Decimal(0)
+
+    cache_hit = 0
+    cache_miss = 0
+    try:
+        cache_hit = int(usage.get("prompt_cache_hit_tokens") or 0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        cache_miss = int(usage.get("prompt_cache_miss_tokens") or 0)
+    except (TypeError, ValueError):
+        pass
+    if cache_hit == 0 and cache_miss == 0:
+        try:
+            cache_miss = int(usage.get("prompt_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    completion = 0
+    try:
+        completion = int(usage.get("completion_tokens") or 0)
+    except (TypeError, ValueError):
+        pass
+
+    cost = (
+        cache_hit * pricing["input_cache_hit"] / 1_000_000
+        + cache_miss * pricing["input_cache_miss"] / 1_000_000
+        + completion * pricing["output"] / 1_000_000
+    )
+    if cost <= 0:
+        return Decimal(0)
+    return quantize_credits(cost)
 
 
 def _usage_credits_per_1k_for_model(model_id: str) -> float:
