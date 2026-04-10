@@ -703,7 +703,7 @@ async def _call_upstream_sutui_tasks_rest(
             except Exception as ex:
                 logger.warning("[速推REST请求] params 摘要失败: %s", ex)
         elif tool_name == "get_result":
-            task_id = (arguments.get("task_id") or "").strip()
+            task_id = str(arguments.get("task_id") or "").strip()
             if not task_id:
                 return {"error": {"message": "get_result 缺少 task_id"}}
             body = {"task_id": task_id}
@@ -1923,11 +1923,11 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             return [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=2)}], False
 
         if name == "manage_skills":
-            action = (args.get("action") or "").strip()
-            package_id = (args.get("package_id") or "").strip()
-            query = (args.get("query") or "").strip()
-            mcp_name = (args.get("name") or "").strip()
-            mcp_url = (args.get("url") or "").strip()
+            action = str(args.get("action") or "").strip()
+            package_id = str(args.get("package_id") or "").strip()
+            query = str(args.get("query") or "").strip()
+            mcp_name = str(args.get("name") or "").strip()
+            mcp_url = str(args.get("url") or "").strip()
 
             if action == "search_online":
                 if not query:
@@ -1992,7 +1992,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             return [{"type": "text", "text": json.dumps(r.json() if r.content else {}, ensure_ascii=False, indent=2)}], r.status_code >= 400
 
         if name == "invoke_capability":
-            capability_id = (args.get("capability_id") or "").strip()
+            capability_id = str(args.get("capability_id") or "").strip()
             payload = args.get("payload") or {}
             if not isinstance(payload, dict):
                 payload = {}
@@ -2630,7 +2630,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             return [{"type": "text", "text": text}], bool(upstream_error)
 
         if name == "save_asset":
-            url = (args.get("url") or "").strip()
+            url = str(args.get("url") or "").strip()
             if not url:
                 return [{"type": "text", "text": "请提供素材 URL"}], True
             body = {
@@ -2780,7 +2780,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             return [{"type": "text", "text": text}], r.status_code >= 400
 
         if name == "open_account_browser":
-            nickname = (args.get("account_nickname") or "").strip()
+            nickname = str(args.get("account_nickname") or "").strip()
             if not nickname:
                 return [{"type": "text", "text": "请提供 account_nickname"}], True
             acct_id = await _find_account_id_by_nickname(nickname, token, request)
@@ -2793,7 +2793,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             return [{"type": "text", "text": text}], r.status_code >= 400
 
         if name == "check_account_login":
-            nickname = (args.get("account_nickname") or "").strip()
+            nickname = str(args.get("account_nickname") or "").strip()
             if not nickname:
                 return [{"type": "text", "text": "请提供 account_nickname"}], True
             acct_id = await _find_account_id_by_nickname(nickname, token, request)
@@ -2806,8 +2806,8 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             return [{"type": "text", "text": text}], r.status_code >= 400
 
         if name == "publish_content":
-            asset_id = (args.get("asset_id") or "").strip()
-            account_nickname = (args.get("account_nickname") or "").strip()
+            asset_id = str(args.get("asset_id") or "").strip()
+            account_nickname = str(args.get("account_nickname") or "").strip()
             if not asset_id:
                 return [{"type": "text", "text": "请提供 asset_id（通过 save_asset 获得）"}], True
             if not account_nickname:
@@ -2864,7 +2864,7 @@ async def _handle_single_message(msg: Dict[str, Any], request: Request) -> Optio
     if method == "tools/call":
         name = params.get("name")
         arguments = params.get("arguments") or {}
-        cap_id = (arguments.get("capability_id") or "").strip() if name == "invoke_capability" else ""
+        cap_id = str(arguments.get("capability_id") or "").strip() if name == "invoke_capability" else ""
         token = _get_token_from_request(request)
         logger.info("[MCP] tools/call name=%s capability_id=%s", name, cap_id or "-")
         content, is_error = await _call_tool(name, arguments, token, request=request)
