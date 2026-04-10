@@ -25,6 +25,7 @@ from ..services.credits_amount import credits_json_float, quantize_credits, user
 from ..services.sutui_api_audit import clip_openai_chat_completions_json_for_audit, log_xskill_http
 from ..services.sutui_pricing import (
     credits_from_chat_usage_when_no_docs_pricing,
+    credits_from_direct_api_usage,
     estimate_credits_from_pricing,
     estimate_pre_deduct_credits,
     extract_upstream_billing_snapshot,
@@ -58,6 +59,40 @@ def _get_xskill_client(timeout: float = 120.0) -> httpx.AsyncClient:
             ),
         )
     return _xskill_pool_client
+
+
+# ---------------------------------------------------------------------------
+# Direct API pool — for models with self-hosted API keys (bypass xskill)
+# ---------------------------------------------------------------------------
+_direct_pool_clients: Dict[str, httpx.AsyncClient] = {}
+
+
+def _get_direct_client(provider: str, timeout: float = 30.0) -> httpx.AsyncClient:
+    global _direct_pool_clients
+    c = _direct_pool_clients.get(provider)
+    if c is None or c.is_closed:
+        c = httpx.AsyncClient(
+            timeout=timeout,
+            trust_env=True,
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=5,
+                keepalive_expiry=120,
+            ),
+        )
+        _direct_pool_clients[provider] = c
+    return c
+
+
+def _get_direct_route(model: str) -> Optional[Dict[str, str]]:
+    """If a model has a direct API key configured, return route info; else None."""
+    mid = (model or "").strip()
+    if mid in ("deepseek-chat", "deepseek-reasoner"):
+        key = (getattr(settings, "deepseek_api_key", None) or "").strip()
+        if key:
+            base = (getattr(settings, "deepseek_api_base", None) or "https://api.deepseek.com").rstrip("/")
+            return {"api_base": base, "api_key": key, "provider": "deepseek"}
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -656,8 +691,15 @@ def _credits_for_sutui_chat(
     model: str,
     usage: Optional[dict],
     response_body: Optional[Dict[str, Any]] = None,
+    *,
+    is_direct_api: bool = False,
 ) -> Tuple[Decimal, str]:
-    """LLM 实扣：上游显式价字段 → docs 定价+usage（与速推官方一致）→ 无 docs 时才按 usage×fallback。"""
+    """LLM 实扣：直连官方定价 → 上游显式价字段 → docs 定价+usage → usage×fallback。"""
+    if is_direct_api and usage and isinstance(usage, dict):
+        direct_credits = credits_from_direct_api_usage(model, usage)
+        if direct_credits > 0:
+            return direct_credits, "direct_official_pricing"
+
     if response_body and isinstance(response_body, dict):
         reported = extract_upstream_reported_credits(response_body)
         if reported > 0:
@@ -705,6 +747,7 @@ def _apply_chat_deduct(
     *,
     billing_recon: Optional[Dict[str, Any]] = None,
     trace_id: Optional[str] = None,
+    is_direct_api: bool = False,
 ) -> None:
     tid = trace_id or "-"
     if not _should_deduct_credits():
@@ -719,7 +762,7 @@ def _apply_chat_deduct(
     reported_raw = None
     if response_body and isinstance(response_body, dict):
         reported_raw = extract_upstream_reported_credits(response_body)
-    credits, billing_src = _credits_for_sutui_chat(model, usage, response_body)
+    credits, billing_src = _credits_for_sutui_chat(model, usage, response_body, is_direct_api=is_direct_api)
     snap = extract_upstream_billing_snapshot(response_body if isinstance(response_body, dict) else None)
     try:
         snap_json = json.dumps(snap, ensure_ascii=False, default=str)
@@ -882,63 +925,86 @@ async def sutui_chat_completions(
         user_bal_str = str(user_balance_decimal(current_user))
     out_req_for_audit = clip_openai_chat_completions_json_for_audit(body)
 
+    # ── Build attempts list: direct API first, then xskill fallback ──
+    _DIRECT_TIMEOUT = 30.0
+    _XSKILL_TIMEOUT = 45.0
+    attempts: List[Dict[str, Any]] = []
+    for mid in model_candidates:
+        dr = _get_direct_route(mid)
+        if dr:
+            attempts.append({
+                "model": mid, "api_base": dr["api_base"], "api_key": dr["api_key"],
+                "provider": "direct:" + dr["provider"], "timeout": _DIRECT_TIMEOUT, "is_direct": True,
+            })
+        attempts.append({
+            "model": mid, "api_base": _api_base(), "api_key": token,
+            "provider": "xskill", "timeout": _XSKILL_TIMEOUT, "is_direct": False,
+        })
+    logger.info(
+        "[chat_trace] trace_id=%s attempts=%s",
+        trace_id,
+        [(a["model"], a["provider"], a["timeout"]) for a in attempts],
+    )
+
     if not stream:
         r: Optional[httpx.Response] = None
         data: Any = None
         winning_model = model_id
+        winning_is_direct = False
         last_connect_error: Optional[Exception] = None
         last_timeout_error: Optional[Exception] = None
 
-        client = _get_xskill_client(timeout=120.0)
-        for attempt_idx, mid_try in enumerate(model_candidates):
+        for attempt_idx, att in enumerate(attempts):
+            mid_try = att["model"]
+            att_url = f"{att['api_base']}/v1/chat/completions"
+            att_headers = {
+                "Authorization": f"Bearer {att['api_key']}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            }
+            att_is_direct = att["is_direct"]
             body["model"] = mid_try
+
+            if att_is_direct:
+                client = _get_direct_client(att["provider"], timeout=att["timeout"])
+            else:
+                client = _get_xskill_client(timeout=att["timeout"])
+
             try:
-                r = await client.post(url, json=body, headers=headers)
+                r = await client.post(att_url, json=body, headers=att_headers)
             except httpx.ConnectError as e:
                 last_connect_error = e
                 logger.warning(
-                    "[sutui-chat] 上游连接失败 attempt=%s model=%s trace_id=%s err=%s",
-                    attempt_idx,
-                    mid_try,
-                    trace_id,
-                    e,
+                    "[sutui-chat] 上游连接失败 attempt=%s model=%s provider=%s trace_id=%s err=%s",
+                    attempt_idx, mid_try, att["provider"], trace_id, e,
                 )
-                if attempt_idx < len(model_candidates) - 1:
+                if attempt_idx < len(attempts) - 1:
                     continue
-                logger.exception("[sutui-chat] 上游连接失败（出网/DNS/防火墙/上游不可达） url=%s", url)
                 raise HTTPException(
                     status_code=502,
-                    detail=(
-                        f"无法连接速推 LLM 上游 {_api_base()}（chat/completions）。"
-                        f"请在服务器上检查：安全组/防火墙是否放行 HTTPS 出站、DNS 能否解析该域名、"
-                        f"是否需要 HTTP_PROXY；也可在本机执行 curl -I {_api_base()} 验证。"
-                        f" 原始错误: {e!s}"
-                    )[:2000],
+                    detail=(f"无法连接 LLM 上游 {att['api_base']}。原始错误: {e!s}")[:2000],
                 )
             except httpx.TimeoutException as e:
-                _record_model_timeout(mid_try)
+                _record_model_timeout(f"{mid_try}@{att['provider']}")
                 last_timeout_error = e
                 logger.warning(
-                    "[sutui-chat] 上游超时 attempt=%s model=%s trace_id=%s err=%s",
-                    attempt_idx,
-                    mid_try,
-                    trace_id,
-                    e,
+                    "[sutui-chat] 上游超时 attempt=%s model=%s provider=%s timeout=%.0fs trace_id=%s",
+                    attempt_idx, mid_try, att["provider"], att["timeout"], trace_id,
                 )
-                if attempt_idx < len(model_candidates) - 1:
+                if attempt_idx < len(attempts) - 1:
                     continue
-                logger.exception("[sutui-chat] 上游请求超时 url=%s", url)
-                raise HTTPException(status_code=504, detail=f"速推 LLM 上游响应超时: {e!s}"[:2000])
+                raise HTTPException(status_code=504, detail=f"LLM 上游响应超时: {e!s}"[:2000])
 
-            _record_model_success(mid_try)
+            _record_model_success(f"{mid_try}@{att['provider']}")
 
             try:
                 data = r.json()
             except Exception:
                 data = None
 
-            if _sutui_chat_abort_model_fallback(r.status_code, data if isinstance(data, dict) else {}):
+            if not att_is_direct and _sutui_chat_abort_model_fallback(r.status_code, data if isinstance(data, dict) else {}):
                 winning_model = mid_try
+                winning_is_direct = att_is_direct
                 break
 
             if _openai_nonstream_completion_usable(data, r.status_code):
@@ -946,14 +1012,14 @@ async def sutui_chat_completions(
                     _forced_ok = False
                     if not body.get("_tool_forced"):
                         logger.info(
-                            "[chat_trace] trace_id=%s path=sutui_chat tool_calls_missing model=%s "
-                            "→ retry with tool_choice=required (fake_text=%s)",
-                            trace_id, mid_try, _response_has_fake_tool_text(data),
+                            "[chat_trace] trace_id=%s tool_calls_missing model=%s provider=%s "
+                            "→ retry tool_choice=required (fake_text=%s)",
+                            trace_id, mid_try, att["provider"], _response_has_fake_tool_text(data),
                         )
                         body["tool_choice"] = "required"
                         body["_tool_forced"] = True
                         try:
-                            r2 = await client.post(url, json=body, headers=headers)
+                            r2 = await client.post(att_url, json=body, headers=att_headers)
                             d2 = r2.json()
                         except Exception as e2:
                             logger.warning("[sutui-chat] tool_choice=required retry failed: %s", e2)
@@ -967,54 +1033,54 @@ async def sutui_chat_completions(
                                 r = r2
                                 _forced_ok = True
                                 logger.info(
-                                    "[chat_trace] trace_id=%s tool_choice=required succeeded model=%s",
-                                    trace_id, mid_try,
+                                    "[chat_trace] trace_id=%s tool_choice=required succeeded model=%s provider=%s",
+                                    trace_id, mid_try, att["provider"],
                                 )
                     if not _forced_ok:
                         logger.warning(
-                            "[chat_trace] trace_id=%s tool_calls_missing model=%s after forced retry, "
-                            "fallback to next model (fake_text=%s)",
-                            trace_id, mid_try, _response_has_fake_tool_text(data),
+                            "[chat_trace] trace_id=%s tool_calls_missing model=%s provider=%s after forced retry, "
+                            "fallback to next (fake_text=%s)",
+                            trace_id, mid_try, att["provider"], _response_has_fake_tool_text(data),
                         )
-                        if attempt_idx < len(model_candidates) - 1:
+                        if attempt_idx < len(attempts) - 1:
                             continue
                 winning_model = mid_try
+                winning_is_direct = att_is_direct
                 model_id = mid_try
                 break
 
-            if attempt_idx < len(model_candidates) - 1:
+            if attempt_idx < len(attempts) - 1:
                 _prev = ""
                 if isinstance(data, dict):
                     _prev = json.dumps(data, ensure_ascii=False)[:400]
                 else:
                     _prev = (r.text or "")[:400]
                 logger.warning(
-                    "[chat_trace] trace_id=%s path=sutui_chat fallback_model http=%s from=%s to=%s preview=%s",
-                    trace_id,
-                    r.status_code,
-                    mid_try,
-                    model_candidates[attempt_idx + 1],
+                    "[chat_trace] trace_id=%s fallback http=%s from=%s(%s) to=%s(%s) preview=%s",
+                    trace_id, r.status_code,
+                    mid_try, att["provider"],
+                    attempts[attempt_idx + 1]["model"], attempts[attempt_idx + 1]["provider"],
                     _prev,
                 )
                 continue
             winning_model = mid_try
+            winning_is_direct = att_is_direct
             break
 
         if r is None:
             if last_connect_error:
-                raise HTTPException(status_code=502, detail=f"无法连接速推 LLM 上游: {last_connect_error!s}"[:2000])
+                raise HTTPException(status_code=502, detail=f"无法连接 LLM 上游: {last_connect_error!s}"[:2000])
             if last_timeout_error:
-                raise HTTPException(status_code=504, detail=f"速推 LLM 上游响应超时: {last_timeout_error!s}"[:2000])
-            raise HTTPException(status_code=502, detail="速推 LLM 上游无响应")
+                raise HTTPException(status_code=504, detail=f"LLM 上游响应超时: {last_timeout_error!s}"[:2000])
+            raise HTTPException(status_code=502, detail="LLM 上游无响应")
 
         if data is None:
             raise HTTPException(status_code=502, detail=(r.text or "")[:2000])
 
+        _route_label = "direct" if winning_is_direct else "xskill"
         logger.info(
-            "[chat_trace] trace_id=%s path=sutui_chat upstream_xskill roundtrip http=%s model=%s summary=%s",
-            trace_id,
-            r.status_code,
-            winning_model or "-",
+            "[chat_trace] trace_id=%s path=sutui_chat upstream roundtrip http=%s model=%s route=%s summary=%s",
+            trace_id, r.status_code, winning_model or "-", _route_label,
             _sutui_chat_upstream_body_for_log(data if isinstance(data, dict) else None),
         )
         _audit_snap = extract_upstream_billing_snapshot(data if isinstance(data, dict) else None)
@@ -1036,7 +1102,8 @@ async def sutui_chat_completions(
                 "user_id": current_user.id,
                 "stream": False,
                 "user_lobster_credits": user_bal_str,
-                "model_candidates_tried": model_candidates,
+                "route": _route_label,
+                "model_candidates_tried": [(a["model"], a["provider"]) for a in attempts],
             },
             bearer_token=token,
             sutui_pool=sutui_pool or "",
@@ -1058,15 +1125,14 @@ async def sutui_chat_completions(
                 data if isinstance(data, dict) else None,
                 billing_recon=chat_billing_recon,
                 trace_id=trace_id,
+                is_direct_api=winning_is_direct,
             )
         else:
             logger.info(
-                "[chat_trace] trace_id=%s path=sutui_chat deduct=skipped_nonstream reason=%s http=%s model_id=%r usable=%s",
+                "[chat_trace] trace_id=%s deduct=skipped_nonstream reason=%s http=%s model=%r route=%s",
                 trace_id,
-                "upstream_not_200" if r.status_code != 200 else "not_usable_or_empty_model",
-                r.status_code,
-                winning_model,
-                _openai_nonstream_completion_usable(data, r.status_code) if r.status_code == 200 else False,
+                "upstream_not_200" if r.status_code != 200 else "not_usable",
+                r.status_code, winning_model, _route_label,
             )
 
         out = data
@@ -1083,30 +1149,37 @@ async def sutui_chat_completions(
             headers={TRACE_HEADER: trace_id},
         )
 
-    # 流式：边下边解析 SSE，取最后一个含 usage 的 data；并保留上游出现的 x_billing/X-Billing（与非流式一致，优先按 credits_used 扣）。
-    # StreamingResponse 返回后，Depends(get_db) 可能在生成器尚未结束时即关闭会话，finally 内禁止再用注入的 db 扣费。
     billing_user_id = int(current_user.id)
     billing_model_holder: List[str] = [model_id]
+    billing_is_direct_holder: List[bool] = [False]
 
     async def gen() -> AsyncIterator[bytes]:
         line_buf = bytearray()
         last_usage: Optional[Dict[str, Any]] = None
-        # 流内任一事例带计费扩展则记录；同名字段以后出现的 chunk 覆盖（通常最后一帧最全）
         stream_upstream_billing: Dict[str, Any] = {}
         stream_completed_ok = False
         try:
-            for cand_idx, mid_try in enumerate(model_candidates):
+            for cand_idx, att in enumerate(attempts):
+                mid_try = att["model"]
+                att_url = f"{att['api_base']}/v1/chat/completions"
+                att_headers = {
+                    "Authorization": f"Bearer {att['api_key']}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                }
+                att_is_direct = att["is_direct"]
                 body["model"] = mid_try
                 try:
-                    stream_client = _get_xskill_client(timeout=120.0)
-                    async with stream_client.stream("POST", url, json=body, headers=headers) as resp:
+                    if att_is_direct:
+                        stream_client = _get_direct_client(att["provider"], timeout=att["timeout"])
+                    else:
+                        stream_client = _get_xskill_client(timeout=att["timeout"])
+                    async with stream_client.stream("POST", att_url, json=body, headers=att_headers) as resp:
                             if resp.status_code >= 400:
                                 txt = (await resp.aread()).decode("utf-8", errors="replace")
                                 logger.info(
-                                    "[chat_trace] trace_id=%s path=sutui_chat upstream_xskill stream_fail http=%s model=%s preview=%s",
-                                    trace_id,
-                                    resp.status_code,
-                                    mid_try,
+                                    "[chat_trace] trace_id=%s stream_fail http=%s model=%s provider=%s preview=%s",
+                                    trace_id, resp.status_code, mid_try, att["provider"],
                                     txt[:500].replace("\n", " "),
                                 )
                                 try:
@@ -1117,7 +1190,7 @@ async def sutui_chat_completions(
                                 log_xskill_http(
                                     phase="sutui_chat_completions_stream",
                                     method="POST",
-                                    url=url,
+                                    url=att_url,
                                     http_status=resp.status_code,
                                     capability_or_model=mid_try or "-",
                                     billing_snapshot=None,
@@ -1127,7 +1200,7 @@ async def sutui_chat_completions(
                                         "user_id": current_user.id,
                                         "stream": True,
                                         "user_lobster_credits": user_bal_str,
-                                        "model_candidates_tried": model_candidates,
+                                        "route": att["provider"],
                                         "stream_attempt": cand_idx,
                                     },
                                     bearer_token=token,
@@ -1135,50 +1208,46 @@ async def sutui_chat_completions(
                                     upstream_response=txt,
                                     outbound_request_json=out_req_for_audit,
                                 )
-                                if _sutui_chat_abort_model_fallback(resp.status_code, pj):
+                                if not att_is_direct and _sutui_chat_abort_model_fallback(resp.status_code, pj):
                                     yield _stream_upstream_error_sse_bytes(resp.status_code, txt)
                                     return
-                                if cand_idx < len(model_candidates) - 1:
+                                if cand_idx < len(attempts) - 1:
                                     logger.warning(
-                                        "[chat_trace] trace_id=%s path=sutui_chat stream_fallback http=%s from=%s to=%s",
-                                        trace_id,
-                                        resp.status_code,
-                                        mid_try,
-                                        model_candidates[cand_idx + 1],
+                                        "[chat_trace] trace_id=%s stream_fallback http=%s from=%s(%s) to=%s(%s)",
+                                        trace_id, resp.status_code,
+                                        mid_try, att["provider"],
+                                        attempts[cand_idx + 1]["model"], attempts[cand_idx + 1]["provider"],
                                     )
                                     continue
                                 yield _stream_upstream_error_sse_bytes(resp.status_code, txt)
                                 return
 
                             billing_model_holder[0] = mid_try
+                            billing_is_direct_holder[0] = att_is_direct
                             stream_completed_ok = True
-                            _record_model_success(mid_try)
+                            _record_model_success(f"{mid_try}@{att['provider']}")
                             logger.info(
-                                "[chat_trace] trace_id=%s path=sutui_chat upstream_xskill stream_started http=200 model=%s",
-                                trace_id,
-                                mid_try or "-",
+                                "[chat_trace] trace_id=%s stream_started http=200 model=%s provider=%s",
+                                trace_id, mid_try or "-", att["provider"],
                             )
                             log_xskill_http(
                                 phase="sutui_chat_completions_stream",
                                 method="POST",
-                                url=url,
+                                url=att_url,
                                 http_status=200,
                                 capability_or_model=mid_try or "-",
-                                billing_snapshot={"note": "stream started; usage/x_billing 在流结束后扣费日志中"},
+                                billing_snapshot={"note": "stream started"},
                                 error_message="",
                                 extra={
                                     "trace_id": trace_id,
                                     "user_id": current_user.id,
                                     "stream": True,
                                     "user_lobster_credits": user_bal_str,
-                                    "model_candidates_tried": model_candidates,
+                                    "route": att["provider"],
                                 },
                                 bearer_token=token,
                                 sutui_pool=sutui_pool or "",
-                                upstream_response={
-                                    "note": "SSE 流已开始，完整 chunks 不在此条；请用 trace_id 对齐后续扣费流水",
-                                    "trace_id": trace_id,
-                                },
+                                upstream_response={"note": "SSE stream started", "trace_id": trace_id},
                                 outbound_request_json=out_req_for_audit,
                             )
                             async for chunk in resp.aiter_bytes():
@@ -1214,41 +1283,27 @@ async def sutui_chat_completions(
                                         last_usage = u
                             break
                 except httpx.ConnectError as e:
-                    if cand_idx < len(model_candidates) - 1:
+                    if cand_idx < len(attempts) - 1:
                         logger.warning(
-                            "[sutui-chat] 流式连接失败将换模型 trace_id=%s model=%s err=%s",
-                            trace_id,
-                            mid_try,
-                            e,
+                            "[sutui-chat] 流式连接失败 trace_id=%s model=%s provider=%s err=%s",
+                            trace_id, mid_try, att["provider"], e,
                         )
                         continue
-                    logger.exception("[sutui-chat] 流式上游连接失败 url=%s", url)
                     err = json.dumps(
-                        {
-                            "error": {
-                                "message": (
-                                    f"无法连接速推 LLM 上游 {_api_base()}。请检查服务器 HTTPS 出站与 DNS。"
-                                    f" 原始错误: {e!s}"
-                                )[:2000],
-                                "status": 502,
-                            }
-                        },
+                        {"error": {"message": f"无法连接 LLM 上游 {att['api_base']}: {e!s}"[:2000], "status": 502}},
                         ensure_ascii=False,
                     )
                     yield f"data: {err}\n\n".encode("utf-8")
                 except httpx.TimeoutException as e:
-                    _record_model_timeout(mid_try)
-                    if cand_idx < len(model_candidates) - 1:
+                    _record_model_timeout(f"{mid_try}@{att['provider']}")
+                    if cand_idx < len(attempts) - 1:
                         logger.warning(
-                            "[sutui-chat] 流式超时将换模型 trace_id=%s model=%s err=%s",
-                            trace_id,
-                            mid_try,
-                            e,
+                            "[sutui-chat] 流式超时 trace_id=%s model=%s provider=%s timeout=%.0fs",
+                            trace_id, mid_try, att["provider"], att["timeout"],
                         )
                         continue
-                    logger.exception("[sutui-chat] 流式上游超时 url=%s", url)
                     err = json.dumps(
-                        {"error": {"message": f"速推 LLM 上游超时: {e!s}"[:2000], "status": 504}},
+                        {"error": {"message": f"LLM 上游超时: {e!s}"[:2000], "status": 504}},
                         ensure_ascii=False,
                     )
                     yield f"data: {err}\n\n".encode("utf-8")
@@ -1286,6 +1341,7 @@ async def sutui_chat_completions(
                         resp_for_bill,
                         billing_recon=chat_billing_recon,
                         trace_id=trace_id,
+                        is_direct_api=billing_is_direct_holder[0],
                     )
             except HTTPException as exc:
                 if exc.status_code == 402:
