@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from decimal import Decimal
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -37,6 +38,64 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 TRACE_HEADER = "X-Lobster-Chat-Trace-Id"
+
+# ---------------------------------------------------------------------------
+# Global connection pool — reuses TCP+TLS connections across requests
+# ---------------------------------------------------------------------------
+_xskill_pool_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_xskill_client(timeout: float = 120.0) -> httpx.AsyncClient:
+    global _xskill_pool_client
+    if _xskill_pool_client is None or _xskill_pool_client.is_closed:
+        _xskill_pool_client = httpx.AsyncClient(
+            timeout=timeout,
+            trust_env=True,
+            limits=httpx.Limits(
+                max_connections=40,
+                max_keepalive_connections=10,
+                keepalive_expiry=120,
+            ),
+        )
+    return _xskill_pool_client
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker — skip models that timeout repeatedly
+# ---------------------------------------------------------------------------
+_MODEL_TIMEOUT_WINDOW = 300  # 5 min window
+_MODEL_TIMEOUT_THRESHOLD = 3  # 3 timeouts in window → trip
+_MODEL_COOLDOWN = 120  # skip for 2 min after tripped
+_model_timeout_history: Dict[str, List[float]] = {}
+_model_tripped_until: Dict[str, float] = {}
+
+
+def _record_model_timeout(model: str) -> None:
+    now = time.monotonic()
+    hist = _model_timeout_history.setdefault(model, [])
+    hist.append(now)
+    cutoff = now - _MODEL_TIMEOUT_WINDOW
+    _model_timeout_history[model] = [t for t in hist if t > cutoff]
+    if len(_model_timeout_history[model]) >= _MODEL_TIMEOUT_THRESHOLD:
+        _model_tripped_until[model] = now + _MODEL_COOLDOWN
+        logger.warning("[circuit-breaker] model=%s tripped for %ss after %d timeouts",
+                       model, _MODEL_COOLDOWN, len(_model_timeout_history[model]))
+
+
+def _record_model_success(model: str) -> None:
+    _model_timeout_history.pop(model, None)
+    _model_tripped_until.pop(model, None)
+
+
+def _is_model_tripped(model: str) -> bool:
+    until = _model_tripped_until.get(model)
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        _model_tripped_until.pop(model, None)
+        _model_timeout_history.pop(model, None)
+        return False
+    return True
 
 
 _SUTUI_PROVIDER_PREFIXES = ("anthropic/", "openai/", "google/", "deepseek/", "meta/", "mistral/", "cohere/")
@@ -175,9 +234,9 @@ def _xskill_upstream_pool_quota_error(data: Any) -> bool:
 
 
 def _parse_sutui_chat_fallback_chain_env() -> List[str]:
-    """主→备模型顺序：默认 deepseek-chat → gpt-4o；可用 SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON 覆盖。"""
+    """主→备模型顺序：默认 deepseek-chat → claude-opus-4-6；可用 SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON 覆盖。"""
     raw = (os.environ.get("SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON") or "").strip()
-    default = ["deepseek-chat", "gpt-4o"]
+    default = ["deepseek-chat", "claude-opus-4-6"]
     if not raw:
         return default
     try:
@@ -203,7 +262,7 @@ def _remap_model_id_for_sutui(mid: str) -> str:
 def _sutui_chat_model_candidates(initial_model: str, *, has_tools: bool = False) -> List[str]:
     """
     对话编排：优先用入站（已 remap）的 model，再按 fallback chain 尝试其它通道，去重。
-    不再对 deepseek-chat 做"tool-weak"跳过 — 实测其 tool_calls 遵从率正常。
+    熔断的模型会被跳过（但保留至少一个候选）。
     """
     seen: set[str] = set()
     out: List[str] = []
@@ -217,7 +276,16 @@ def _sutui_chat_model_candidates(initial_model: str, *, has_tools: bool = False)
         if m and m not in seen:
             seen.add(m)
             out.append(m)
-    return out if out else ([init] if init else [])
+    if not out:
+        return [init] if init else []
+    filtered = [m for m in out if not _is_model_tripped(m)]
+    if not filtered:
+        logger.info("[circuit-breaker] all candidates tripped, using first: %s", out[0])
+        return [out[0]]
+    if len(filtered) < len(out):
+        skipped = set(out) - set(filtered)
+        logger.info("[circuit-breaker] skipping tripped models: %s", skipped)
+    return filtered
 
 
 def _openai_nonstream_completion_usable(data: Any, http_status: int) -> bool:
@@ -673,11 +741,11 @@ async def sutui_chat_completions(
         last_connect_error: Optional[Exception] = None
         last_timeout_error: Optional[Exception] = None
 
+        client = _get_xskill_client(timeout=120.0)
         for attempt_idx, mid_try in enumerate(model_candidates):
             body["model"] = mid_try
             try:
-                async with httpx.AsyncClient(timeout=60.0, trust_env=True) as client:
-                    r = await client.post(url, json=body, headers=headers)
+                r = await client.post(url, json=body, headers=headers)
             except httpx.ConnectError as e:
                 last_connect_error = e
                 logger.warning(
@@ -700,6 +768,7 @@ async def sutui_chat_completions(
                     )[:2000],
                 )
             except httpx.TimeoutException as e:
+                _record_model_timeout(mid_try)
                 last_timeout_error = e
                 logger.warning(
                     "[sutui-chat] 上游超时 attempt=%s model=%s trace_id=%s err=%s",
@@ -713,6 +782,8 @@ async def sutui_chat_completions(
                 logger.exception("[sutui-chat] 上游请求超时 url=%s", url)
                 raise HTTPException(status_code=504, detail=f"速推 LLM 上游响应超时: {e!s}"[:2000])
 
+            _record_model_success(mid_try)
+
             try:
                 data = r.json()
             except Exception:
@@ -723,18 +794,13 @@ async def sutui_chat_completions(
                 break
 
             if _openai_nonstream_completion_usable(data, r.status_code):
-                if (
-                    _openai_completion_missing_tool_calls(data, body)
-                    and attempt_idx < len(model_candidates) - 1
-                ):
-                    logger.warning(
+                if _openai_completion_missing_tool_calls(data, body):
+                    logger.info(
                         "[chat_trace] trace_id=%s path=sutui_chat tool_calls_missing model=%s "
-                        "fallback_to=%s (request had tools but response had no tool_calls)",
+                        "(accepted as valid text response, no fallback)",
                         trace_id,
                         mid_try,
-                        model_candidates[attempt_idx + 1],
                     )
-                    continue
                 winning_model = mid_try
                 model_id = mid_try
                 break
@@ -855,8 +921,8 @@ async def sutui_chat_completions(
             for cand_idx, mid_try in enumerate(model_candidates):
                 body["model"] = mid_try
                 try:
-                    async with httpx.AsyncClient(timeout=300.0, trust_env=True) as client:
-                        async with client.stream("POST", url, json=body, headers=headers) as resp:
+                    stream_client = _get_xskill_client(timeout=120.0)
+                    async with stream_client.stream("POST", url, json=body, headers=headers) as resp:
                             if resp.status_code >= 400:
                                 txt = (await resp.aread()).decode("utf-8", errors="replace")
                                 logger.info(
@@ -909,6 +975,7 @@ async def sutui_chat_completions(
 
                             billing_model_holder[0] = mid_try
                             stream_completed_ok = True
+                            _record_model_success(mid_try)
                             logger.info(
                                 "[chat_trace] trace_id=%s path=sutui_chat upstream_xskill stream_started http=200 model=%s",
                                 trace_id,
@@ -993,6 +1060,7 @@ async def sutui_chat_completions(
                     )
                     yield f"data: {err}\n\n".encode("utf-8")
                 except httpx.TimeoutException as e:
+                    _record_model_timeout(mid_try)
                     if cand_idx < len(model_candidates) - 1:
                         logger.warning(
                             "[sutui-chat] 流式超时将换模型 trace_id=%s model=%s err=%s",
