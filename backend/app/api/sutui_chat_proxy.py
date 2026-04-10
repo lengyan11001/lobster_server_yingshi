@@ -433,8 +433,28 @@ def _openai_nonstream_completion_usable(data: Any, http_status: int) -> bool:
     return True
 
 
+_FAKE_TOOL_CALL_RE = __import__("re").compile(
+    r"tool\u2581call|<\|tool|```json\s*\{[^}]*capability|function<\u2581",
+)
+
+
+def _response_has_fake_tool_text(data: Any) -> bool:
+    """Detect deepseek-style fake tool calls embedded in text content."""
+    if not isinstance(data, dict):
+        return False
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    msg = (choices[0] if isinstance(choices[0], dict) else {}).get("message", {})
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, str) and _FAKE_TOOL_CALL_RE.search(content):
+        return True
+    return False
+
+
 def _openai_completion_missing_tool_calls(data: Any, request_body: Dict[str, Any]) -> bool:
-    """请求中传了 tools 且 tool_choice 非 none，但响应不含 tool_calls——模型未遵从 tool 指令，值得换模型重试。"""
+    """请求中传了 tools 且 tool_choice 非 none，但响应不含 tool_calls——模型未遵从 tool 指令，值得换模型重试。
+    包括检测 deepseek 在文本中伪造工具调用标记的情况。"""
     if not isinstance(request_body, dict):
         return False
     tools = request_body.get("tools")
@@ -451,6 +471,8 @@ def _openai_completion_missing_tool_calls(data: Any, request_body: Dict[str, Any
     msg = choices[0].get("message") if isinstance(choices[0], dict) else None
     if not isinstance(msg, dict):
         return False
+    if _response_has_fake_tool_text(data):
+        return True
     tcs = msg.get("tool_calls")
     if isinstance(tcs, list) and len(tcs) > 0:
         return False
@@ -921,11 +943,12 @@ async def sutui_chat_completions(
 
             if _openai_nonstream_completion_usable(data, r.status_code):
                 if _openai_completion_missing_tool_calls(data, body):
+                    _forced_ok = False
                     if not body.get("_tool_forced"):
                         logger.info(
                             "[chat_trace] trace_id=%s path=sutui_chat tool_calls_missing model=%s "
-                            "→ retry with tool_choice=required",
-                            trace_id, mid_try,
+                            "→ retry with tool_choice=required (fake_text=%s)",
+                            trace_id, mid_try, _response_has_fake_tool_text(data),
                         )
                         body["tool_choice"] = "required"
                         body["_tool_forced"] = True
@@ -942,20 +965,19 @@ async def sutui_chat_completions(
                             if not _openai_completion_missing_tool_calls(d2, body):
                                 data = d2
                                 r = r2
+                                _forced_ok = True
                                 logger.info(
                                     "[chat_trace] trace_id=%s tool_choice=required succeeded model=%s",
                                     trace_id, mid_try,
                                 )
-                            else:
-                                logger.info(
-                                    "[chat_trace] trace_id=%s tool_choice=required still no tools model=%s, accept text",
-                                    trace_id, mid_try,
-                                )
-                    else:
-                        logger.info(
-                            "[chat_trace] trace_id=%s tool_calls_missing model=%s (accepted after forced retry)",
-                            trace_id, mid_try,
+                    if not _forced_ok:
+                        logger.warning(
+                            "[chat_trace] trace_id=%s tool_calls_missing model=%s after forced retry, "
+                            "fallback to next model (fake_text=%s)",
+                            trace_id, mid_try, _response_has_fake_tool_text(data),
                         )
+                        if attempt_idx < len(model_candidates) - 1:
+                            continue
                 winning_model = mid_try
                 model_id = mid_try
                 break
