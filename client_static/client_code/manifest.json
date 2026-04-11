@@ -1,7 +1,7 @@
 {
-  "version": "1.0.2",
-  "build": 5,
-  "bundle_url": "http://42.194.209.150/client/client-code/bundles/lobster_online_code_1.0.2.zip",
-  "sha256": "cb0daf75e54c842e271e8b30ed85ad8c14e60ac22e812c7e1c05df71b554f715",
-  "note": "已回退：线上 manifest build=5；build>5 的 OTA 包已删，当前 bundle 为 lobster_online_code_1.0.2.zip"
+  "version": "1.0.7",
+  "build": 13,
+  "bundle_url": "https://api.51ins.com/client/client-code/bundles/lobster_online_client_code_ota_20260408182449.zip",
+  "sha256": "28c95dffca86bfaafb3621c0aab5976d76e007b26cdf5769c233fdc8d304dc12",
+  "note": "version 1.0.7 build 13"
 }

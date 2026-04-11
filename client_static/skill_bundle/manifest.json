@@ -1,6 +1,6 @@
 {
   "build": 1,
-  "bundle_url": "http://42.194.209.150/client/skill-bundle/bundles/base_v1.zip",
+  "bundle_url": "https://api.51ins.com/client/skill-bundle/bundles/base_v1.zip",
   "sha256": "eb80d92cfc3b163c612e24b33df864fca3d71eaff2c68abd18e6f8d07a289df7",
   "paths": ["skills/douyin_publish"],
   "note": "若线上地址不是 42.194.209.150，请部署后替换 bundle_url 为实际根 + /client/skill-bundle/bundles/base_v1.zip，并同步更新 lobster_online/.env 中 SKILL_BUNDLE_MANIFEST_URL"

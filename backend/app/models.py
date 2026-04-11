@@ -145,6 +145,8 @@ class WecomConfig(Base):
     corp_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     """应用 secret，用于获取 access_token 并调用「发送应用消息」接口（轮询模式下推送回复）。"""
     secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    """通讯录同步 Secret，用于获取通讯录 access_token（与应用 secret 不同）。"""
+    contacts_secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     """应用 AgentId（数字），发送应用消息时必填；未填则依赖消息体内的 AgentID。"""
     agent_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_knowledge: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

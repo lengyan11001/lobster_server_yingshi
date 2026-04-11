@@ -257,7 +257,7 @@ def _migrate_user_wecom_userid():
 
 
 def _migrate_wecom_config_secret():
-    """Add secret column to wecom_configs if missing (用于轮询模式下发送应用消息)."""
+    """Add secret, contacts_secret columns to wecom_configs if missing."""
     from sqlalchemy import text
     try:
         with engine.connect() as conn:
@@ -265,6 +265,9 @@ def _migrate_wecom_config_secret():
             cols = [row[1] for row in r]
             if "secret" not in cols:
                 conn.execute(text("ALTER TABLE wecom_configs ADD COLUMN secret VARCHAR(255)"))
+                conn.commit()
+            if "contacts_secret" not in cols:
+                conn.execute(text("ALTER TABLE wecom_configs ADD COLUMN contacts_secret VARCHAR(255)"))
                 conn.commit()
     except Exception as e:
         logger.warning("Migration wecom_configs.secret skipped: %s", e)

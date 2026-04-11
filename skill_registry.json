@@ -154,6 +154,81 @@
       "capabilities": {},
       "tags": ["publish", "accounts"]
     },
+    "comfly_ecommerce_detail_skill": {
+      "name": "电商详情页",
+      "description": "商品主图一键生成电商详情页长图：自动分析商品卖点，生成多张详情页并拼接为长图，素材自动入库。与带货TVC同源 Comfly 流水线，需配置 Key。",
+      "type": "builtin",
+      "store_visibility": "debug",
+      "status": "available",
+      "package_config": {
+        "analysis_model": "gemini-2.5-pro",
+        "image_model": "nano-banana-2",
+        "page_count": 12,
+        "aspect_ratio": "9:16"
+      },
+      "capabilities": {
+        "comfly.ecommerce.detail_pipeline": {
+          "description": "电商详情页生成流水线：run_pipeline 同步执行、start_pipeline 异步启动、poll_pipeline 轮询进度直至完成。",
+          "upstream": "local",
+          "upstream_tool": "invoke",
+          "enabled": true,
+          "is_default": false,
+          "unit_credits": 0,
+          "arg_schema": {
+            "type": "object",
+            "properties": {
+              "action": { "type": "string", "enum": ["run_pipeline", "start_pipeline", "poll_pipeline"] },
+              "job_id": { "type": "string" },
+              "asset_id": { "type": "string" },
+              "image_url": { "type": "string" },
+              "reference_asset_ids": { "type": "array", "items": { "type": "string" } },
+              "reference_image_urls": { "type": "array", "items": { "type": "string" } },
+              "page_count": { "type": "integer" },
+              "auto_save": { "type": "boolean" },
+              "platform": { "type": "string" },
+              "country": { "type": "string" },
+              "language": { "type": "string" },
+              "analysis_model": { "type": "string" },
+              "image_model": { "type": "string" },
+              "output_dir": { "type": "string" },
+              "isolate_job_dir": { "type": "boolean" }
+            }
+          }
+        }
+      },
+      "tags": ["image", "ecommerce", "detail", "long-image", "comfly", "credential_package"]
+    },
+    "ecommerce_publish_skill": {
+      "name": "商品发布",
+      "description": "5大电商平台商品发布助手：抖店、小红书千帆、1688、淘宝、拼多多。配置店铺账号后，会话中可调用素材生成技能生成主图和详情图，自动打开浏览器填写商品信息，等待用户确认后手动点发布。",
+      "type": "builtin",
+      "store_visibility": "debug",
+      "status": "available",
+      "capabilities": {
+        "ecommerce.publish": {
+          "description": "电商商品发布：自动打开对应平台商家后台的商品创建页面，填写商品信息（标题、主图、详情图、价格等），但不自动提交，等待用户手动确认发布。",
+          "upstream": "local",
+          "upstream_tool": "invoke",
+          "enabled": true,
+          "is_default": false,
+          "unit_credits": 0,
+          "arg_schema": {
+            "type": "object",
+            "properties": {
+              "action": { "type": "string", "enum": ["open_product_form", "list_shop_accounts"] },
+              "platform": { "type": "string", "enum": ["douyin_shop", "xiaohongshu_shop", "alibaba1688", "taobao", "pinduoduo"] },
+              "account_nickname": { "type": "string" },
+              "title": { "type": "string" },
+              "main_image_asset_ids": { "type": "array", "items": { "type": "string" } },
+              "detail_image_asset_ids": { "type": "array", "items": { "type": "string" } },
+              "price": { "type": "string" },
+              "category": { "type": "string" }
+            }
+          }
+        }
+      },
+      "tags": ["ecommerce", "publish", "shop", "product"]
+    },
     "sutui_mcp": {
       "name": "速推 MCP",
       "description": "图片生成、视频解析、语音合成、模型搜索等 AI 创作能力",
