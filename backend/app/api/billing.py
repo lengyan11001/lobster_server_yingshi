@@ -464,8 +464,11 @@ async def create_fubei_recharge_order(
             data = json.loads(data)
         except Exception:
             data = {}
-    qr_code = (data.get("qr_code") or data.get("code_url") or data.get("qr_url") or "").strip()
-    fubei_order_sn = (data.get("order_sn") or "").strip()
+    qr_code = (
+        data.get("qr_code") or data.get("code_url") or data.get("qr_url")
+        or data.get("prepay_url") or ""
+    ).strip()
+    fubei_order_sn = (data.get("order_sn") or data.get("sn") or "").strip()
     if not qr_code:
         logger.warning("[fubei] precreate no qr_code in data=%s", list(data.keys()))
         raise HTTPException(status_code=502, detail="付呗下单成功但未返回收款码，请稍后重试")
