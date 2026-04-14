@@ -334,7 +334,7 @@ async def create_publish_task(
 ):
     logger.info("[PUBLISH-API] 请求: asset_id=%s account_nickname=%s", body.asset_id, body.account_nickname)
     asset = None
-    text_only = not (body.asset_id or "").strip()
+    text_only = not str(body.asset_id or "").strip()
     if not text_only:
         asset = db.query(Asset).filter(
             Asset.asset_id == body.asset_id,

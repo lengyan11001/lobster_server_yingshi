@@ -2435,7 +2435,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 err_obj = upstream_resp.get("error")
                 if isinstance(err_obj, dict):
                     upstream_error = str(err_obj.get("message") or "")[:500]
-            poll_task_id = (payload.get("task_id") or payload.get("taskId") or "").strip()
+            poll_task_id = str(payload.get("task_id") or payload.get("taskId") or "").strip()
             create_billed_amount_peek = quantize_credits(0)
             if upstream_tool == "get_result" and poll_task_id:
                 create_billed_amount_peek = _peek_task_billed_credits(poll_task_id)

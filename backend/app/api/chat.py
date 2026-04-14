@@ -289,7 +289,7 @@ async def _exec_tool(
         if capability_id == "task.get_result":
             logger.info(
                 "[素材] MCP 请求 capability_id=%s task_id=%s",
-                capability_id, (pl.get("task_id") or "").strip() or "(空)",
+                capability_id, str(pl.get("task_id") or "").strip() or "(空)",
             )
         else:
             logger.info(
@@ -828,22 +828,22 @@ def _extract_task_id_from_result(result_text: str) -> str:
         d = json.loads(raw) if raw.startswith("{") else {}
         if not d:
             return ""
-        tid = (d.get("task_id") or "").strip()
+        tid = str(d.get("task_id") or "").strip()
         if tid:
             return tid
         upstream = d.get("result")
         if isinstance(upstream, dict):
-            tid = (upstream.get("task_id") or "").strip()
+            tid = str(upstream.get("task_id") or "").strip()
             if tid:
                 return tid
             inner_result = upstream.get("result")
             if isinstance(inner_result, dict):
                 content = inner_result.get("content") or []
                 if content and isinstance(content[0], dict):
-                    t = (content[0].get("text") or "").strip()
+                    t = str(content[0].get("text") or "").strip()
                     if t.startswith("{"):
                         obj = json.loads(t)
-                        tid = (obj.get("task_id") or "").strip()
+                        tid = str(obj.get("task_id") or "").strip()
                         if tid:
                             return tid
         return ""
@@ -910,7 +910,7 @@ async def _poll_task_until_terminal_then_retry_video_on_504(
 
     while True:
         pl = gr_args.get("payload") if isinstance(gr_args.get("payload"), dict) else {}
-        task_id = (pl.get("task_id") or "").strip()
+        task_id = str(pl.get("task_id") or "").strip()
 
         if _is_task_result_in_progress(res):
             waited = 0
@@ -1182,7 +1182,7 @@ async def _chat_openai(
                 ):
                     poll_interval = 15
                     max_wait_sec = _POLL_MAX_WAIT_GENERIC
-                    task_id = (a.get("task_id") or a.get("payload", {}).get("task_id") or "").strip() if isinstance(a.get("payload"), dict) else (a.get("task_id") or "").strip()
+                    task_id = str(a.get("task_id") or a.get("payload", {}).get("task_id") or "").strip() if isinstance(a.get("payload"), dict) else str(a.get("task_id") or "").strip()
                     logger.info("[素材] task.get_result 自动轮询开始 task_id=%s interval=%ds max_wait=%ds", task_id or "(无)", poll_interval, max_wait_sec)
                     res = await _poll_task_until_terminal_then_retry_video_on_504(
                         initial_res=res,
@@ -1334,7 +1334,7 @@ async def _chat_openai(
                     poll_interval = 15
                     max_wait_sec = _POLL_MAX_WAIT_GENERIC
                     args = tc_info["arguments"]
-                    task_id = (args.get("task_id") or ((args.get("payload") or {}).get("task_id") if isinstance(args.get("payload"), dict) else None) or "").strip()
+                    task_id = str(args.get("task_id") or ((args.get("payload") or {}).get("task_id") if isinstance(args.get("payload"), dict) else None) or "").strip()
                     logger.info("[素材] task.get_result 自动轮询开始(text_calls) task_id=%s interval=%ds", task_id or "(无)", poll_interval)
                     res = await _poll_task_until_terminal_then_retry_video_on_504(
                         initial_res=res,
