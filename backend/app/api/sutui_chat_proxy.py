@@ -261,29 +261,51 @@ def _optimize_request_body(body: dict) -> int:
     return saved_chars
 
 
-def _messages_already_called_search_models(messages: Any) -> bool:
+def _messages_already_ran_search_models(messages: Any) -> bool:
     """
-    防止 LLM 在同一轮“查询有哪些模型”里反复调用 sutui.search_models 导致客户端一直显示“正在处理中”。
-    只要历史 messages 中出现过该能力的调用/结果，即认为“已查过一次”，后续强制 tool_choice=none。
+    防止同一轮对话里反复调用 sutui.search_models。
+
+    只在“已经真正执行过一次 search_models（出现 tool 结果/工具回传）”后才认为已完成，
+    这样不会误伤首次查询（否则会导致模型拿不到 tools，只能用文本伪造一段 JSON 工具调用）。
     """
     if not isinstance(messages, list) or not messages:
         return False
-    # 兼容 OpenAI tool_calls 以及把 tool_calls 文本化的情况（DSML/function_calls）。
-    needles = ("sutui.search_models", "\"sutui.search_models\"", "capability_id\": \"sutui.search_models\"")
-    for m in messages[-16:]:
+
+    needles = ("sutui.search_models", "capability_id\": \"sutui.search_models\"")
+    for m in messages[-24:]:
         if not isinstance(m, dict):
             continue
-        c = m.get("content")
-        if isinstance(c, str):
-            low = c
-            if any(n in low for n in needles):
+        role = (m.get("role") or "").strip().lower()
+
+        # OpenAI: tool role message content often contains tool result JSON/text
+        if role == "tool":
+            c = m.get("content")
+            if isinstance(c, str) and any(n in c for n in needles):
                 return True
-        elif isinstance(c, list):
-            for part in c:
-                if isinstance(part, dict):
-                    txt = part.get("text")
-                    if isinstance(txt, str) and any(n in txt for n in needles):
+            # some gateways use list parts
+            if isinstance(c, list):
+                for part in c:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str) and any(
+                        n in part["text"] for n in needles
+                    ):
                         return True
+
+        # Also accept assistant message that includes tool_calls array (structured)
+        if role == "assistant":
+            tcs = m.get("tool_calls")
+            if isinstance(tcs, list):
+                for tc in tcs:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function")
+                    if not isinstance(fn, dict):
+                        continue
+                    if (fn.get("name") or "").strip() != "invoke_capability":
+                        continue
+                    args = fn.get("arguments")
+                    if isinstance(args, str) and "sutui.search_models" in args:
+                        return True
+
     return False
 
 
@@ -292,7 +314,7 @@ def _enforce_single_search_models_tool_call(body: Dict[str, Any], trace_id: str)
     if not isinstance(tools, list) or not tools:
         return
     msgs = body.get("messages")
-    if not _messages_already_called_search_models(msgs):
+    if not _messages_already_ran_search_models(msgs):
         return
     # 已经查过一次：不再允许再次 tool_call，让模型直接总结已有 tool_result。
     prev = body.get("tool_choice")
