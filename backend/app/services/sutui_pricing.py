@@ -271,11 +271,31 @@ def estimate_credits_from_pricing(pricing: dict, params: Optional[dict]) -> int:
             return _quantize_credits(raw)
         return _quantize_credits(float(base))
 
-    if price_type == "audio_duration_based":
+    if price_type in ("audio_duration_based", "audio_duration"):
         d = _duration_seconds_from_params(params)
         if d <= 0:
             return _quantize_credits(float(base))
         return _quantize_credits(float(math.ceil(d * float(base))))
+
+    if price_type == "char_based":
+        char_count = 0
+        prompt = params.get("prompt") or params.get("text") or ""
+        if isinstance(prompt, str):
+            char_count = len(prompt)
+        if char_count <= 0:
+            char_count = 100
+        units = math.ceil(char_count / 1000.0)
+        return _quantize_credits(float(units * base))
+
+    if price_type in ("resolution_quantity", "size_based"):
+        n = params.get("num_images") or params.get("n") or params.get("batch_size") or 1
+        try:
+            n_int = int(n)
+        except (TypeError, ValueError):
+            n_int = 1
+        if n_int < 1:
+            n_int = 1
+        return base * n_int
 
     return _quantize_credits(float(base))
 
