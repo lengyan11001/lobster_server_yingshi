@@ -2133,6 +2133,8 @@ async def chat_endpoint(
     for m in (payload.history or []):
         if m.role in ("user", "assistant") and (m.content or "").strip():
             content = m.content.strip()
+            if m.role == "assistant" and content.startswith("错误："):
+                continue
             if len(content) > MAX_HISTORY_MESSAGE_CHARS:
                 content = (
                     content[: MAX_HISTORY_MESSAGE_CHARS // 2].rstrip()
@@ -2301,6 +2303,8 @@ async def _chat_stream_events(
         for m in (payload.history or []):
             if m.role in ("user", "assistant") and (m.content or "").strip():
                 content = m.content.strip()
+                if m.role == "assistant" and content.startswith("错误："):
+                    continue
                 if len(content) > MAX_HISTORY_MESSAGE_CHARS:
                     content = (
                         content[: MAX_HISTORY_MESSAGE_CHARS // 2].rstrip()
