@@ -529,6 +529,57 @@ def _reply_for_user(reply: str) -> str:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Generation early-finish: 纯生成（图片/视频）完成后直接返回，不再跑多余 LLM 轮次
+# ---------------------------------------------------------------------------
+
+def _user_text_requests_publish(text: str) -> bool:
+    s = (text or "").strip()
+    if not s:
+        return False
+    if "发布" in s or "上传" in s or "投稿" in s:
+        return True
+    platforms = (
+        "抖音", "快手", "小红书", "b站", "B站", "视频号", "微博", "tiktok", "TikTok",
+        "youtube", "YouTube", "instagram", "Instagram",
+    )
+    return any(p in s for p in platforms)
+
+
+def _tool_call_requests_publish(fn_name: str, args: Dict[str, Any]) -> bool:
+    n = (fn_name or "").strip()
+    if n == "publish_content":
+        return True
+    if n != "invoke_capability":
+        return False
+    cap = (args.get("capability_id") or "").strip().lower()
+    return "publish" in cap
+
+
+def _round_has_publish_intent(tcs: List[Dict[str, Any]], last_user_content: str) -> bool:
+    if _user_text_requests_publish(last_user_content):
+        return True
+    for tc in tcs or []:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        try:
+            a = json.loads(fn.get("arguments") or "{}")
+        except Exception:
+            a = {}
+        if not isinstance(a, dict):
+            a = {}
+        if _tool_call_requests_publish(name, a):
+            return True
+    return False
+
+
+def _last_user_content(msgs: List[Dict]) -> str:
+    for m in reversed(msgs):
+        if m.get("role") == "user":
+            return (m.get("content") or "").strip()
+    return ""
+
+
 # 速推 task.get_result 状态：先判进行中再判终态，避免「未完成」等误判
 _TASK_TERMINAL_STATUSES = (
     "success", "completed", "done", "succeeded", "finished",
@@ -1080,6 +1131,10 @@ async def _chat_openai(
 
         if tcs:
             cur.append(msg)
+            last_user_text = _last_user_content(cur)
+            _wants_publish = _round_has_publish_intent(tcs, last_user_text)
+            _gen_saved: Optional[List[Dict[str, Any]]] = None
+            _gen_cap = ""
             for tc in tcs:
                 fn = tc.get("function", {})
                 try:
@@ -1225,6 +1280,24 @@ async def _chat_openai(
                     "tool_call_id": tc.get("id", ""),
                     "content": res,
                 })
+                if (
+                    fn.get("name") == "invoke_capability"
+                    and cap in ("image.generate", "video.generate")
+                    and res
+                    and '"error"' not in res
+                ):
+                    try:
+                        _sa = _extract_saved_assets_from_task_result(res)
+                    except Exception:
+                        _sa = []
+                    if _sa:
+                        _gen_saved = _sa
+                        _gen_cap = cap
+            # 纯生成（无发布意图）且已拿到 saved_assets → 直接返回，不再跑多余 LLM 轮次
+            if not _wants_publish and _gen_saved and _gen_cap in ("image.generate", "video.generate"):
+                kind = "图片" if _gen_cap == "image.generate" else "视频"
+                logger.info("[CHAT] generation_early_finish: %s saved_assets=%d, skipping extra LLM round", _gen_cap, len(_gen_saved))
+                return f"{kind}已生成完成。"
             continue
 
         content = (msg.get("content") or "").strip()
@@ -1236,12 +1309,16 @@ async def _chat_openai(
             preamble = _strip_dsml(content)
             cur.append({"role": "assistant", "content": preamble or "正在调用工具..."})
             results = []
+            _tc_wants_pub = _user_text_requests_publish(_last_user_content(cur))
+            _tc_gen_saved: Optional[List[Dict[str, Any]]] = None
+            _tc_gen_cap = ""
             for tc_info in text_calls:
                 _inject_video_media_urls(tc_info["arguments"], attachment_urls or [])
                 logger.info("[CHAT] text_tool_call: %s(%s)", tc_info["name"], list(tc_info["arguments"].keys()))
                 cap = (tc_info["arguments"].get("capability_id") or "").strip()
                 if cap in ("image.generate", "video.generate", "task.get_result"):
                     logger.info("[素材] 模型请求工具(text_calls) capability_id=%s", cap)
+                _tc_wants_pub = _tc_wants_pub or _tool_call_requests_publish(tc_info["name"], tc_info["arguments"])
                 res = await _exec_tool_with_balance(
                     tc_info["name"], tc_info["arguments"], token, sutui_token, progress_cb, db, user_id,
                 )
@@ -1373,6 +1450,23 @@ async def _chat_openai(
                         except Exception:
                             pass
                 results.append(f"[{tc_info['name']}] {res}")
+                if (
+                    tc_info["name"] == "invoke_capability"
+                    and cap in ("image.generate", "video.generate")
+                    and res
+                    and '"error"' not in res
+                ):
+                    try:
+                        _tsa = _extract_saved_assets_from_task_result(res)
+                    except Exception:
+                        _tsa = []
+                    if _tsa:
+                        _tc_gen_saved = _tsa
+                        _tc_gen_cap = cap
+            if not _tc_wants_pub and _tc_gen_saved and _tc_gen_cap in ("image.generate", "video.generate"):
+                kind = "图片" if _tc_gen_cap == "image.generate" else "视频"
+                logger.info("[CHAT] generation_early_finish(text_calls): %s saved_assets=%d", _tc_gen_cap, len(_tc_gen_saved))
+                return f"{kind}已生成完成。"
             cur.append({"role": "user", "content": "工具调用结果:\n" + "\n\n".join(results) + "\n\n请根据以上结果回答用户。"})
             continue
 
@@ -1417,6 +1511,9 @@ async def _chat_openai(
                 if tcs2:
                     logger.info("[CHAT] forced retry produced %d tool_calls", len(tcs2))
                     cur.append(msg2)
+                    _fr_wants_pub = _round_has_publish_intent(tcs2, _last_user_content(cur))
+                    _fr_gen_saved: Optional[List[Dict[str, Any]]] = None
+                    _fr_gen_cap = ""
                     for tc in tcs2:
                         fn = tc.get("function", {})
                         try:
@@ -1520,6 +1617,23 @@ async def _chat_openai(
                             "tool_call_id": tc.get("id", ""),
                             "content": res,
                         })
+                        if (
+                            fn.get("name") == "invoke_capability"
+                            and cap_f in ("image.generate", "video.generate")
+                            and res
+                            and '"error"' not in res
+                        ):
+                            try:
+                                _fsa = _extract_saved_assets_from_task_result(res)
+                            except Exception:
+                                _fsa = []
+                            if _fsa:
+                                _fr_gen_saved = _fsa
+                                _fr_gen_cap = cap_f
+                    if not _fr_wants_pub and _fr_gen_saved and _fr_gen_cap in ("image.generate", "video.generate"):
+                        kind = "图片" if _fr_gen_cap == "image.generate" else "视频"
+                        logger.info("[CHAT] generation_early_finish(forced): %s saved_assets=%d", _fr_gen_cap, len(_fr_gen_saved))
+                        return f"{kind}已生成完成。"
                     continue
                 else:
                     logger.warning("[CHAT] forced retry still no tool_calls")
