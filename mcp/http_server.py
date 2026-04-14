@@ -1839,6 +1839,12 @@ def _extract_media_urls_for_auto_save(upstream_resp: Any) -> List[str]:
     return _reorder_cdn_urls_for_autosave(order)[:12]
 
 
+_NO_AUTO_SAVE_CAPABILITIES = frozenset({
+    "sutui.search_models",
+    "sutui.guide",
+    "sutui.transfer_url",
+})
+
 async def _auto_save_generated_assets(
     upstream_resp: Any, capability_id: str, payload: Dict, token: Optional[str],
     request: Optional[Request] = None,
@@ -1846,8 +1852,7 @@ async def _auto_save_generated_assets(
     """Extract media URLs from upstream result and auto-save as local assets."""
     if not token:
         return []
-    # 转存能力：响应里常同时含临时 mcp-images 与任务直链；对话/轮询会多次调用，每次自动入库会刷出大量重复素材。
-    if capability_id == "sutui.transfer_url":
+    if capability_id in _NO_AUTO_SAVE_CAPABILITIES:
         return []
     urls = _prefer_stable_urls_for_autosave(_extract_media_urls_for_auto_save(upstream_resp))
     if not urls:

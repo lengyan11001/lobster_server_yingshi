@@ -1021,8 +1021,12 @@ async def _chat_openai(
     user_id: Optional[int] = None,
 ) -> str:
     """OpenAI-compatible chat loop (DeepSeek, OpenAI, Google Gemini)."""
-    base = cfg["base_url"].rstrip("/")
-    if "googleapis.com" in base or base.endswith("/v1"):
+    base = (cfg.get("base_url") or "").rstrip("/")
+    # Server-side sutui-chat proxy: OpenAI-compatible body, but endpoint is /api/sutui-chat/completions
+    # (not /v1/chat/completions). This proxy implements "direct deepseek first, then xskill fallback".
+    if base.endswith("/api/sutui-chat"):
+        url = f"{base}/completions"
+    elif "googleapis.com" in base or base.endswith("/v1"):
         url = f"{base}/chat/completions"
     else:
         url = f"{base}/v1/chat/completions"
@@ -2030,7 +2034,23 @@ async def chat_endpoint(
     t0 = time.perf_counter()
 
     # ── Primary path: direct LLM API with MCP tools ──
-    cfg = _resolve_config(resolve_model) if resolve_model else None
+    cfg = None
+    # Online edition: prefer server-side sutui-chat proxy (direct DeepSeek if configured, else xskill fallback).
+    if edition == "online":
+        try:
+            base_self = str(request.base_url).rstrip("/")
+        except Exception:
+            base_self = ""
+        if base_self:
+            cfg = {
+                "base_url": f"{base_self}/api/sutui-chat",
+                "api_key": raw_token,
+                "model_name": "deepseek-chat",
+                "provider": "sutui-chat",
+            }
+    if cfg is None:
+        cfg = _resolve_config(resolve_model) if resolve_model else None
+
     if cfg:
         try:
             logger.info("[对话] 请求 model=%s tools=%d", model, len(mcp_tools))

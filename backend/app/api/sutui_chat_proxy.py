@@ -261,6 +261,50 @@ def _optimize_request_body(body: dict) -> int:
     return saved_chars
 
 
+def _messages_already_called_search_models(messages: Any) -> bool:
+    """
+    防止 LLM 在同一轮“查询有哪些模型”里反复调用 sutui.search_models 导致客户端一直显示“正在处理中”。
+    只要历史 messages 中出现过该能力的调用/结果，即认为“已查过一次”，后续强制 tool_choice=none。
+    """
+    if not isinstance(messages, list) or not messages:
+        return False
+    # 兼容 OpenAI tool_calls 以及把 tool_calls 文本化的情况（DSML/function_calls）。
+    needles = ("sutui.search_models", "\"sutui.search_models\"", "capability_id\": \"sutui.search_models\"")
+    for m in messages[-16:]:
+        if not isinstance(m, dict):
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            low = c
+            if any(n in low for n in needles):
+                return True
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict):
+                    txt = part.get("text")
+                    if isinstance(txt, str) and any(n in txt for n in needles):
+                        return True
+    return False
+
+
+def _enforce_single_search_models_tool_call(body: Dict[str, Any], trace_id: str) -> None:
+    tools = body.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return
+    msgs = body.get("messages")
+    if not _messages_already_called_search_models(msgs):
+        return
+    # 已经查过一次：不再允许再次 tool_call，让模型直接总结已有 tool_result。
+    prev = body.get("tool_choice")
+    body["tool_choice"] = "none"
+    body.pop("tools", None)
+    logger.info(
+        "[chat_trace] trace_id=%s enforce_single_search_models tool_choice %r -> none (tools stripped)",
+        trace_id,
+        prev,
+    )
+
+
 def _strip_provider_prefix(mid: str) -> str:
     """速推 model id 不带 provider 前缀（如 claude-opus-4-6 而非 anthropic/claude-opus-4-6）。"""
     for pfx in _SUTUI_PROVIDER_PREFIXES:
@@ -865,6 +909,7 @@ async def sutui_chat_completions(
 
     _remap_sutui_chat_model(body)
     _optimize_request_body(body)
+    _enforce_single_search_models_tool_call(body, trace_id)
 
     bm = brand_mark_for_jwt_claim(getattr(current_user, "brand_mark", None))
     if bm not in ("bihuo", "yingshi"):
