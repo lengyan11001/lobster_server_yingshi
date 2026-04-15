@@ -330,6 +330,12 @@ def pre_deduct(
         )
         _multiplier = _get_user_price_multiplier()
         est_d = quantize_credits(float(est_d) * _multiplier)
+        db.refresh(current_user)
+        if user_balance_decimal(current_user) < est_d:
+            raise HTTPException(
+                status_code=402,
+                detail=f"积分不足：本次需 {float(est_d)} 积分（模型估价×{_multiplier:.0f}），当前余额 {float(user_balance_decimal(current_user))}。请先充值。",
+            )
         current_user.credits = user_balance_decimal(current_user) - est_d
         bal = quantize_credits(current_user.credits)
         _recon = _sutui_recon_for_ledger(

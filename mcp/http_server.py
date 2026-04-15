@@ -2677,15 +2677,18 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             if (
                 upstream_tool == "generate"
                 and not upstream_error
-                and settle_final > 0
+                and (settle_final > 0 or pre_deduct_amount > 0)
                 and isinstance(upstream_resp, dict)
             ):
                 created_tid = _extract_task_id_from_sutui_response(upstream_resp)
                 if created_tid:
-                    _remember_task_billed_credits(created_tid, settle_final)
+                    refund_on_fail = pre_deduct_amount if pre_deduct_amount > 0 else settle_final
+                    _remember_task_billed_credits(created_tid, refund_on_fail)
                     logger.info(
-                        "[MCP] 已记录创建任务扣费 task_id=%s credits=%s（失败时凭 task_id 退款）",
+                        "[MCP] 已记录创建任务扣费 task_id=%s credits=%s pre_deduct=%s settle=%s（失败时凭 task_id 退款）",
                         created_tid,
+                        refund_on_fail,
+                        pre_deduct_amount,
                         settle_final,
                     )
             logger.info("[MCP] invoke_capability 完成 capability_id=%s latency_ms=%s ok=%s", capability_id, latency_ms, not bool(upstream_error))
