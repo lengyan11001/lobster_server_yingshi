@@ -327,6 +327,8 @@ def _heuristic_video_model(model: str, has_image: bool) -> str:
         return "wan/v2.7/image-to-video" if has_image else "wan/v2.7/text-to-video"
 
     if "veo" in model_lower:
+        if "fast" in model_lower:
+            return model
         return "fal-ai/veo3.1"
 
     if "grok" in model_lower:

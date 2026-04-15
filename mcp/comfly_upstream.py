@@ -228,7 +228,14 @@ async def call_comfly_video_generate(
     api_format = (entry.get("api_format") or "unified_video").strip()
 
     prompt = (payload.get("prompt") or "").strip()
-    duration = payload.get("duration") or payload.get("seconds") or 5
+    _raw_dur = payload.get("duration") or payload.get("seconds") or 5
+    try:
+        if isinstance(_raw_dur, str) and _raw_dur.strip().lower().endswith("s"):
+            duration = int(_raw_dur.strip().lower().rstrip("s"))
+        else:
+            duration = int(_raw_dur)
+    except (ValueError, TypeError):
+        duration = 5
 
     headers = {
         "Authorization": f"Bearer {key}",
