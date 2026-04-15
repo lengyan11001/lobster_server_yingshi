@@ -4,7 +4,9 @@
 invoke_capability 顺序触发，不在此之外再实现第二套扣费。
 """
 import json
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -23,6 +25,25 @@ from .installation_slots import installation_slots_enabled, parse_installation_i
 from .skills import user_can_use_capability
 
 router = APIRouter()
+
+_PRICING_JSON_PATH = Path(__file__).resolve().parent.parent.parent.parent / "comfly_pricing.json"
+
+
+def _get_user_price_multiplier() -> float:
+    """用户消耗 = 采购价 × 倍率。优先环境变量，其次 comfly_pricing.json，默认 3。"""
+    env_val = os.environ.get("USER_PRICE_MULTIPLIER", "").strip()
+    if env_val:
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
+    try:
+        if _PRICING_JSON_PATH.exists():
+            data = json.loads(_PRICING_JSON_PATH.read_text("utf-8"))
+            return float(data.get("user_price_multiplier_default", 3))
+    except Exception:
+        pass
+    return 3.0
 
 
 def _installation_id_for_capability_checks(x_installation_id: Optional[str]) -> Optional[str]:
@@ -307,6 +328,8 @@ def pre_deduct(
             params,
             action_label="素材生成",
         )
+        _multiplier = _get_user_price_multiplier()
+        est_d = quantize_credits(float(est_d) * _multiplier)
         current_user.credits = user_balance_decimal(current_user) - est_d
         bal = quantize_credits(current_user.credits)
         _recon = _sutui_recon_for_ledger(
@@ -321,13 +344,14 @@ def pre_deduct(
             -est_d,
             "pre_deduct",
             bal,
-            description="能力预扣（按模型估价）",
+            description=f"能力预扣（按模型估价×{_multiplier:.0f}）",
             ref_type="capability",
             meta={
                 **(_recon or {}),
                 "capability_id": body.capability_id,
                 "model": model,
                 "pre_estimated": credits_json_float(est_d),
+                "price_multiplier": _multiplier,
             },
         )
         db.commit()

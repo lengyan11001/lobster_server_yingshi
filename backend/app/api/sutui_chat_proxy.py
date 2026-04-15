@@ -1001,8 +1001,8 @@ async def sutui_chat_completions(
     out_req_for_audit = clip_openai_chat_completions_json_for_audit(body)
 
     # ── Build attempts list: direct API first, then xskill fallback ──
-    _DIRECT_TIMEOUT = 60.0
-    _XSKILL_TIMEOUT = 60.0
+    _DIRECT_TIMEOUT = 180.0
+    _XSKILL_TIMEOUT = 180.0
     attempts: List[Dict[str, Any]] = []
     for mid in model_candidates:
         dr = _get_direct_route(mid)
