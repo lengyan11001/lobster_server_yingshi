@@ -247,7 +247,10 @@ def pre_deduct(
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
     idem_key = _billing_idempotency_key(request)
-    iid = _installation_id_for_capability_checks(x_installation_id)
+    if body.dry_run:
+        iid = (x_installation_id or "").strip() or None
+    else:
+        iid = _installation_id_for_capability_checks(x_installation_id)
     if not user_can_use_capability(db, current_user.id, body.capability_id, iid):
         raise HTTPException(
             status_code=403,
