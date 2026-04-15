@@ -166,6 +166,7 @@ class PreDeductIn(BaseModel):
     sutui_pool: Optional[str] = None
     sutui_token_ref: Optional[str] = None
     force_credits: Optional[float] = None
+    dry_run: bool = False
 
 
 def _sutui_recon_for_ledger(
@@ -275,6 +276,8 @@ def pre_deduct(
     # ── force_credits: MCP 已算好金额（Comfly 路由等场景）──
     if body.force_credits is not None and body.force_credits > 0:
         fc = quantize_credits(body.force_credits)
+        if body.dry_run:
+            return {"credits_charged": credits_json_float(fc), "dry_run": True, "model": body.model or ""}
         db.refresh(current_user)
         if user_balance_decimal(current_user) < fc:
             raise HTTPException(
@@ -330,6 +333,8 @@ def pre_deduct(
         )
         _multiplier = _get_user_price_multiplier()
         est_d = quantize_credits(float(est_d) * _multiplier)
+        if body.dry_run:
+            return {"credits_charged": credits_json_float(est_d), "dry_run": True, "model": model}
         db.refresh(current_user)
         if user_balance_decimal(current_user) < est_d:
             raise HTTPException(
@@ -368,6 +373,8 @@ def pre_deduct(
     unit_credits = int(cap.unit_credits or 0) if cap else 0
     if unit_credits <= 0:
         return {"credits_charged": 0}
+    if body.dry_run:
+        return {"credits_charged": 0, "dry_run": True, "model": body.model or ""}
     db.refresh(current_user)
     uc = quantize_credits(unit_credits)
     if user_balance_decimal(current_user) < uc:
