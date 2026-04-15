@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import sys
 import uuid
 from decimal import Decimal
 from collections import OrderedDict
@@ -16,6 +17,10 @@ from pathlib import Path
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+_MCP_DIR = str(Path(__file__).resolve().parent)
+if _MCP_DIR not in sys.path:
+    sys.path.insert(0, _MCP_DIR)
 
 import httpx
 
