@@ -91,17 +91,41 @@ def lookup_comfly_model(model_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def should_route_to_comfly(capability_id: str, model_id: str) -> bool:
-    """判断是否应将请求路由到 Comfly。"""
+def should_route_to_comfly(capability_id: str, model_id: str, *, sutui_price: Optional[float] = None) -> bool:
+    """判断是否应将请求路由到 Comfly。
+
+    当模型在 Comfly 定价表中且满足以下条件之一时返回 True：
+    1. 速推无此模型（sutui_price_per_unit 未配置且 sutui_price 未传入）
+    2. Comfly 采购价 <= 速推采购价（比价路由）
+    """
     if capability_id not in ("image.generate", "video.generate"):
         return False
     if not is_comfly_configured():
         return False
-    return lookup_comfly_model(model_id) is not None
+    entry = lookup_comfly_model(model_id)
+    if not entry:
+        return False
+    comfly_price = entry.get("price_per_unit")
+    if comfly_price is None:
+        return True
+    comfly_price = float(comfly_price)
+    st_price = sutui_price if sutui_price is not None else entry.get("sutui_price_per_unit")
+    if st_price is None:
+        return True
+    st_price = float(st_price)
+    use_comfly = comfly_price <= st_price
+    logger.info("[Comfly] 比价 model=%s comfly=%.1f sutui=%.1f → %s", model_id, comfly_price, st_price, "comfly" if use_comfly else "sutui")
+    return use_comfly
 
 
 def _user_price_multiplier() -> float:
-    """用户实际消耗 = 采购价 × 倍率。"""
+    """用户实际消耗 = 采购价 × 倍率。优先取环境变量 COMFLY_USER_PRICE_MULTIPLIER，其次 JSON 配置。"""
+    env_val = os.environ.get("COMFLY_USER_PRICE_MULTIPLIER", "").strip()
+    if env_val:
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
     pricing = _load_pricing()
     return float(pricing.get("user_price_multiplier_default", 3))
 

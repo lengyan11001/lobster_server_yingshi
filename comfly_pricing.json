@@ -1,12 +1,13 @@
 {
-  "_doc": "Comfly 定价表：只有出现在此表中的模型才会走 Comfly 中转（否则走速推）。price_type: per_call=每次固定价 / per_second=按时长。api_format: dalle(图片DALL-E格式) / unified_video(统一视频格式) / kling(可灵官方格式)。price_per_unit: 每次或每秒的算力单价（采购价）。comfly_model: Comfly 侧对应的模型名（不填则用 model_id 原值）。user_price_multiplier: 用户实际消耗 = 采购价 × 此倍率（默认 3）。",
+  "_doc": "Comfly 定价表。price_per_unit: Comfly 采购价。sutui_price_per_unit: 速推同模型采购价（可选，填写后会自动比价选便宜的）。user_price_multiplier: 用户消耗 = 采购价 × 倍率（默认用 user_price_multiplier_default）。price_type: per_call / per_second。api_format: dalle / unified_video / kling。comfly_model: Comfly 侧模型名（不填用原值）。",
   "user_price_multiplier_default": 3,
   "models": {
     "veo3.1-fast": {
       "price_type": "per_call",
       "price_per_unit": 20,
       "api_format": "unified_video",
-      "comfly_model": "veo3.1-fast"
+      "comfly_model": "veo3.1-fast",
+      "_note": "速推无此模型，仅 Comfly 可用"
     }
   }
 }
