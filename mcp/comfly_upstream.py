@@ -76,7 +76,9 @@ def is_comfly_configured() -> bool:
 
 
 def lookup_comfly_model(model_id: str) -> Optional[Dict[str, Any]]:
-    """查找模型是否在 Comfly 定价表中。返回定价条目或 None。"""
+    """查找模型是否在 Comfly 定价表中。返回定价条目或 None。
+    支持直接按 Comfly 模型名查找，也支持通过 sutui_equivalent 反查。
+    """
     if not model_id:
         return None
     pricing = _load_pricing()
@@ -87,6 +89,14 @@ def lookup_comfly_model(model_id: str) -> Optional[Dict[str, Any]]:
     low = model_id.lower()
     for k, v in models.items():
         if k.lower() == low:
+            return v
+    for _k, v in models.items():
+        if not isinstance(v, dict):
+            continue
+        eq = v.get("sutui_equivalent")
+        if isinstance(eq, list) and any(e.lower() == low for e in eq if isinstance(e, str)):
+            return v
+        if isinstance(eq, str) and eq.lower() == low:
             return v
     return None
 
