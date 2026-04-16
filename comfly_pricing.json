@@ -9,6 +9,14 @@
       "comfly_model": "veo3.1-fast",
       "sutui_equivalent": ["fal-ai/veo3.1"],
       "_note": "速推无此模型，仅 Comfly 可用；但 fal-ai/veo3.1 是速推侧同系列模型"
+    },
+    "nano-banana-2": {
+      "price_type": "per_call",
+      "price_per_unit": 14,
+      "user_price_multiplier": 3,
+      "api_format": "dalle",
+      "comfly_model": "nano-banana-2",
+      "token_group": "premium"
     }
   }
 }
