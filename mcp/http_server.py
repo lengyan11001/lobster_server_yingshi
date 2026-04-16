@@ -268,6 +268,7 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admi
                 "调用能力(图片生成/视频/语音等)。"
                 "【默认模型】image.generate 用户未指定模型时 payload.model 必须填 \"fal-ai/flux-2/flash\"，禁止自行选择 jimeng。"
                 "video.generate 用户未指定模型时 payload.model 填 \"sora2\"。"
+                "【爆款TVC】用户说TVC/带货视频时不走video.generate，改用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
             ),
             "inputSchema": {
                 "type": "object",
