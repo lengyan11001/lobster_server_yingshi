@@ -137,11 +137,36 @@ def _duration_seconds_from_params(params: Dict[str, Any]) -> float:
     return 0.0
 
 
+_MODEL_SHORT_TO_FULL: Dict[str, str] = {
+    "flux-2": "fal-ai/flux-2/flash",
+    "flux-2/flash": "fal-ai/flux-2/flash",
+    "seedream": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+    "seedream-4.5": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+    "seedream-5": "fal-ai/bytedance/seedream/v5/lite/text-to-image",
+    "nano-banana-pro": "fal-ai/nano-banana-pro",
+    "nano-banana-2": "fal-ai/nano-banana-2",
+    "sora-2": "fal-ai/sora-2/text-to-video",
+    "gemini": "kapon/gemini-3-pro-image-preview",
+    "qwen-image-edit": "fal-ai/qwen-image-edit-2511-multiple-angles",
+}
+
+
+def _resolve_model_alias(mid: str) -> str:
+    """Map short/friendly model names to full SuTui model IDs for pricing lookups."""
+    if mid in _MODEL_SHORT_TO_FULL:
+        return _MODEL_SHORT_TO_FULL[mid]
+    low = mid.lower()
+    for short, full in _MODEL_SHORT_TO_FULL.items():
+        if low == short.lower():
+            return full
+    return mid
+
+
 def fetch_model_docs_data(model_id: str) -> Optional[dict]:
     """GET /api/v3/models/{model_id}/docs 返回的 data 对象（含 pricing）。"""
     if not model_id or not str(model_id).strip():
         return None
-    mid = str(model_id).strip()
+    mid = _resolve_model_alias(str(model_id).strip())
     now = time.time()
     if mid in _DOCS_CACHE:
         ts, data = _DOCS_CACHE[mid]
