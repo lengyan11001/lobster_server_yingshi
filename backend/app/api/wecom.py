@@ -298,8 +298,18 @@ async def wecom_callback_post(
             raise
         parsed = _parse_incoming_xml(msg_xml)
         msg_type = (parsed.get("MsgType") or "").strip().lower()
+        event_type = (parsed.get("Event") or "").strip()
         from_user = (parsed.get("FromUserName") or "").strip()
         to_user = (parsed.get("ToUserName") or "").strip()
+
+        # ── 微信客服事件：kf_msg_or_event ──
+        # 回调仅通知"有新消息"，实际内容由 sync_msg 拉取；此处只需返回 success，不入队
+        if msg_type == "event" and event_type == "kf_msg_or_event":
+            kf_token = (parsed.get("Token") or "").strip()
+            open_kfid = (parsed.get("OpenKfId") or "").strip()
+            logger.info("[WeCom-KF] kf_msg_or_event path=%s open_kfid=%s token=%s", callback_path, open_kfid, kf_token[:20] if kf_token else "")
+            return Response(content="success", media_type="text/plain", status_code=200)
+
         content = (parsed.get("Content") or "").strip()
         if not content and msg_type == "image":
             content = (parsed.get("PicUrl") or "").strip()
