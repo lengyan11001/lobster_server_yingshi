@@ -34,6 +34,15 @@ QYAPI_BASE = "https://qyapi.weixin.qq.com/cgi-bin"
 # ── access_token 缓存（corp_id:secret → (token, expire_ts)）─────────────────
 _token_cache: dict[str, tuple[str, float]] = {}
 
+# ── KF 事件标记：callback_path → 最新事件时间戳 ──────────────────────────────
+_kf_event_flags: dict[str, float] = {}
+
+
+def notify_kf_event(callback_path: str):
+    """微信回调到达时调用，标记该 callback_path 有新 KF 消息。"""
+    _kf_event_flags[callback_path] = time.time()
+    logger.info("[KF] event flag set for %s", callback_path)
+
 
 async def _get_access_token(corp_id: str, secret: str) -> str:
     cache_key = f"{corp_id}:{secret}"
@@ -415,3 +424,28 @@ async def proxy_kf_account_url(
     if data.get("errcode") != 0:
         raise HTTPException(status_code=502, detail=f"获取客服链接失败: {data.get('errmsg', '')}")
     return data
+
+
+# ── KF 事件标记查询/清除（供 lobster_online 高频轮询）──────────────────────────
+
+@router.get("/api/wecom/proxy/kf/has-events", summary="[代理] 检查是否有新 KF 消息事件")
+async def proxy_kf_has_events(
+    callback_path: str = "",
+    _auth: bool = Depends(_check_forward_secret),
+):
+    if callback_path:
+        ts = _kf_event_flags.get(callback_path, 0)
+        return {"has_events": ts > 0, "callback_path": callback_path, "ts": ts}
+    return {"has_events": bool(_kf_event_flags), "flags": dict(_kf_event_flags)}
+
+
+@router.post("/api/wecom/proxy/kf/ack-events", summary="[代理] 清除 KF 事件标记")
+async def proxy_kf_ack_events(
+    callback_path: str = "",
+    _auth: bool = Depends(_check_forward_secret),
+):
+    if callback_path:
+        _kf_event_flags.pop(callback_path, None)
+    else:
+        _kf_event_flags.clear()
+    return {"ok": True}

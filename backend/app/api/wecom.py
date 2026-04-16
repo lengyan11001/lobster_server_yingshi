@@ -308,6 +308,11 @@ async def wecom_callback_post(
             kf_token = (parsed.get("Token") or "").strip()
             open_kfid = (parsed.get("OpenKfId") or "").strip()
             logger.info("[WeCom-KF] kf_msg_or_event path=%s open_kfid=%s token=%s", callback_path, open_kfid, kf_token[:20] if kf_token else "")
+            try:
+                from .wecom_kf import notify_kf_event
+                notify_kf_event(callback_path)
+            except Exception as exc:
+                logger.warning("[WeCom-KF] notify_kf_event failed: %s", exc)
             return Response(content="success", media_type="text/plain", status_code=200)
 
         content = (parsed.get("Content") or "").strip()
