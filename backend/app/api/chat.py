@@ -2120,8 +2120,8 @@ async def chat_endpoint(
         + (
             "【禁止】伪造工具结果、编造URL/asset_id、假装完成操作、用文字代替工具调用。所有操作必须通过调用工具完成。\n\n"
             "【工具调用】\n"
-            "生成图片: invoke_capability(\"image.generate\", {prompt, model:\"jimeng-4.0\"}) → task.get_result(task_id) → saved_assets[0].asset_id\n"
-            "【图片模型】用户指定模型时必须原样传入payload.model。可用图片模型: jimeng-4.0, jimeng-4.5, fal-ai/flux-2/flash"
+            "生成图片: invoke_capability(\"image.generate\", {prompt, model:\"fal-ai/flux-2/flash\"}) → task.get_result(task_id) → saved_assets[0].asset_id\n"
+            "【图片模型】用户未指定模型时默认使用 fal-ai/flux-2/flash。用户指定模型时必须原样传入payload.model。可用图片模型: fal-ai/flux-2/flash, jimeng-4.0, jimeng-4.5"
             + (", " + ", ".join(_get_comfly_image_models()) if _get_comfly_image_models() else "")
             + "。用户说用某模型就传该模型名，禁止替换为default。\n"
             "生成视频: invoke_capability(\"video.generate\", {model:\"sora2\", prompt, duration:5}) → task.get_result 轮询(30-120s)\n"
@@ -2297,8 +2297,8 @@ async def _chat_stream_events(
             + (
                 "【禁止】伪造工具结果、编造URL/asset_id、假装完成操作、用文字代替工具调用。所有操作必须通过调用工具完成。\n\n"
                 "【工具调用】\n"
-                "生成图片: invoke_capability(\"image.generate\", {prompt, model:\"jimeng-4.0\"}) → task.get_result(task_id) → saved_assets[0].asset_id\n"
-                "【图片模型】用户指定模型时必须原样传入payload.model。可用图片模型: jimeng-4.0, jimeng-4.5, fal-ai/flux-2/flash"
+                "生成图片: invoke_capability(\"image.generate\", {prompt, model:\"fal-ai/flux-2/flash\"}) → task.get_result(task_id) → saved_assets[0].asset_id\n"
+                "【图片模型】用户未指定模型时默认使用 fal-ai/flux-2/flash。用户指定模型时必须原样传入payload.model。可用图片模型: fal-ai/flux-2/flash, jimeng-4.0, jimeng-4.5"
                 + (", " + ", ".join(_get_comfly_image_models()) if _get_comfly_image_models() else "")
                 + "。用户说用某模型就传该模型名，禁止替换为default。\n"
                 "生成视频: invoke_capability(\"video.generate\", {model:\"sora2\", prompt, duration:5}) → task.get_result 轮询(30-120s)\n"
