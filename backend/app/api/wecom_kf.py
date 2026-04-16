@@ -359,6 +359,39 @@ async def proxy_kf_service_state_trans(
     return data
 
 
+# ── 获取客户信息 ───────────────────────────────────────────────────────────────
+
+class KfCustomerBatchGetBody(BaseModel):
+    callback_path: str
+    external_userid_list: list[str]
+    need_enter_session_context: int = 0
+
+
+@router.post("/api/wecom/proxy/kf/customer/batchget", summary="[代理] 批量获取客户信息")
+async def proxy_kf_customer_batchget(
+    body: KfCustomerBatchGetBody,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    cfg = _find_config_by_callback(db, body.callback_path)
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    payload: dict[str, Any] = {
+        "external_userid_list": body.external_userid_list,
+    }
+    if body.need_enter_session_context:
+        payload["need_enter_session_context"] = body.need_enter_session_context
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"{QYAPI_BASE}/kf/customer/batchget?access_token={token}",
+            json=payload,
+        )
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"获取客户信息失败: {data.get('errmsg', '')}")
+    return data
+
+
 # ── 获取客服链接 URL（方便前端直接获取二维码入口）────────────────────────────
 
 @router.get("/api/wecom/proxy/kf/account/url", summary="[代理] 获取客服账号二维码链接")
