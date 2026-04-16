@@ -151,6 +151,12 @@ _MODEL_SHORT_TO_FULL: Dict[str, str] = {
 }
 
 
+_LEGACY_PREFIX_REWRITE: Tuple[Tuple[str, str], ...] = (
+    ("sora2pub/", "fal-ai/sora-2/"),
+    ("sprcra/sora-2-vip/", "fal-ai/sora-2/vip/"),
+)
+
+
 def _resolve_model_alias(mid: str) -> str:
     """Map short/friendly model names to full SuTui model IDs for pricing lookups."""
     if mid in _MODEL_SHORT_TO_FULL:
@@ -159,6 +165,9 @@ def _resolve_model_alias(mid: str) -> str:
     for short, full in _MODEL_SHORT_TO_FULL.items():
         if low == short.lower():
             return full
+    for old_prefix, new_prefix in _LEGACY_PREFIX_REWRITE:
+        if low.startswith(old_prefix):
+            return new_prefix + mid[len(old_prefix):]
     return mid
 
 
