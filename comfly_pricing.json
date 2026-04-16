@@ -12,8 +12,7 @@
     },
     "nano-banana-2": {
       "price_type": "per_call",
-      "price_per_unit": 14,
-      "user_price_multiplier": 3,
+      "price_per_unit": 42,
       "api_format": "dalle",
       "comfly_model": "nano-banana-2",
       "token_group": "premium"
