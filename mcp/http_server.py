@@ -2356,7 +2356,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                             is_internal = True
                         elif hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
                             is_internal = True
-                        elif "api.51ins.com" in hostname:
+                        elif "api.51ins.com" in hostname or "bhzn.top" in hostname or "42.194.209.150" in hostname:
                             is_internal = True
                         else:
                             # 尝试解析为 IP 地址，判断是否为内网 IP
