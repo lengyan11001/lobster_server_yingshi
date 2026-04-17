@@ -562,10 +562,21 @@ def fetch_all_media_models() -> list:
         return cached if cached else []
 
     media = [m for m in models if m.get("category") in ("video", "image", "audio")]
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    pricing_map: Dict[str, Optional[dict]] = {}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(fetch_model_pricing, m["id"]): m["id"] for m in media}
+        for fut in as_completed(futures):
+            mid = futures[fut]
+            try:
+                pricing_map[mid] = fut.result()
+            except Exception:
+                pricing_map[mid] = None
+
     results = []
     for m in media:
         mid = m["id"]
-        pricing = fetch_model_pricing(mid)
         results.append({
             "id": mid,
             "name": m.get("name", ""),
@@ -574,7 +585,7 @@ def fetch_all_media_models() -> list:
             "description": m.get("description", ""),
             "isHot": m.get("isHot", False),
             "isNew": m.get("isNew", False),
-            "pricing": pricing,
+            "pricing": pricing_map.get(mid),
         })
 
     _ALL_MODELS_CACHE["data"] = results
