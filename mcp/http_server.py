@@ -2712,6 +2712,19 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
             settle_final = quantize_credits(0) if upstream_error else quantize_credits(actual_used)
 
+            _UNDERSTAND_CAPS_SETTLE = ("image.understand", "video.understand")
+            _settle_multiplier = 1.0
+            if (
+                upstream_name == "sutui"
+                and upstream_tool == "generate"
+                and capability_id not in _UNDERSTAND_CAPS_SETTLE
+            ):
+                try:
+                    from backend.app.api.capabilities import _get_user_price_multiplier
+                    _settle_multiplier = _get_user_price_multiplier()
+                except Exception:
+                    _settle_multiplier = 3.0
+
             if pre_deduct_amount > 0:
                 if (
                     not upstream_error
@@ -2725,15 +2738,16 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     )
                 pre_applied_flag = True
                 bill_credits = pre_deduct_amount
+                actual_user_price = quantize_credits(float(actual_used) * _settle_multiplier) if actual_used > 0 else quantize_credits(0)
                 if upstream_error:
                     cf_out: Optional[int] = 0
-                elif actual_used == pre_deduct_amount:
+                elif actual_user_price == pre_deduct_amount:
                     cf_out = None
                 else:
-                    cf_out = float(quantize_credits(actual_used))
+                    cf_out = float(actual_user_price)
                 logger.info(
-                    "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s settle_final=%s credits_final_out=%s",
-                    capability_id, pre_deduct_amount, actual_used, settle_final, cf_out,
+                    "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s settle_final=%s multiplier=%.1f user_price=%s credits_final_out=%s",
+                    capability_id, pre_deduct_amount, actual_used, settle_final, _settle_multiplier, actual_user_price, cf_out,
                 )
                 await _record_call(
                     token, record_capability_id, not bool(upstream_error), latency_ms, payload,
