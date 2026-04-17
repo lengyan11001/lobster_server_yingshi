@@ -30,7 +30,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica N
 .topbar{background:var(--card);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
 .topbar h2{font-size:18px;color:var(--primary)}
 .topbar .user-info{display:flex;align-items:center;gap:12px}
+.nav-tabs{display:flex;gap:2px;margin-left:32px}
+.nav-tab{padding:8px 20px;border-radius:6px 6px 0 0;cursor:pointer;font-size:14px;font-weight:500;color:var(--text-secondary);transition:all .15s;border-bottom:2px solid transparent}
+.nav-tab.active{color:var(--primary);border-bottom-color:var(--primary);font-weight:600}
+.nav-tab:hover:not(.active){color:var(--text)}
 .container{max-width:1100px;margin:0 auto;padding:24px}
+
+/* Stats */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}
+.stats-card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;text-align:center}
+.stats-card .sc-label{font-size:12px;color:var(--text-secondary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px}
+.stats-card .sc-value{font-size:28px;font-weight:700;color:var(--primary)}
+.stats-card .sc-sub{font-size:12px;color:var(--text-secondary);margin-top:4px}
+.chart-card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:20px}
+.chart-card h3{font-size:15px;margin-bottom:16px;color:var(--text)}
+.chart-bar-row{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12px}
+.chart-bar-label{width:80px;text-align:right;color:var(--text-secondary);flex-shrink:0}
+.chart-bar{height:22px;background:var(--primary);border-radius:4px;min-width:2px;transition:width .3s ease}
+.chart-bar-value{color:var(--text-secondary);min-width:48px}
+.chart-bar.green{background:var(--success)}
+.chart-bar.red{background:var(--danger)}
+.chart-bar.yellow{background:#f59e0b}
+.rank-table{width:100%}
+.rank-table td{padding:8px 12px;font-size:13px}
+.rank-table tr:nth-child(even){background:var(--bg)}
+.rank-num{width:32px;font-weight:700;color:var(--primary)}
 .search-bar{display:flex;gap:10px;margin-bottom:24px}
 .search-bar input{flex:1;padding:10px 16px;border:1px solid var(--border);border-radius:8px;font-size:14px}
 .search-bar input:focus{outline:none;border-color:var(--primary)}
@@ -89,13 +113,21 @@ tr:hover{background:var(--bg)}
 <!-- Dashboard -->
 <div class="dashboard" id="dashboardView">
   <div class="topbar">
-    <h2>Lobster 管理后台</h2>
+    <div style="display:flex;align-items:center">
+      <h2>Lobster 管理后台</h2>
+      <div class="nav-tabs">
+        <div class="nav-tab active" data-nav="users" onclick="switchNav('users')">用户信息</div>
+        <div class="nav-tab" data-nav="stats" onclick="switchNav('stats')">统计</div>
+      </div>
+    </div>
     <div class="user-info">
       <span id="adminName" style="font-size:13px;color:var(--text-secondary)"></span>
       <button class="btn btn-outline btn-sm" onclick="doLogout()">退出</button>
     </div>
   </div>
-  <div class="container">
+
+  <!-- Page: Users -->
+  <div class="container" id="pageUsers">
     <div class="search-bar">
       <input type="text" id="searchInput" placeholder="搜索用户：输入手机号、账号、邮箱或用户ID…" onkeydown="if(event.key==='Enter')doSearch()">
       <button class="btn btn-primary btn-sm" onclick="doSearch()">搜索</button>
@@ -106,14 +138,12 @@ tr:hover{background:var(--bg)}
       <div class="tab" data-tab="all" onclick="switchTab('all')">全部用户</div>
     </div>
 
-    <!-- Search results -->
     <div id="tabSearch">
       <div class="card" id="searchResults">
         <div class="empty">输入关键词搜索用户</div>
       </div>
     </div>
 
-    <!-- All users -->
     <div id="tabAll" style="display:none">
       <div class="card" id="allUsersCard">
         <h3>全部用户</h3>
@@ -122,7 +152,6 @@ tr:hover{background:var(--bg)}
       </div>
     </div>
 
-    <!-- User detail (hidden by default) -->
     <div id="userDetailView" style="display:none">
       <div class="detail-back" onclick="hideDetail()">&larr; 返回列表</div>
       <div class="card" id="userDetailCard"></div>
@@ -145,6 +174,20 @@ tr:hover{background:var(--bg)}
         <div id="ledgerTable"></div>
       </div>
     </div>
+  </div>
+
+  <!-- Page: Stats -->
+  <div class="container" id="pageStats" style="display:none">
+    <div id="statsOverview" class="stats-grid"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div class="chart-card"><h3>每日新增用户</h3><div id="chartDailyUsers"></div></div>
+      <div class="chart-card"><h3>每日充值积分</h3><div id="chartDailyRecharge"></div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div class="chart-card"><h3>每日消耗积分</h3><div id="chartDailyConsume"></div></div>
+      <div class="chart-card"><h3>能力调用排行</h3><div id="chartCapRanking"></div></div>
+    </div>
+    <div class="chart-card"><h3>积分消耗 TOP 10 用户</h3><div id="chartTopConsumers"></div></div>
   </div>
 </div>
 
@@ -199,6 +242,15 @@ function showDashboard() {
   document.getElementById('loginView').style.display = 'none';
   document.getElementById('dashboardView').style.display = 'block';
   document.getElementById('adminName').textContent = '管理员';
+}
+
+let currentNav = 'users';
+function switchNav(nav) {
+  currentNav = nav;
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.nav === nav));
+  document.getElementById('pageUsers').style.display = nav === 'users' ? '' : 'none';
+  document.getElementById('pageStats').style.display = nav === 'stats' ? '' : 'none';
+  if (nav === 'stats') loadStats();
 }
 
 function switchTab(tab) {
@@ -374,6 +426,87 @@ async function toggleSkillVisibility(userId, pkgId, checked) {
 }
 
 document.getElementById('loginPass').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+
+let statsCache = null;
+async function loadStats() {
+  if (statsCache && Date.now() - statsCache._ts < 30000) { renderStats(statsCache); return; }
+  try {
+    const data = await api('/admin/api/stats?days=30');
+    data._ts = Date.now();
+    statsCache = data;
+    renderStats(data);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function renderStats(data) {
+  const o = data.overview;
+  document.getElementById('statsOverview').innerHTML = `
+    ${statCard('总用户数', o.total_users, '')}
+    ${statCard('今日新增', o.today_new_users, '用户')}
+    ${statCard('今日充值', o.today_recharge.toFixed(1), '积分')}
+    ${statCard('今日消耗', o.today_consume.toFixed(1), '积分')}
+    ${statCard('今日付费单', o.paid_orders_today, '笔')}
+    ${statCard('累计收入', '¥' + o.total_revenue_yuan.toFixed(2), '')}
+    ${statCard('积分池余额', o.total_credits_pool.toLocaleString(), '')}
+  `;
+  renderBarChart('chartDailyUsers', data.daily_users, 'count', 'primary');
+  renderBarChart('chartDailyRecharge', data.daily_recharge, 'amount', 'green');
+  renderBarChart('chartDailyConsume', data.daily_consume, 'amount', 'red');
+  renderCapRanking(data.capability_ranking);
+  renderTopConsumers(data.top_consumers);
+}
+
+function statCard(label, value, unit) {
+  return `<div class="stats-card"><div class="sc-label">${label}</div><div class="sc-value">${value}</div>${unit ? '<div class="sc-sub">' + unit + '</div>' : ''}</div>`;
+}
+
+function renderBarChart(elId, items, valueKey, color) {
+  const el = document.getElementById(elId);
+  if (!items || !items.length) { el.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  const max = Math.max(...items.map(i => i[valueKey] || 0), 1);
+  const recent = items.slice(-15);
+  let html = '';
+  for (const item of recent) {
+    const v = item[valueKey] || 0;
+    const pct = Math.max((v / max) * 100, 1);
+    const dateLabel = (item.date || '').slice(5);
+    const cls = color === 'primary' ? '' : ' ' + color;
+    html += `<div class="chart-bar-row">
+      <div class="chart-bar-label">${dateLabel}</div>
+      <div style="flex:1;background:var(--bg);border-radius:4px;overflow:hidden"><div class="chart-bar${cls}" style="width:${pct}%"></div></div>
+      <div class="chart-bar-value">${valueKey === 'amount' ? v.toFixed(1) : v}</div>
+    </div>`;
+  }
+  el.innerHTML = html;
+}
+
+function renderCapRanking(items) {
+  const el = document.getElementById('chartCapRanking');
+  if (!items || !items.length) { el.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  let html = '<table class="rank-table">';
+  items.forEach((r, i) => {
+    html += `<tr><td class="rank-num">${i + 1}</td><td style="font-weight:500">${r.capability_id}</td><td>${r.calls} 次</td><td style="color:var(--primary);font-weight:600">${r.credits.toFixed(1)}</td></tr>`;
+  });
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+function renderTopConsumers(items) {
+  const el = document.getElementById('chartTopConsumers');
+  if (!items || !items.length) { el.innerHTML = '<div class="empty">暂无数据</div>'; return; }
+  const max = Math.max(...items.map(i => i.consumed), 1);
+  let html = '';
+  items.forEach((r, i) => {
+    const pct = Math.max((r.consumed / max) * 100, 1);
+    const email = r.email.replace(/@sms\.lobster\.local$/, '');
+    html += `<div class="chart-bar-row">
+      <div class="chart-bar-label" style="width:120px" title="${r.email}"><span class="rank-num">${i + 1}</span> ${email}</div>
+      <div style="flex:1;background:var(--bg);border-radius:4px;overflow:hidden"><div class="chart-bar yellow" style="width:${pct}%"></div></div>
+      <div class="chart-bar-value">${r.consumed.toFixed(1)}</div>
+    </div>`;
+  });
+  el.innerHTML = html;
+}
 </script>
 </body>
 </html>
