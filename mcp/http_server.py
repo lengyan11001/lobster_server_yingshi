@@ -266,7 +266,7 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admi
             "name": "invoke_capability",
             "description": (
                 "调用能力(图片生成/视频/语音等)。"
-                "【默认模型】image.generate 用户未指定模型时 payload.model 必须填 \"fal-ai/flux-2/flash\"，禁止自行选择 jimeng。"
+                "【默认模型】image.generate 用户未指定模型时 payload.model 必须填 \"fal-ai/flux-2/flash\"（不要自动选 jimeng）；用户明确指定 jimeng-4.0/jimeng-4.5 等时正常使用。"
                 "video.generate 用户未指定模型时 payload.model 填 \"sora2\"，用户未指定时长时 duration 必须填 4（即 4 秒）。"
                 "【爆款TVC】用户说TVC/带货视频时不走video.generate，改用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
             ),
