@@ -2726,21 +2726,17 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                     _settle_multiplier = 3.0
 
             if pre_deduct_amount > 0:
-                if (
-                    not upstream_error
-                    and upstream_tool == "generate"
-                    and settle_final == 0
-                    and pre_deduct_amount > 0
-                ):
-                    logger.warning(
-                        "[MCP] 速推创建成功但未解析到 price/credits_used，预扣 %s 积分将全额退回，请检查上游响应或定价解析",
-                        pre_deduct_amount,
-                    )
                 pre_applied_flag = True
                 bill_credits = pre_deduct_amount
                 actual_user_price = quantize_credits(float(actual_used) * _settle_multiplier) if actual_used > 0 else quantize_credits(0)
                 if upstream_error:
                     cf_out: Optional[int] = 0
+                elif actual_used <= 0:
+                    cf_out = None
+                    logger.info(
+                        "[MCP] 上游未返回实际扣费，保留预扣 %s 作为最终价格 capability_id=%s",
+                        pre_deduct_amount, capability_id,
+                    )
                 elif actual_user_price == pre_deduct_amount:
                     cf_out = None
                 else:
