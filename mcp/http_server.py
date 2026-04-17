@@ -1309,6 +1309,18 @@ def _clamp_num_images_for_image_model(num: int, model: str) -> int:
     return n
 
 
+_IMAGE_MODEL_ALIASES: Dict[str, str] = {
+    "flux-2/flash": "fal-ai/flux-2/flash",
+    "flux2/flash": "fal-ai/flux-2/flash",
+    "flux2-flash": "fal-ai/flux-2/flash",
+    "flux-2-flash": "fal-ai/flux-2/flash",
+    "flux2": "fal-ai/flux-2/flash",
+    "flux-2": "fal-ai/flux-2/flash",
+}
+
+_DEFAULT_IMAGE_MODEL = "fal-ai/flux-2/flash"
+
+
 def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     按图片模型把「统一 payload」转成该模型 API 需要的参数，并保证用户输入的 prompt 原样传入。
@@ -1318,7 +1330,8 @@ def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     payload = dict(payload)
     model = (payload.get("model") or payload.get("model_id") or "").strip()
     if not model:
-        raise ValueError("请指定图片模型（model），例如 flux-2/flash、seedream、nano-banana-pro、jimeng-4.5、gemini 等。")
+        model = _DEFAULT_IMAGE_MODEL
+    model = _IMAGE_MODEL_ALIASES.get(model, model)
     payload["model"] = model
     prompt = (payload.get("prompt") or "").strip()
     image_url = (payload.get("image_url") or "").strip()
@@ -1419,6 +1432,9 @@ def _normalize_understand_payload(
     return out
 
 
+_DEFAULT_VIDEO_MODEL = "sora2"
+
+
 def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     按视频模型把「统一 payload」转成该模型 API 需要的参数，与 lobster 对齐：支持 backend 注入的 filePaths/media_files。
@@ -1427,7 +1443,7 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         return payload
     model = (payload.get("model") or payload.get("model_id") or "").strip()
     if not model:
-        raise ValueError("请指定视频模型（model），例如 sora2、seedance2、hailuo、vidu、wan、veo、kling、grok、jimeng 等。")
+        model = _DEFAULT_VIDEO_MODEL
     prompt = (payload.get("prompt") or "").strip()
     fp = payload.get("filePaths") or []
     image_url = (payload.get("image_url") or "").strip()
