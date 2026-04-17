@@ -314,10 +314,20 @@ def admin_stats(
         db.query(func.coalesce(func.sum(User.credits), 0)).scalar() or 0
     )
 
-    today_recharge = float(
+    today_recharge_paid = float(
+        db.query(func.coalesce(func.sum(RechargeOrder.credits), 0))
+        .filter(
+            RechargeOrder.status == "paid",
+            RechargeOrder.paid_at >= today_start,
+        )
+        .scalar() or 0
+    )
+
+    today_recharge_admin = float(
         db.query(func.coalesce(func.sum(CreditLedger.delta), 0))
         .filter(
             CreditLedger.entry_type == "recharge",
+            CreditLedger.description.like("%管理员%"),
             CreditLedger.created_at >= today_start,
         )
         .scalar() or 0
@@ -358,18 +368,20 @@ def admin_stats(
     )
     daily_users = [{"date": str(r.d), "count": r.cnt} for r in daily_users_raw]
 
-    ledger_date = func.date(CreditLedger.created_at)
+    order_date = func.date(RechargeOrder.paid_at)
     daily_recharge_raw = (
-        db.query(ledger_date.label("d"), func.sum(CreditLedger.delta).label("total"))
+        db.query(order_date.label("d"), func.sum(RechargeOrder.credits).label("total"))
         .filter(
-            CreditLedger.entry_type == "recharge",
-            CreditLedger.created_at >= range_start,
+            RechargeOrder.status == "paid",
+            RechargeOrder.paid_at >= range_start,
         )
-        .group_by(ledger_date)
-        .order_by(ledger_date)
+        .group_by(order_date)
+        .order_by(order_date)
         .all()
     )
     daily_recharge = [{"date": str(r.d), "amount": float(r.total)} for r in daily_recharge_raw]
+
+    ledger_date = func.date(CreditLedger.created_at)
 
     daily_consume_raw = (
         db.query(ledger_date.label("d"), func.sum(CreditLedger.delta).label("total"))
@@ -434,7 +446,8 @@ def admin_stats(
             "total_users": total_users,
             "today_new_users": today_new_users,
             "total_credits_pool": round(total_credits, 2),
-            "today_recharge": round(today_recharge, 2),
+            "today_recharge_paid": round(today_recharge_paid, 2),
+            "today_recharge_admin": round(today_recharge_admin, 2),
             "today_consume": round(abs(today_consume), 2),
             "paid_orders_today": paid_orders_today,
             "total_revenue_yuan": round(int(total_paid_revenue_fen) / 100, 2),

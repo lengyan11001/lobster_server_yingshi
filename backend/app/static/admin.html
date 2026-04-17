@@ -443,7 +443,8 @@ function renderStats(data) {
   document.getElementById('statsOverview').innerHTML = `
     ${statCard('总用户数', o.total_users, '')}
     ${statCard('今日新增', o.today_new_users, '用户')}
-    ${statCard('今日充值', o.today_recharge.toFixed(1), '积分')}
+    ${statCard('今日充值', o.today_recharge_paid.toFixed(1), '付费积分')}
+    ${statCard('管理员加积分', o.today_recharge_admin.toFixed(1), '今日')}
     ${statCard('今日消耗', o.today_consume.toFixed(1), '积分')}
     ${statCard('今日付费单', o.paid_orders_today, '笔')}
     ${statCard('累计收入', '¥' + o.total_revenue_yuan.toFixed(2), '')}
