@@ -137,11 +137,45 @@ def _duration_seconds_from_params(params: Dict[str, Any]) -> float:
     return 0.0
 
 
+_MODEL_SHORT_TO_FULL: Dict[str, str] = {
+    "flux-2": "fal-ai/flux-2/flash",
+    "flux-2/flash": "fal-ai/flux-2/flash",
+    "seedream": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+    "seedream-4.5": "fal-ai/bytedance/seedream/v4.5/text-to-image",
+    "seedream-5": "fal-ai/bytedance/seedream/v5/lite/text-to-image",
+    "nano-banana-pro": "fal-ai/nano-banana-pro",
+    "nano-banana-2": "fal-ai/nano-banana-2",
+    "sora-2": "fal-ai/sora-2/text-to-video",
+    "gemini": "kapon/gemini-3-pro-image-preview",
+    "qwen-image-edit": "fal-ai/qwen-image-edit-2511-multiple-angles",
+}
+
+
+_LEGACY_PREFIX_REWRITE: Tuple[Tuple[str, str], ...] = (
+    ("sora2pub/", "fal-ai/sora-2/"),
+    ("sprcra/sora-2-vip/", "fal-ai/sora-2/vip/"),
+)
+
+
+def _resolve_model_alias(mid: str) -> str:
+    """Map short/friendly model names to full SuTui model IDs for pricing lookups."""
+    if mid in _MODEL_SHORT_TO_FULL:
+        return _MODEL_SHORT_TO_FULL[mid]
+    low = mid.lower()
+    for short, full in _MODEL_SHORT_TO_FULL.items():
+        if low == short.lower():
+            return full
+    for old_prefix, new_prefix in _LEGACY_PREFIX_REWRITE:
+        if low.startswith(old_prefix):
+            return new_prefix + mid[len(old_prefix):]
+    return mid
+
+
 def fetch_model_docs_data(model_id: str) -> Optional[dict]:
     """GET /api/v3/models/{model_id}/docs 返回的 data 对象（含 pricing）。"""
     if not model_id or not str(model_id).strip():
         return None
-    mid = str(model_id).strip()
+    mid = _resolve_model_alias(str(model_id).strip())
     now = time.time()
     if mid in _DOCS_CACHE:
         ts, data = _DOCS_CACHE[mid]
@@ -188,6 +222,51 @@ def estimate_credits_from_pricing(pricing: dict, params: Optional[dict]) -> int:
         base = int(pricing.get("base_price") or 0)
     except (TypeError, ValueError):
         base = 0
+
+    # per_second / dynamic_per_second: base_price 可能为 None，用 per_second 字段
+    if price_type in ("per_second", "dynamic_per_second"):
+        try:
+            rate = float(pricing.get("per_second") or 0)
+        except (TypeError, ValueError):
+            rate = 0.0
+        if rate <= 0 and base > 0:
+            rate = float(base)
+        if rate <= 0:
+            return 0
+        d = _duration_seconds_from_params(params)
+        if d <= 0:
+            d = 5.0
+        return _quantize_credits(math.ceil(d * rate))
+
+    # duration_map: base_price 是最短时长的价格，按时长比例估算
+    if price_type == "duration_map":
+        if base <= 0:
+            return 0
+        d = _duration_seconds_from_params(params)
+        if d <= 0:
+            return base
+        examples = pricing.get("examples") or []
+        for ex in examples:
+            desc = str(ex.get("description") or "")
+            try:
+                ex_dur = float("".join(c for c in desc if c.isdigit() or c == "."))
+            except (ValueError, TypeError):
+                continue
+            if ex_dur > 0 and d <= ex_dur:
+                return int(ex.get("price", base))
+        if examples:
+            return int(examples[-1].get("price", base))
+        return base
+
+    # token_postcharge: 后付费，预扣用 examples 中最低价作保守估计
+    if price_type == "token_postcharge":
+        examples = pricing.get("examples") or []
+        if examples:
+            prices = [int(ex.get("price", 0)) for ex in examples if ex.get("price")]
+            if prices:
+                return min(prices)
+        return max(base, 100)
+
     if base <= 0:
         return 0
 
@@ -201,7 +280,7 @@ def estimate_credits_from_pricing(pricing: dict, params: Optional[dict]) -> int:
             n_int = 1
         return base * n_int
 
-    if price_type == "duration_based":
+    if price_type in ("duration_based", "duration_price"):
         d = _duration_seconds_from_params(params)
         if d <= 0:
             d = 5.0
@@ -210,22 +289,47 @@ def estimate_credits_from_pricing(pricing: dict, params: Optional[dict]) -> int:
     if price_type == "fixed":
         return base
 
+    if price_type == "matrix":
+        d = _duration_seconds_from_params(params)
+        if d > 0:
+            return _quantize_credits(float(math.ceil(d * float(base))))
+        return base
+
     if price_type == "token_based":
         pt = int(params.get("prompt_tokens", 0) or 0)
         ct = int(params.get("completion_tokens", 0) or 0)
         total = pt + ct
         if total > 0:
-            # base_price 按「每千 token」计（与速推 docs 常见约定一致）
             units = math.ceil(total / 1000.0)
             raw = units * float(base)
             return _quantize_credits(raw)
         return _quantize_credits(float(base))
 
-    if price_type == "audio_duration_based":
+    if price_type in ("audio_duration_based", "audio_duration"):
         d = _duration_seconds_from_params(params)
         if d <= 0:
             return _quantize_credits(float(base))
         return _quantize_credits(float(math.ceil(d * float(base))))
+
+    if price_type == "char_based":
+        char_count = 0
+        prompt = params.get("prompt") or params.get("text") or ""
+        if isinstance(prompt, str):
+            char_count = len(prompt)
+        if char_count <= 0:
+            char_count = 100
+        units = math.ceil(char_count / 1000.0)
+        return _quantize_credits(float(units * base))
+
+    if price_type in ("resolution_quantity", "size_based"):
+        n = params.get("num_images") or params.get("n") or params.get("batch_size") or 1
+        try:
+            n_int = int(n)
+        except (TypeError, ValueError):
+            n_int = 1
+        if n_int < 1:
+            n_int = 1
+        return base * n_int
 
     return _quantize_credits(float(base))
 
@@ -426,3 +530,65 @@ def extract_upstream_reported_credits(obj: Any, _depth: int = 0) -> Decimal:
         for it in obj:
             best = max(best, extract_upstream_reported_credits(it, _depth + 1))
     return best
+
+
+# --------------- 批量拉取所有多媒体模型列表 + 预填充定价缓存 ---------------
+
+import logging as _logging
+
+_models_log = _logging.getLogger(__name__ + ".models_catalog")
+
+_XSKILL_MODELS_URL = "https://api.apiz.ai/api/v3/mcp/models?lang=zh-CN"
+_ALL_MODELS_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
+_ALL_MODELS_CACHE_TTL = 3600
+
+
+def fetch_all_media_models() -> list:
+    """拉取 xSkill 全部多媒体模型列表，同时预填充 _DOCS_CACHE 供 billing 使用。
+
+    返回的每个 model dict 含 id/name/category/task_type/description/isHot/isNew/pricing（原始）。
+    """
+    now = time.time()
+    if _ALL_MODELS_CACHE["data"] is not None and now - _ALL_MODELS_CACHE["ts"] < _ALL_MODELS_CACHE_TTL:
+        return _ALL_MODELS_CACHE["data"]
+
+    try:
+        r = httpx.get(_XSKILL_MODELS_URL, timeout=20.0)
+        r.raise_for_status()
+        models = r.json().get("data", {}).get("models", [])
+    except Exception as exc:
+        _models_log.warning("拉取模型列表失败: %s", exc)
+        cached = _ALL_MODELS_CACHE.get("data")
+        return cached if cached else []
+
+    media = [m for m in models if m.get("category") in ("video", "image", "audio")]
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    pricing_map: Dict[str, Optional[dict]] = {}
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {pool.submit(fetch_model_pricing, m["id"]): m["id"] for m in media}
+        for fut in as_completed(futures):
+            mid = futures[fut]
+            try:
+                pricing_map[mid] = fut.result()
+            except Exception:
+                pricing_map[mid] = None
+
+    results = []
+    for m in media:
+        mid = m["id"]
+        results.append({
+            "id": mid,
+            "name": m.get("name", ""),
+            "category": m.get("category", ""),
+            "task_type": m.get("task_type", ""),
+            "description": m.get("description", ""),
+            "isHot": m.get("isHot", False),
+            "isNew": m.get("isNew", False),
+            "pricing": pricing_map.get(mid),
+        })
+
+    _ALL_MODELS_CACHE["data"] = results
+    _ALL_MODELS_CACHE["ts"] = time.time()
+    _models_log.info("已缓存 %d 个多媒体模型定价", len(results))
+    return results

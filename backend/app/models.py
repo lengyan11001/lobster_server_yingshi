@@ -28,6 +28,8 @@ class User(Base):
     brand_mark: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     """企业微信消息回调 FromUserName（成员 userid 等），与站内账号绑定后用于渠道侧扣费。"""
     wecom_userid: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, unique=True, index=True)
+    is_agent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    parent_user_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -145,6 +147,8 @@ class WecomConfig(Base):
     corp_id: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     """应用 secret，用于获取 access_token 并调用「发送应用消息」接口（轮询模式下推送回复）。"""
     secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    """通讯录同步 Secret，用于获取通讯录 access_token（与应用 secret 不同）。"""
+    contacts_secret: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     """应用 AgentId（数字），发送应用消息时必填；未填则依赖消息体内的 AgentID。"""
     agent_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_knowledge: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

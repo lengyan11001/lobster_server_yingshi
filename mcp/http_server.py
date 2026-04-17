@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import sys
 import uuid
 from decimal import Decimal
 from collections import OrderedDict
@@ -16,6 +17,10 @@ from pathlib import Path
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+_MCP_DIR = str(Path(__file__).resolve().parent)
+if _MCP_DIR not in sys.path:
+    sys.path.insert(0, _MCP_DIR)
 
 import httpx
 
@@ -259,7 +264,12 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admi
         },
         {
             "name": "invoke_capability",
-            "description": "调用能力(图片生成/视频/语音等)",
+            "description": (
+                "调用能力(图片生成/视频/语音等)。"
+                "【默认模型】image.generate 用户未指定模型时 payload.model 必须填 \"fal-ai/flux-2/flash\"（不要自动选 jimeng）；用户明确指定 jimeng-4.0/jimeng-4.5 等时正常使用。"
+                "video.generate 用户未指定模型时 payload.model 填 \"sora2\"，用户未指定时长时 duration 必须填 4（即 4 秒）。"
+                "【爆款TVC】用户说TVC/带货视频时不走video.generate，改用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -339,19 +349,28 @@ def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admi
         },
         {
             "name": "publish_content",
-            "description": "发布素材到平台(抖音/B站等)。asset_id来自save_asset或get_result的saved_assets。",
+            "description": (
+                "发布素材/内容到平台(抖音/B站/头条等)。"
+                "有素材时传 asset_id（来自 save_asset 或 get_result 的 saved_assets）；纯文字文章可只传 title+description 不传 asset_id。"
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "asset_id": {"type": "string", "description": "素材ID"},
+                    "asset_id": {
+                        "type": "string",
+                        "description": "素材ID（来自 save_asset 或 get_result 的 saved_assets；纯文字发布可选）",
+                    },
                     "account_nickname": {"type": "string", "description": "账号昵称"},
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
+                    "title": {"type": "string", "description": "标题"},
+                    "description": {"type": "string", "description": "正文内容"},
                     "tags": {"type": "string", "description": "逗号分隔"},
                     "cover_asset_id": {"type": "string"},
-                    "options": {"type": "object", "description": "平台参数(visibility/schedule等)"},
+                    "options": {
+                        "type": "object",
+                        "description": "平台参数(visibility/schedule/content_type:article/micro等)",
+                    },
                 },
-                "required": ["asset_id", "account_nickname"],
+                "required": ["account_nickname"],
             },
         },
         {
@@ -1839,6 +1858,12 @@ def _extract_media_urls_for_auto_save(upstream_resp: Any) -> List[str]:
     return _reorder_cdn_urls_for_autosave(order)[:12]
 
 
+_NO_AUTO_SAVE_CAPABILITIES = frozenset({
+    "sutui.search_models",
+    "sutui.guide",
+    "sutui.transfer_url",
+})
+
 async def _auto_save_generated_assets(
     upstream_resp: Any, capability_id: str, payload: Dict, token: Optional[str],
     request: Optional[Request] = None,
@@ -1846,8 +1871,7 @@ async def _auto_save_generated_assets(
     """Extract media URLs from upstream result and auto-save as local assets."""
     if not token:
         return []
-    # 转存能力：响应里常同时含临时 mcp-images 与任务直链；对话/轮询会多次调用，每次自动入库会刷出大量重复素材。
-    if capability_id == "sutui.transfer_url":
+    if capability_id in _NO_AUTO_SAVE_CAPABILITIES:
         return []
     urls = _prefer_stable_urls_for_autosave(_extract_media_urls_for_auto_save(upstream_resp))
     if not urls:
@@ -1905,6 +1929,8 @@ async def _auto_save_generated_assets(
     return saved
 
 
+
+
 async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], request: Optional[Request] = None) -> Tuple[List[Dict[str, Any]], bool]:
     try:
         catalog = _load_capability_catalog()
@@ -1912,13 +1938,34 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
         if name == "list_capabilities":
             is_admin = await _fetch_is_skill_store_admin(token)
+            # Collect Comfly model names per capability type for dynamic hints
+            _comfly_image_models: list[str] = []
+            _comfly_video_models: list[str] = []
+            try:
+                from comfly_upstream import _load_pricing as _lp
+                _cp = _lp()
+                for _mk, _mv in (_cp.get("models") or {}).items():
+                    if not isinstance(_mv, dict):
+                        continue
+                    _fmt = _mv.get("api_format", "")
+                    if _fmt == "dalle":
+                        _comfly_image_models.append(_mk)
+                    elif _fmt in ("unified_video",):
+                        _comfly_video_models.append(_mk)
+            except Exception:
+                pass
             caps_out = []
             for cid in sorted(catalog.keys()):
                 if catalog[cid].get("enabled") is False:
                     continue
                 if _capability_id_is_debug_only_in_registry(cid) and not is_admin:
                     continue
-                caps_out.append({"capability_id": cid, "description": catalog[cid].get("description") or cid})
+                desc = catalog[cid].get("description") or cid
+                if cid == "image.generate" and _comfly_image_models:
+                    desc += f"  可用模型包括: {', '.join(_comfly_image_models)}（用户指定模型时必须原样传入 model 字段）"
+                elif cid == "video.generate" and _comfly_video_models:
+                    desc += f"  可用模型包括: {', '.join(_comfly_video_models)}（用户指定模型时必须原样传入 model 字段）"
+                caps_out.append({"capability_id": cid, "description": desc})
             data = {"capabilities": caps_out}
             return [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=2)}], False
 
@@ -2022,6 +2069,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 return await _call_tool("publish_content", pub_args, token, request)
             if not capability_id or capability_id not in catalog:
                 return [{"type": "text", "text": f"能力未找到: {capability_id}"}], True
+
             if not (token or "").strip():
                 return [
                     {
@@ -2106,15 +2154,50 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 if _emb in ("video.generate", "image.generate"):
                     record_capability_id = _emb
 
-            # ━━━ 速推用户积分：唯一业务入口（调用速推上游之前只在此处处理） ━━━
-            # upstream=sutui 时：必须先完成认证中心 POST /capabilities/pre-deduct，再调速推；结束后 record-call 或 refund。
-            # lobster_online（本机 MCP）、chat、其它后端路由不得再编排第二套预扣/结算；客户端仅转发 mcp-gateway。
+            # ━━━ Comfly 路由预判（在预扣之前决定，以便正确计价） ━━━
+            _early_use_comfly = False
+            _early_comfly_task_query = False
+            _comfly_model_id = (normalized_model or original_model or "").strip()
+            _payload_prefer_comfly = bool(payload.get("_prefer_comfly")) if isinstance(payload, dict) else False
+            _comfly_user_credits: Optional[int] = None
+            try:
+                from comfly_upstream import (
+                    should_route_to_comfly as _early_should_cf,
+                    is_comfly_task as _early_is_cf_task,
+                    is_comfly_configured as _early_cf_ok,
+                    estimate_comfly_credits as _early_est_cf,
+                )
+                if capability_id == "comfly.chat":
+                    _early_use_comfly = _early_cf_ok()
+                elif capability_id == "task.get_result":
+                    _poll_tid_early = str(payload.get("task_id") or "").strip()
+                    if _poll_tid_early and _early_is_cf_task(_poll_tid_early):
+                        _early_comfly_task_query = True
+                        _early_use_comfly = True
+                elif _payload_prefer_comfly and _early_cf_ok() and capability_id in ("image.generate", "video.generate"):
+                    _early_use_comfly = True
+                else:
+                    _early_use_comfly = _early_should_cf(capability_id, _comfly_model_id)
+                logger.info(
+                    "[MCP] Comfly路由预判 capability=%s model=%s use_comfly=%s configured=%s prefer=%s",
+                    capability_id, _comfly_model_id, _early_use_comfly, _early_cf_ok(), _payload_prefer_comfly,
+                )
+                if _early_use_comfly and not _early_comfly_task_query:
+                    _comfly_user_credits = _early_est_cf(_comfly_model_id, payload if isinstance(payload, dict) else {}, for_user=True)
+            except Exception as _cf_early_err:
+                logger.warning("[MCP] Comfly 路由预判跳过: %s", _cf_early_err)
+
+            # ━━━ 用户积分：唯一业务入口（调用上游之前只在此处处理） ━━━
             pre_deduct_amount = quantize_credits(0)
             billing_idem = str(uuid.uuid4())
             if token:
                 try:
                     pre_body: Dict[str, Any] = {"capability_id": capability_id}
-                    if upstream_name == "sutui" and upstream_tool == "generate":
+                    _UNDERSTAND_CAPS = ("image.understand", "video.understand")
+                    if _early_use_comfly and _comfly_user_credits and _comfly_user_credits > 0:
+                        pre_body["force_credits"] = _comfly_user_credits
+                        pre_body["model"] = _comfly_model_id
+                    elif upstream_name == "sutui" and upstream_tool == "generate" and capability_id not in _UNDERSTAND_CAPS:
                         pre_body["model"] = (payload.get("model") or "").strip()
                         pre_body["params"] = payload
                     if upstream_name == "sutui" and sutui_pool_for_billing and sutui_token_ref_for_billing:
@@ -2417,17 +2500,76 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         else:
                             logger.info("[服务器端MCP-步骤C.7] 转存成功 url_key=%s 原URL=%s CDN_URL=%s", url_key, url_value[:80], cdn_url[:80])
             
+            # ━━━ Comfly 路由：使用预判结果 ━━━
+            _use_comfly = _early_use_comfly
+            _comfly_task_query = _early_comfly_task_query
+
             t0 = time.perf_counter()
-            logger.info("[MCP] invoke_capability capability_id=%s upstream=%s model=%s", capability_id, upstream_name, normalized_model or original_model or "(无)")
-            upstream_resp = await _call_upstream_mcp_tool(
-                upstream_url,
-                upstream_tool,
-                payload,
-                upstream_name=upstream_name,
-                sutui_token=sutui_token,
-                lobster_capability_id=capability_id,
-                brand_mark=user_brand_mark,
-            )
+            if _use_comfly:
+                logger.info("[MCP] invoke_capability capability_id=%s upstream=comfly model=%s task_query=%s", capability_id, _comfly_model_id, _comfly_task_query)
+                try:
+                    from comfly_upstream import (
+                        call_comfly_image_generate,
+                        call_comfly_video_generate,
+                        call_comfly_task_query,
+                        call_comfly_chat_completions,
+                        format_comfly_image_response_as_sutui,
+                        format_comfly_video_response_as_sutui,
+                        register_comfly_task,
+                        get_comfly_task_token_group,
+                        _get_model_token_group,
+                    )
+                    if _comfly_task_query:
+                        _poll_tid = str(payload.get("task_id") or "").strip()
+                        _cf_resp = await call_comfly_task_query(_poll_tid, get_comfly_task_token_group(_poll_tid))
+                        upstream_resp = format_comfly_video_response_as_sutui(_cf_resp)
+                    elif capability_id == "comfly.chat":
+                        _cf_model = (payload.get("model") or "").strip()
+                        _cf_messages = payload.get("messages") or []
+                        _cf_resp = await call_comfly_chat_completions(
+                            _cf_model,
+                            _cf_messages,
+                            temperature=float(payload.get("temperature", 0.7)),
+                            max_tokens=payload.get("max_tokens"),
+                        )
+                        if _cf_resp.get("error"):
+                            upstream_resp = _cf_resp
+                        else:
+                            _choices = _cf_resp.get("choices") or []
+                            _reply = ""
+                            if _choices:
+                                _msg = _choices[0].get("message") or {}
+                                _reply = _msg.get("content") or ""
+                            upstream_resp = {
+                                "result": _reply,
+                                "usage": _cf_resp.get("usage"),
+                                "_comfly": True,
+                            }
+                    elif capability_id == "image.generate":
+                        _cf_resp = await call_comfly_image_generate(_comfly_model_id, payload)
+                        upstream_resp = format_comfly_image_response_as_sutui(_cf_resp)
+                    elif capability_id == "video.generate":
+                        _cf_resp = await call_comfly_video_generate(_comfly_model_id, payload)
+                        upstream_resp = format_comfly_video_response_as_sutui(_cf_resp)
+                        _cf_tid = (upstream_resp.get("task_id") or "") if isinstance(upstream_resp, dict) else ""
+                        if _cf_tid:
+                            register_comfly_task(_cf_tid, _get_model_token_group(_comfly_model_id))
+                    else:
+                        upstream_resp = {"error": {"message": f"Comfly 不支持 {capability_id}"}}
+                except Exception as _cf_call_err:
+                    logger.exception("[MCP] Comfly 调用异常 capability_id=%s", capability_id)
+                    upstream_resp = {"error": {"message": f"Comfly 调用失败: {_cf_call_err}"}}
+            else:
+                logger.info("[MCP] invoke_capability capability_id=%s upstream=%s model=%s", capability_id, upstream_name, normalized_model or original_model or "(无)")
+                upstream_resp = await _call_upstream_mcp_tool(
+                    upstream_url,
+                    upstream_tool,
+                    payload,
+                    upstream_name=upstream_name,
+                    sutui_token=sutui_token,
+                    lobster_capability_id=capability_id,
+                    brand_mark=user_brand_mark,
+                )
             # task.get_result: 不再在此处轮询，由 backend chat 每 15s 轮询并写回对话
             latency_ms = int((time.perf_counter() - t0) * 1000)
             upstream_error = ""
@@ -2435,7 +2577,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 err_obj = upstream_resp.get("error")
                 if isinstance(err_obj, dict):
                     upstream_error = str(err_obj.get("message") or "")[:500]
-            poll_task_id = (payload.get("task_id") or payload.get("taskId") or "").strip()
+            poll_task_id = str(payload.get("task_id") or payload.get("taskId") or "").strip()
             create_billed_amount_peek = quantize_credits(0)
             if upstream_tool == "get_result" and poll_task_id:
                 create_billed_amount_peek = _peek_task_billed_credits(poll_task_id)
@@ -2579,15 +2721,18 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             if (
                 upstream_tool == "generate"
                 and not upstream_error
-                and settle_final > 0
+                and (settle_final > 0 or pre_deduct_amount > 0)
                 and isinstance(upstream_resp, dict)
             ):
                 created_tid = _extract_task_id_from_sutui_response(upstream_resp)
                 if created_tid:
-                    _remember_task_billed_credits(created_tid, settle_final)
+                    refund_on_fail = pre_deduct_amount if pre_deduct_amount > 0 else settle_final
+                    _remember_task_billed_credits(created_tid, refund_on_fail)
                     logger.info(
-                        "[MCP] 已记录创建任务扣费 task_id=%s credits=%s（失败时凭 task_id 退款）",
+                        "[MCP] 已记录创建任务扣费 task_id=%s credits=%s pre_deduct=%s settle=%s（失败时凭 task_id 退款）",
                         created_tid,
+                        refund_on_fail,
+                        pre_deduct_amount,
                         settle_final,
                     )
             logger.info("[MCP] invoke_capability 完成 capability_id=%s latency_ms=%s ok=%s", capability_id, latency_ms, not bool(upstream_error))
@@ -2808,8 +2953,10 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
         if name == "publish_content":
             asset_id = str(args.get("asset_id") or "").strip()
             account_nickname = str(args.get("account_nickname") or "").strip()
-            if not asset_id:
-                return [{"type": "text", "text": "请提供 asset_id（通过 save_asset 获得）"}], True
+            title = str(args.get("title") or "").strip()
+            description = str(args.get("description") or "").strip()
+            if not asset_id and not (title or description):
+                return [{"type": "text", "text": "请提供 asset_id（通过 save_asset 获得），或提供 title/description 用于纯文字发布"}], True
             if not account_nickname:
                 return [{"type": "text", "text": "请提供 account_nickname（通过 list_publish_accounts 查看）"}], True
             logger.info("[MCP] publish_content 调用: asset_id=%s account_nickname=%s", asset_id, account_nickname)

@@ -12,7 +12,7 @@
 
 ## 一、能力侧要点
 
-- **Webhook、Graph API** 仅部署在**可访问 Meta 的海外机**（如 `lobster-server.icu`）。
+- **Webhook、Graph API** 仅部署在**可访问 Meta 的海外机**（如 `43.162.111.36`）。
 - **在线客户端**里 **「Messenger」** 与技能卡里 **「Facebook Messenger 客服」** 的 CRUD 请求只发往 **`MESSENGER_API_BASE`**，与 **`API_BASE`** 分离。
 
 ## 二、配置项总表（按条「应用」填写）
@@ -46,7 +46,7 @@
 
 | 变量 | 说明 |
 |------|------|
-| `PUBLIC_BASE_URL` | 与对外访问一致，如 `http://lobster-server.icu:8000` 或 `https://lobster-server.icu`（配好 Nginx 后）。用于拼接返回前端的 `webhook_url`。 |
+| `PUBLIC_BASE_URL` | 与对外访问一致，如 `http://43.162.111.36:8000` 或 `http://43.162.111.36`（配好 Nginx 后）。用于拼接返回前端的 `webhook_url`。 |
 | `SECRET_KEY` | 与大陆签发登录 JWT 时**一致**（使用 `MESSENGER_TRUST_JWT_WITHOUT_USER` 时必填）。 |
 | `MESSENGER_TRUST_JWT_WITHOUT_USER` | 海外建议 `true`（大陆登录 + 海外无用户行时）；大陆 **`false`**。 |
 

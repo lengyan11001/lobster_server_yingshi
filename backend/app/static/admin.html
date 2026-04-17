@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lobster 管理后台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#f5f7fa;--card:#fff;--primary:#4f46e5;--primary-hover:#4338ca;--danger:#ef4444;--success:#22c55e;--text:#1e293b;--text-secondary:#64748b;--border:#e2e8f0;--radius:10px;--shadow:0 1px 3px rgba(0,0,0,.08)}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
+.login-card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:40px;width:100%;max-width:380px}
+.login-card h1{text-align:center;margin-bottom:24px;font-size:22px;color:var(--primary)}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;margin-bottom:6px;font-size:13px;font-weight:600;color:var(--text-secondary)}
+.form-group input{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:8px;font-size:14px;transition:border-color .2s}
+.form-group input:focus{outline:none;border-color:var(--primary)}
+.btn{display:inline-flex;align-items:center;justify-content:center;padding:10px 20px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .15s}
+.btn-primary{background:var(--primary);color:#fff;width:100%}
+.btn-primary:hover{background:var(--primary-hover)}
+.btn-sm{padding:6px 14px;font-size:13px}
+.btn-success{background:var(--success);color:#fff}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-outline{background:transparent;border:1px solid var(--border);color:var(--text)}
+.btn-outline:hover{background:var(--bg)}
+.error-msg{color:var(--danger);font-size:13px;margin-top:8px;text-align:center}
+
+/* Dashboard */
+.dashboard{display:none}
+.topbar{background:var(--card);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+.topbar h2{font-size:18px;color:var(--primary)}
+.topbar .user-info{display:flex;align-items:center;gap:12px}
+.container{max-width:1100px;margin:0 auto;padding:24px}
+.search-bar{display:flex;gap:10px;margin-bottom:24px}
+.search-bar input{flex:1;padding:10px 16px;border:1px solid var(--border);border-radius:8px;font-size:14px}
+.search-bar input:focus{outline:none;border-color:var(--primary)}
+.card{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;margin-bottom:20px}
+.card h3{font-size:16px;margin-bottom:16px;color:var(--text)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:12px}
+.stat-item{text-align:center;padding:12px;background:var(--bg);border-radius:8px}
+.stat-item .label{font-size:12px;color:var(--text-secondary);margin-bottom:4px}
+.stat-item .value{font-size:20px;font-weight:700;color:var(--primary)}
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:13px}
+th{font-weight:600;color:var(--text-secondary);font-size:12px;text-transform:uppercase}
+tr:hover{background:var(--bg)}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.badge-green{background:#dcfce7;color:#166534}
+.badge-blue{background:#dbeafe;color:#1e40af}
+.badge-red{background:#fee2e2;color:#991b1b}
+.badge-yellow{background:#fef9c3;color:#854d0e}
+.credits-value{font-weight:700;color:var(--primary)}
+.recharge-row{display:flex;gap:8px;align-items:center;margin-top:12px}
+.recharge-row input{width:120px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px}
+.recharge-row input:focus{outline:none;border-color:var(--primary)}
+.pagination{display:flex;justify-content:center;gap:8px;margin-top:16px}
+.empty{text-align:center;padding:40px;color:var(--text-secondary)}
+.toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:8px;color:#fff;font-size:14px;font-weight:500;z-index:100;animation:slideIn .3s ease}
+.toast-success{background:var(--success)}
+.toast-error{background:var(--danger)}
+@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+.tabs{display:flex;gap:4px;margin-bottom:20px;background:var(--bg);padding:4px;border-radius:8px}
+.tab{padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500;color:var(--text-secondary);transition:all .15s}
+.tab.active{background:var(--card);color:var(--primary);box-shadow:var(--shadow)}
+.tab:hover:not(.active){color:var(--text)}
+.detail-back{cursor:pointer;color:var(--primary);font-size:13px;margin-bottom:12px;display:inline-flex;align-items:center;gap:4px}
+.detail-back:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div class="login-wrap" id="loginView">
+  <div class="login-card">
+    <h1>Lobster 管理后台</h1>
+    <div class="form-group">
+      <label>用户名</label>
+      <input type="text" id="loginUser" autocomplete="username" placeholder="管理员用户名">
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input type="password" id="loginPass" autocomplete="current-password" placeholder="管理员密码">
+    </div>
+    <button class="btn btn-primary" onclick="doLogin()">登录</button>
+    <div class="error-msg" id="loginError"></div>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div class="dashboard" id="dashboardView">
+  <div class="topbar">
+    <h2>Lobster 管理后台</h2>
+    <div class="user-info">
+      <span id="adminName" style="font-size:13px;color:var(--text-secondary)"></span>
+      <button class="btn btn-outline btn-sm" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+  <div class="container">
+    <div class="search-bar">
+      <input type="text" id="searchInput" placeholder="搜索用户：输入手机号、账号、邮箱或用户ID…" onkeydown="if(event.key==='Enter')doSearch()">
+      <button class="btn btn-primary btn-sm" onclick="doSearch()">搜索</button>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="search" onclick="switchTab('search')">搜索结果</div>
+      <div class="tab" data-tab="all" onclick="switchTab('all')">全部用户</div>
+    </div>
+
+    <!-- Search results -->
+    <div id="tabSearch">
+      <div class="card" id="searchResults">
+        <div class="empty">输入关键词搜索用户</div>
+      </div>
+    </div>
+
+    <!-- All users -->
+    <div id="tabAll" style="display:none">
+      <div class="card" id="allUsersCard">
+        <h3>全部用户</h3>
+        <div id="allUsersTable"></div>
+        <div class="pagination" id="allUsersPagination"></div>
+      </div>
+    </div>
+
+    <!-- User detail (hidden by default) -->
+    <div id="userDetailView" style="display:none">
+      <div class="detail-back" onclick="hideDetail()">&larr; 返回列表</div>
+      <div class="card" id="userDetailCard"></div>
+      <div class="card">
+        <h3>充值积分</h3>
+        <div class="recharge-row">
+          <input type="number" id="rechargeAmount" placeholder="积分数量" step="1">
+          <input type="text" id="rechargeDesc" placeholder="备注（可选）" value="管理员手动加积分" style="width:200px">
+          <button class="btn btn-success btn-sm" onclick="doAddCredits()">充值</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>积分流水（最近50条）</h3>
+        <div id="ledgerTable"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = location.origin;
+let TOKEN = localStorage.getItem('admin_token') || '';
+
+if (TOKEN) { showDashboard(); }
+
+function toast(msg, type='success') {
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+async function api(path, opts={}) {
+  const headers = {'Content-Type':'application/json'};
+  if (TOKEN) headers['X-Admin-Token'] = TOKEN;
+  const res = await fetch(API + path, {...opts, headers});
+  const data = await res.json();
+  if (!res.ok) {
+    if (res.status === 401) { doLogout(); }
+    throw new Error(data.detail || '请求失败');
+  }
+  return data;
+}
+
+async function doLogin() {
+  const u = document.getElementById('loginUser').value.trim();
+  const p = document.getElementById('loginPass').value.trim();
+  const err = document.getElementById('loginError');
+  err.textContent = '';
+  if (!u || !p) { err.textContent = '请输入用户名和密码'; return; }
+  try {
+    const data = await api('/admin/api/login', {method:'POST', body: JSON.stringify({username:u,password:p})});
+    TOKEN = data.token;
+    localStorage.setItem('admin_token', TOKEN);
+    showDashboard();
+  } catch(e) { err.textContent = e.message; }
+}
+
+function doLogout() {
+  TOKEN = '';
+  localStorage.removeItem('admin_token');
+  document.getElementById('loginView').style.display = 'flex';
+  document.getElementById('dashboardView').style.display = 'none';
+}
+
+function showDashboard() {
+  document.getElementById('loginView').style.display = 'none';
+  document.getElementById('dashboardView').style.display = 'block';
+  document.getElementById('adminName').textContent = '管理员';
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+  document.getElementById('tabSearch').style.display = tab === 'search' ? '' : 'none';
+  document.getElementById('tabAll').style.display = tab === 'all' ? '' : 'none';
+  document.getElementById('userDetailView').style.display = 'none';
+  if (tab === 'all') loadAllUsers(1);
+}
+
+async function doSearch() {
+  const q = document.getElementById('searchInput').value.trim();
+  if (!q) return;
+  try {
+    const data = await api('/admin/api/search?q=' + encodeURIComponent(q));
+    renderUserTable(data.users, 'searchResults', '搜索结果');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+let currentPage = 1;
+async function loadAllUsers(page) {
+  currentPage = page;
+  try {
+    const data = await api('/admin/api/users?page=' + page + '&page_size=20');
+    renderUserTable(data.users, 'allUsersTable', null);
+    renderPagination(data.total, data.page, data.page_size);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function renderPagination(total, page, pageSize) {
+  const pages = Math.ceil(total / pageSize);
+  const el = document.getElementById('allUsersPagination');
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  let html = '';
+  if (page > 1) html += `<button class="btn btn-outline btn-sm" onclick="loadAllUsers(${page-1})">上一页</button>`;
+  html += `<span style="padding:6px 12px;font-size:13px;color:var(--text-secondary)">第 ${page}/${pages} 页（共 ${total} 条）</span>`;
+  if (page < pages) html += `<button class="btn btn-outline btn-sm" onclick="loadAllUsers(${page+1})">下一页</button>`;
+  el.innerHTML = html;
+}
+
+function renderUserTable(users, containerId, title) {
+  const el = document.getElementById(containerId);
+  if (!users.length) {
+    el.innerHTML = (title ? `<h3>${title}</h3>` : '') + '<div class="empty">未找到用户</div>';
+    return;
+  }
+  let html = title ? `<h3>${title}（${users.length} 条）</h3>` : '';
+  html += `<table><thead><tr><th>ID</th><th>账号</th><th>积分余额</th><th>角色</th><th>注册时间</th><th>操作</th></tr></thead><tbody>`;
+  for (const u of users) {
+    const email = u.email.replace(/@sms\.lobster\.local$/, ' <span style="color:#94a3b8;font-size:11px">(手机)</span>');
+    html += `<tr>
+      <td>${u.id}</td>
+      <td>${email}</td>
+      <td class="credits-value">${u.credits.toFixed(2)}</td>
+      <td><span class="badge ${u.role==='admin'?'badge-red':'badge-blue'}">${u.role}</span></td>
+      <td style="font-size:12px;color:var(--text-secondary)">${u.created_at ? new Date(u.created_at).toLocaleString('zh-CN') : '-'}</td>
+      <td><button class="btn btn-outline btn-sm" onclick="showUserDetail(${u.id})">详情</button></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+let currentUserId = null;
+async function showUserDetail(userId) {
+  currentUserId = userId;
+  try {
+    const data = await api('/admin/api/user/' + userId);
+    document.getElementById('tabSearch').style.display = 'none';
+    document.getElementById('tabAll').style.display = 'none';
+    document.getElementById('userDetailView').style.display = '';
+
+    const u = data.user;
+    const email = u.email.replace(/@sms\.lobster\.local$/, '');
+    const isSms = u.email.endsWith('@sms.lobster.local');
+    document.getElementById('userDetailCard').innerHTML = `
+      <h3>用户详情</h3>
+      <div class="stats">
+        <div class="stat-item"><div class="label">用户ID</div><div class="value">${u.id}</div></div>
+        <div class="stat-item"><div class="label">账号</div><div class="value" style="font-size:15px">${email}${isSms?' <span style="font-size:11px;color:#94a3b8">(手机)</span>':''}</div></div>
+        <div class="stat-item"><div class="label">积分余额</div><div class="value">${u.credits.toFixed(2)}</div></div>
+        <div class="stat-item"><div class="label">角色</div><div class="value" style="font-size:14px">${u.role}</div></div>
+        <div class="stat-item"><div class="label">代理</div><div class="value" style="font-size:14px">${u.is_agent?'是':'否'}</div></div>
+        <div class="stat-item"><div class="label">品牌</div><div class="value" style="font-size:14px">${u.brand_mark||'-'}</div></div>
+        <div class="stat-item"><div class="label">注册时间</div><div class="value" style="font-size:13px">${u.created_at?new Date(u.created_at).toLocaleString('zh-CN'):'-'}</div></div>
+      </div>
+    `;
+
+    const ledger = data.ledger;
+    if (!ledger.length) {
+      document.getElementById('ledgerTable').innerHTML = '<div class="empty">暂无流水记录</div>';
+    } else {
+      let html = `<table><thead><tr><th>时间</th><th>类型</th><th>变动</th><th>余额</th><th>描述</th></tr></thead><tbody>`;
+      for (const e of ledger) {
+        const isPositive = e.delta > 0;
+        const typeBadge = {
+          'recharge': 'badge-green', 'refund': 'badge-green',
+          'pre_deduct': 'badge-yellow', 'settle': 'badge-yellow',
+          'sutui_chat': 'badge-red', 'skill_unlock': 'badge-red', 'unit_deduct': 'badge-red',
+        }[e.entry_type] || 'badge-blue';
+        html += `<tr>
+          <td style="font-size:12px">${e.created_at?new Date(e.created_at).toLocaleString('zh-CN'):'-'}</td>
+          <td><span class="badge ${typeBadge}">${e.entry_type}</span></td>
+          <td style="color:${isPositive?'var(--success)':'var(--danger)'};font-weight:600">${isPositive?'+':''}${e.delta.toFixed(4)}</td>
+          <td style="font-weight:500">${e.balance_after.toFixed(2)}</td>
+          <td style="font-size:12px;color:var(--text-secondary)">${e.description||'-'}</td>
+        </tr>`;
+      }
+      html += '</tbody></table>';
+      document.getElementById('ledgerTable').innerHTML = html;
+    }
+
+    document.getElementById('rechargeAmount').value = '';
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function hideDetail() {
+  document.getElementById('userDetailView').style.display = 'none';
+  const activeTab = document.querySelector('.tab.active')?.dataset.tab || 'search';
+  document.getElementById('tabSearch').style.display = activeTab === 'search' ? '' : 'none';
+  document.getElementById('tabAll').style.display = activeTab === 'all' ? '' : 'none';
+}
+
+async function doAddCredits() {
+  if (!currentUserId) return;
+  const amount = parseFloat(document.getElementById('rechargeAmount').value);
+  const desc = document.getElementById('rechargeDesc').value.trim() || '管理员手动加积分';
+  if (!amount || isNaN(amount)) { toast('请输入有效的积分数量', 'error'); return; }
+  try {
+    const data = await api('/admin/api/add-credits', {
+      method: 'POST',
+      body: JSON.stringify({user_id: currentUserId, amount, description: desc})
+    });
+    toast(`充值成功：${data.email} ${data.delta > 0 ? '+' : ''}${data.delta} 积分，当前余额 ${data.new_credits.toFixed(2)}`);
+    showUserDetail(currentUserId);
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+document.getElementById('loginPass').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+</script>
+</body>
+</html>

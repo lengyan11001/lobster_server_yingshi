@@ -36,6 +36,11 @@ from .api.twilio_whatsapp import router as twilio_whatsapp_router
 from .api.privacy_policy import router as privacy_policy_router
 from .api.oauth_public_pages import router as oauth_public_pages_router
 from .api.meta_social_publish import router as meta_social_publish_router
+from .api.admin import router as admin_router
+try:
+    from .api.wecom_kf import router as wecom_kf_router
+except Exception:
+    wecom_kf_router = None
 try:
     from .api.wecom import router as wecom_router
 except Exception as e:
@@ -275,7 +280,7 @@ def _migrate_user_wecom_userid():
 
 
 def _migrate_wecom_config_secret():
-    """Add secret column to wecom_configs if missing (用于轮询模式下发送应用消息)."""
+    """Add secret, contacts_secret columns to wecom_configs if missing."""
     from sqlalchemy import text
     try:
         with engine.connect() as conn:
@@ -283,6 +288,9 @@ def _migrate_wecom_config_secret():
             cols = [row[1] for row in r]
             if "secret" not in cols:
                 conn.execute(text("ALTER TABLE wecom_configs ADD COLUMN secret VARCHAR(255)"))
+                conn.commit()
+            if "contacts_secret" not in cols:
+                conn.execute(text("ALTER TABLE wecom_configs ADD COLUMN contacts_secret VARCHAR(255)"))
                 conn.commit()
     except Exception as e:
         logger.warning("Migration wecom_configs.secret skipped: %s", e)
@@ -763,6 +771,9 @@ def create_app() -> FastAPI:
     app.include_router(messenger_router, prefix="")
     app.include_router(twilio_whatsapp_router, prefix="")
     app.include_router(meta_social_publish_router, prefix="")
+    app.include_router(admin_router, prefix="")
+    if wecom_kf_router is not None:
+        app.include_router(wecom_kf_router, prefix="")
     if wecom_router is not None:
         app.include_router(wecom_router, prefix="")
     else:

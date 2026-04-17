@@ -1,4 +1,4 @@
-"""软件收费模式配置与展示：技能解锁价格、算力套餐（积分兑换比例）；自有充值订单；自建微信支付。"""
+"""软件收费模式配置与展示：技能解锁价格、算力套餐（积分兑换比例）；自有充值订单；付呗聚合支付。"""
 import json
 import logging
 import time
@@ -26,6 +26,12 @@ from ..services.credits_amount import (
     ledger_display_delta,
     quantize_credits,
 )
+from ..services.fubei_pay import (
+    fubei_configured,
+    fubei_precreate,
+    fubei_query_order,
+    verify_callback_sign,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,37 +49,29 @@ def _dt_utc_naive_to_beijing_str(dt: Optional[datetime]) -> str:
     return aware.astimezone(_BJ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _wechat_pay_configured() -> bool:
-    mch_id = (getattr(settings, "wechat_mch_id", None) or "").strip()
-    key = (getattr(settings, "wechat_pay_apiv3_key", None) or "").strip()
-    serial = (getattr(settings, "wechat_pay_serial_no", None) or "").strip()
-    key_path = (getattr(settings, "wechat_pay_private_key_path", None) or "").strip()
-    app_id = (getattr(settings, "wechat_app_id", None) or "").strip()
-    return bool(mch_id and key and serial and key_path and app_id)
-
-
 def _get_public_base_url() -> str:
-    """微信支付回调等用。未配置 PUBLIC_BASE_URL 时用本机 IP:PORT。"""
+    """支付回调等用。未配置 PUBLIC_BASE_URL 时用本机 IP:PORT。"""
     return get_effective_public_base_url()
 
 
-def _apply_wechat_paid_to_order(
+def _apply_paid_to_order(
     order: RechargeOrder,
     paid_total_fen: int,
-    wechat_transaction_id: Optional[str],
+    channel_transaction_id: Optional[str],
     db: Session,
+    channel_label: str = "付呗聚合支付",
 ) -> bool:
     """校验金额一致后写入审计、加积分、置已支付。返回 True 表示已处理，False 表示金额不符未处理。"""
     from datetime import datetime
     expected_fen = (order.amount_fen or 0) or (order.amount_yuan * 100)
     if paid_total_fen != expected_fen:
         logger.error(
-            "wechat paid amount_mismatch out_trade_no=%s order_id=%s paid_fen=%s expected_fen=%s",
+            "paid amount_mismatch out_trade_no=%s order_id=%s paid_fen=%s expected_fen=%s",
             order.out_trade_no, order.id, paid_total_fen, expected_fen,
         )
         return False
     order.callback_amount_fen = paid_total_fen
-    order.wechat_transaction_id = wechat_transaction_id
+    order.wechat_transaction_id = channel_transaction_id
     user = db.query(User).filter(User.id == order.user_id).first()
     if user:
         add_c = quantize_credits(order.credits or 0)
@@ -85,21 +83,21 @@ def _apply_wechat_paid_to_order(
             add_c,
             "recharge",
             bal,
-            description="充值到账（微信支付）",
+            description=f"充值到账（{channel_label}）",
             ref_type="recharge_order",
             ref_id=(order.out_trade_no or "")[:128],
             meta={
                 "order_id": order.id,
                 "amount_fen": paid_total_fen,
-                "wechat_transaction_id": wechat_transaction_id,
+                "channel_transaction_id": channel_transaction_id,
             },
         )
     order.status = "paid"
     order.paid_at = datetime.utcnow()
     db.commit()
     logger.info(
-        "wechat paid (query or notify) order_id=%s out_trade_no=%s paid_fen=%s credits_granted=%s user_id=%s transaction_id=%s",
-        order.id, order.out_trade_no, paid_total_fen, order.credits, order.user_id, wechat_transaction_id,
+        "paid (query or notify) order_id=%s out_trade_no=%s paid_fen=%s credits_granted=%s user_id=%s transaction_id=%s",
+        order.id, order.out_trade_no, paid_total_fen, order.credits, order.user_id, channel_transaction_id,
     )
     return True
 
@@ -388,10 +386,10 @@ class RechargeCompleteBody(BaseModel):
     order_id: Optional[int] = None
 
 
-# ── 自建微信支付（不用速推）────────────────────────────────────────────────
+# ── 付呗聚合支付（替代自建微信支付）─────────────────────────────────────────
 
-@router.post("/api/recharge/wechat-create", summary="创建充值订单并调微信 Native 下单，返回扫码链接")
-def create_wechat_recharge_order(
+@router.post("/api/recharge/fubei-create", summary="创建充值订单并调付呗预下单，返回聚合收款码")
+async def create_fubei_recharge_order(
     body: RechargeCreateBody,
     request: Request,
     current_user: User = Depends(get_current_user),
@@ -399,8 +397,8 @@ def create_wechat_recharge_order(
 ):
     if not _use_independent_recharge():
         raise HTTPException(status_code=400, detail="当前未启用自有充值")
-    if not _wechat_pay_configured():
-        raise HTTPException(status_code=400, detail="未配置自建微信支付（wechat_mch_id/wechat_pay_apiv3_key/wechat_pay_serial_no/wechat_pay_private_key_path/wechat_app_id）")
+    if not fubei_configured():
+        raise HTTPException(status_code=400, detail="未配置付呗支付（FUBEI_APP_ID / FUBEI_APP_SECRET）")
     pricing = _get_billing_pricing()
     packages = pricing.get("credit_packages", _DEFAULT_CREDIT_PACKAGES)
     if body.package_index is not None:
@@ -432,229 +430,133 @@ def create_wechat_recharge_order(
         credits=credits,
         status="pending",
         out_trade_no=out_trade_no,
-        payment_method="wechat",
+        payment_method="fubei",
     )
     db.add(order)
     db.commit()
     db.refresh(order)
+    total_yuan = (order.amount_fen / 100) if (order.amount_fen or 0) else float(order.amount_yuan)
     base_url = _get_public_base_url()
-    notify_url = f"{base_url}/api/recharge/wechat-notify"
-    key_path = Path((getattr(settings, "wechat_pay_private_key_path", None) or "").strip())
-    if not key_path.is_absolute():
-        key_path = _BASE_DIR / key_path
+    notify_url = f"{base_url}/api/recharge/fubei-notify"
+    front_url = base_url.rstrip("/") + "/"
     try:
-        private_key = key_path.read_text(encoding="utf-8")
-    except Exception as e:
-        logger.warning("wechat pay private key read failed: %s", e)
-        raise HTTPException(status_code=500, detail="微信支付商户私钥读取失败")
-    apiv3_key = (getattr(settings, "wechat_pay_apiv3_key", None) or "").strip()[:32]
-    if len(apiv3_key) != 32:
-        logger.warning("wechat pay: WECHAT_PAY_APIV3_KEY length=%s (need 32). Check 商户平台-API安全.", len(apiv3_key))
-    cert_dir_raw = (getattr(settings, "wechat_pay_cert_dir", None) or "").strip()
-    cert_dir: Optional[Path] = None
-    if cert_dir_raw:
-        cert_dir = Path(cert_dir_raw)
-        if not cert_dir.is_absolute():
-            cert_dir = _BASE_DIR / cert_dir
-        cert_dir.mkdir(parents=True, exist_ok=True)
-    public_key_path_raw = (getattr(settings, "wechat_pay_public_key_path", None) or "").strip()
-    public_key_id = (getattr(settings, "wechat_pay_public_key_id", None) or "").strip()
-    public_key_content: Optional[str] = None
-    if public_key_path_raw and public_key_id:
-        pub_path = Path(public_key_path_raw)
-        if not pub_path.is_absolute():
-            pub_path = _BASE_DIR / pub_path
-        try:
-            public_key_content = pub_path.read_text(encoding="utf-8").strip()
-        except Exception as e:
-            logger.warning("wechat pay public key read failed: %s", e)
-            raise HTTPException(status_code=500, detail="微信支付公钥文件读取失败，请检查 wechat_pay_public_key_path")
-    try:
-        from wechatpayv3 import WeChatPay, WeChatPayType
-        kwargs = dict(
-            wechatpay_type=WeChatPayType.NATIVE,
-            mchid=(getattr(settings, "wechat_mch_id", None) or "").strip(),
-            private_key=private_key,
-            cert_serial_no=(getattr(settings, "wechat_pay_serial_no", None) or "").strip(),
-            apiv3_key=apiv3_key,
-            appid=(getattr(settings, "wechat_app_id", None) or "").strip(),
-        )
-        if cert_dir is not None:
-            kwargs["cert_dir"] = str(cert_dir)
-        if public_key_content and public_key_id:
-            kwargs["public_key"] = public_key_content
-            kwargs["public_key_id"] = public_key_id
-        wxpay = WeChatPay(**kwargs)
-        total_fen = (order.amount_fen or 0) or (order.amount_yuan * 100)
-        # wechatpayv3 pay() 常见返回 (code, message)：code 为状态码，code_url 在 message 里；个别版本或返回 (code_url, _)
-        first, second = wxpay.pay(
-            description=f"龙虾积分充值-{credits}积分",
-            out_trade_no=out_trade_no,
-            amount={"total": total_fen},
+        result = await fubei_precreate(
+            merchant_order_sn=out_trade_no,
+            total_amount=total_yuan,
+            body=f"龙虾积分充值-{credits}积分",
             notify_url=notify_url,
+            success_url=front_url,
+            fail_url=front_url,
+            cancel_url=front_url,
+            attach=str(order.id),
         )
-        code_url = ""
-        if isinstance(first, str) and first.strip().startswith("weixin://"):
-            code_url = first.strip()
-        elif first == 200 or first == "200":
-            resp = second
-            if isinstance(resp, str):
-                try:
-                    resp = json.loads(resp)
-                except Exception:
-                    resp = {}
-            code_url = (resp.get("code_url") if isinstance(resp, dict) else None) or ""
-            code_url = str(code_url).strip()
-        if not code_url:
-            logger.warning("wechat pay response first=%s second=%s", first, second)
-            raise HTTPException(status_code=502, detail="微信下单返回异常或缺少 code_url，请稍后重试")
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.exception("wechat pay create failed: %s", e)
-        err_msg = str(e).strip()
-        if "platform certificate" in err_msg.lower() or "404" in err_msg or "401" in err_msg or "certificates" in err_msg.lower():
-            detail = (
-                "微信支付平台证书获取失败（GET /v3/certificates 通常返回 404 表示鉴权失败）。"
-                "请核对 .env：商户号(wechat_mch_id)、证书序列号(wechat_pay_serial_no)、APIv3 密钥(wechat_pay_apiv3_key)、"
-                "商户私钥(wechat_pay_private_key_path)、关联 AppID(wechat_app_id) 是否与微信支付商户平台一致；"
-                "或配置 wechat_pay_cert_dir 指向一目录，并从商户平台下载平台证书重命名为 cert.pem 放入该目录后重试。"
-            )
-        else:
-            detail = "微信下单失败，请稍后重试"
+        logger.exception("[fubei] precreate failed: %s", e)
+        raise HTTPException(status_code=502, detail="付呗下单失败，请稍后重试")
+    code = result.get("result_code")
+    if code != 200:
+        detail = result.get("result_message") or "付呗下单返回异常"
+        logger.warning("[fubei] precreate error: code=%s msg=%s", code, detail)
         raise HTTPException(status_code=502, detail=detail)
-    _amount_display = (order.amount_fen / 100) if (order.amount_fen or 0) else order.amount_yuan
+    data = result.get("data") or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    qr_code = (
+        data.get("qr_code") or data.get("code_url") or data.get("qr_url")
+        or data.get("prepay_url") or ""
+    ).strip()
+    fubei_order_sn = (data.get("order_sn") or data.get("sn") or "").strip()
+    if not qr_code:
+        logger.warning(
+            "[fubei] precreate no qr_code in data=%s values=%s",
+            list(data.keys()),
+            {k: (v[:60] if isinstance(v, str) else v) for k, v in data.items()} if isinstance(data, dict) else data,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="付呗下单成功但未返回收款码（prepay_url 为空），请检查付呗商户后台是否已开通聚合收款码功能",
+        )
     return {
         "order_id": order.id,
         "out_trade_no": order.out_trade_no,
-        "amount_yuan": _amount_display,
+        "amount_yuan": total_yuan,
         "credits": order.credits,
-        "code_url": code_url,
+        "qr_code": qr_code,
+        "fubei_order_sn": fubei_order_sn,
         "status": order.status,
     }
 
 
 @router.post(
-    "/api/recharge/wechat-notify",
-    summary="微信支付异步回调（验签解密后完成订单加积分）",
+    "/api/recharge/fubei-notify",
+    summary="付呗支付异步回调（验签后完成订单加积分）",
 )
-async def wechat_pay_notify(request: Request, db: Session = Depends(get_db)):
+async def fubei_pay_notify(request: Request, db: Session = Depends(get_db)):
     """
-    安全策略：① 依赖 wechatpayv3 验签，伪造请求无法通过；② 回调金额必须与订单金额一致否则返回 fail 不加积分；
-    ③ 已支付订单再次回调直接返回 success 不重复加积分（防重放）；④ 每笔到账记录 callback_amount_fen、wechat_transaction_id 与日志。
+    安全策略：① MD5 签名校验；② 回调金额与订单金额一致才加积分；
+    ③ 已支付订单再次回调返回 success 不重复加积分（防重放）。
     """
-    if not _wechat_pay_configured():
-        logger.warning("wechat_notify wechat pay not configured")
+    if not fubei_configured():
+        logger.warning("[fubei] notify: fubei not configured")
         return PlainTextResponse("fail", status_code=500)
     raw = await request.body()
-    headers = dict(request.headers)
-    logger.info(
-        "wechat_notify received method=%s content_length=%s has_signature=%s",
-        request.method,
-        len(raw),
-        "Wechatpay-Signature" in headers or "wechatpay-signature" in [h.lower() for h in headers],
-    )
-    key_path = Path((getattr(settings, "wechat_pay_private_key_path", None) or "").strip())
-    if not key_path.is_absolute():
-        key_path = _BASE_DIR / key_path
+    logger.info("[fubei] notify received content_length=%s", len(raw))
     try:
-        private_key = key_path.read_text(encoding="utf-8")
+        payload = json.loads(raw)
     except Exception:
-        return PlainTextResponse("fail", status_code=500)
-    apiv3_key_raw = (getattr(settings, "wechat_pay_apiv3_key", None) or "").strip()
-    if len(apiv3_key_raw) != 32:
-        logger.warning("wechat_notify WECHAT_PAY_APIV3_KEY len=%s (must be 32), callback decrypt may fail", len(apiv3_key_raw))
-    apiv3_key = apiv3_key_raw[:32]
-    public_key_path_raw = (getattr(settings, "wechat_pay_public_key_path", None) or "").strip()
-    public_key_id = (getattr(settings, "wechat_pay_public_key_id", None) or "").strip()
-    public_key_content = None
-    if public_key_path_raw and public_key_id:
-        pub_path = Path(public_key_path_raw)
-        if not pub_path.is_absolute():
-            pub_path = _BASE_DIR / pub_path
-        try:
-            public_key_content = pub_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-    if not public_key_content or not public_key_id:
-        logger.warning("wechat_notify WECHAT_PAY_PUBLIC_KEY_PATH/ID not set, callback verify may need platform cert")
-    try:
-        from wechatpayv3 import WeChatPay, WeChatPayType
-        kwargs = dict(
-            wechatpay_type=WeChatPayType.NATIVE,
-            mchid=(getattr(settings, "wechat_mch_id", None) or "").strip(),
-            private_key=private_key,
-            cert_serial_no=(getattr(settings, "wechat_pay_serial_no", None) or "").strip(),
-            apiv3_key=apiv3_key,
-            appid=(getattr(settings, "wechat_app_id", None) or "").strip(),
-        )
-        if public_key_content and public_key_id:
-            kwargs["public_key"] = public_key_content
-            kwargs["public_key_id"] = public_key_id
-        wxpay = WeChatPay(**kwargs)
-        result = wxpay.callback(headers, raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-    except Exception as e:
-        import traceback
-        wechat_headers = {k: v[:80] + "..." if len(str(v)) > 80 else v for k, v in headers.items() if "wechat" in k.lower() or "signature" in k.lower()}
-        logger.warning(
-            "wechat_notify callback verify failed: %s (type=%s) wechat_headers_keys=%s",
-            e, type(e).__name__, list(wechat_headers.keys()),
-        )
-        logger.debug("wechat_notify verify traceback: %s", traceback.format_exc())
+        logger.warning("[fubei] notify: invalid JSON")
         return PlainTextResponse("fail", status_code=400)
-    event_type = result.get("event_type") if isinstance(result, dict) else None
-    logger.info("wechat_notify decoded event_type=%s result_keys=%s", event_type, list(result.keys()) if isinstance(result, dict) else None)
-    if not result or event_type != "TRANSACTION.SUCCESS":
-        logger.info("wechat_notify skip non TRANSACTION.SUCCESS event_type=%s", event_type)
+    if not verify_callback_sign(payload):
+        logger.warning("[fubei] notify: sign verification failed")
+        return PlainTextResponse("fail", status_code=400)
+    biz_raw = payload.get("biz_content") or payload.get("data") or "{}"
+    if isinstance(biz_raw, str):
+        try:
+            biz = json.loads(biz_raw)
+        except Exception:
+            biz = {}
+    else:
+        biz = biz_raw if isinstance(biz_raw, dict) else {}
+    # 付呗回调中的业务数据：order_status, merchant_order_sn, order_sn, total_fee, net_amount 等
+    order_status = (biz.get("order_status") or payload.get("order_status") or "").strip().upper()
+    if order_status not in ("SUCCESS", "TRADE_SUCCESS"):
+        logger.info("[fubei] notify skip non-success status=%s", order_status)
         return PlainTextResponse("success")
-    # 回调解密后：金额在 amount.total(分)，单号在 out_trade_no、transaction_id
-    res = result.get("resource") if isinstance(result.get("resource"), dict) else result
-    payload = res if isinstance(res, dict) else result
-    out_trade_no = (payload.get("out_trade_no") or result.get("out_trade_no") or "").strip()
+    out_trade_no = (biz.get("merchant_order_sn") or payload.get("merchant_order_sn") or "").strip()
     if not out_trade_no:
+        logger.warning("[fubei] notify: missing merchant_order_sn")
         return PlainTextResponse("success")
-    logger.info("wechat_notify lookup order out_trade_no=%s", out_trade_no)
     order = db.query(RechargeOrder).filter(RechargeOrder.out_trade_no == out_trade_no).first()
     if not order:
-        logger.warning("wechat_notify order not found out_trade_no=%s", out_trade_no)
+        logger.warning("[fubei] notify: order not found out_trade_no=%s", out_trade_no)
         return PlainTextResponse("success")
     if order.status == "paid":
-        logger.info("wechat_notify order already paid out_trade_no=%s order_id=%s", out_trade_no, order.id)
         return PlainTextResponse("success")
-    # 安全校验：回调金额必须与订单金额一致，否则拒绝到账
-    amount_info = payload.get("amount") if isinstance(payload.get("amount"), dict) else None
-    callback_total_fen = amount_info.get("total") if amount_info is not None else None
-    if callback_total_fen is not None:
-        callback_total_fen = int(callback_total_fen)
-    expected_fen = (order.amount_fen or 0) or (order.amount_yuan * 100)
-    if callback_total_fen is None:
-        logger.error("wechat_notify amount missing out_trade_no=%s result_keys=%s", out_trade_no, list(result.keys()) if isinstance(result, dict) else None)
+    # 金额校验：total_fee 单位为元
+    total_fee = biz.get("total_fee") or biz.get("total_amount") or payload.get("total_fee")
+    if total_fee is not None:
+        callback_fen = int(round(float(total_fee) * 100))
+    else:
+        logger.error("[fubei] notify: amount missing out_trade_no=%s", out_trade_no)
         return PlainTextResponse("fail", status_code=400)
-    if callback_total_fen != expected_fen:
-        logger.error(
-            "wechat_notify amount_mismatch out_trade_no=%s order_id=%s callback_fen=%s expected_fen=%s reject",
-            out_trade_no, order.id, callback_total_fen, expected_fen,
-        )
+    fubei_order_sn = (biz.get("order_sn") or payload.get("order_sn") or "").strip() or None
+    if not _apply_paid_to_order(order, callback_fen, fubei_order_sn, db, channel_label="付呗聚合支付"):
         return PlainTextResponse("fail", status_code=400)
-    wechat_transaction_id = (payload.get("transaction_id") or result.get("transaction_id") or "").strip() or None
-    if not _apply_wechat_paid_to_order(order, callback_total_fen, wechat_transaction_id, db):
-        return PlainTextResponse("fail", status_code=400)
-    logger.info("wechat_notify success order_id=%s out_trade_no=%s credits=%s", order.id, out_trade_no, order.credits)
+    logger.info("[fubei] notify success order_id=%s out_trade_no=%s credits=%s", order.id, out_trade_no, order.credits)
     return PlainTextResponse("success")
 
 
-@router.get("/api/recharge/wechat-query", summary="无公网时轮询：服务器主动查微信订单，已支付则入账（不依赖回调）")
-def wechat_query_order(
+@router.get("/api/recharge/fubei-query", summary="主动查询付呗订单状态，已支付则入账")
+async def fubei_query_recharge_order(
     out_trade_no: str,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """
-    无公网地址、微信无法回调时：前端在用户扫码支付后轮询本接口；
-    服务器调微信「查询订单」API，若已支付则校验金额并加积分，返回 status=paid。
-    """
-    if not _wechat_pay_configured():
-        raise HTTPException(status_code=400, detail="未配置微信支付")
+    if not fubei_configured():
+        raise HTTPException(status_code=400, detail="未配置付呗支付")
     out_trade_no = (out_trade_no or "").strip()
     if not out_trade_no:
         raise HTTPException(status_code=400, detail="请传 out_trade_no")
@@ -666,64 +568,30 @@ def wechat_query_order(
         raise HTTPException(status_code=404, detail="订单不存在或无权查询")
     if order.status == "paid":
         return {"status": "paid", "credits": order.credits, "order_id": order.id}
-    key_path = Path((getattr(settings, "wechat_pay_private_key_path", None) or "").strip())
-    if not key_path.is_absolute():
-        key_path = _BASE_DIR / key_path
     try:
-        private_key = key_path.read_text(encoding="utf-8")
-    except Exception:
-        raise HTTPException(status_code=500, detail="商户私钥读取失败")
-    apiv3_key = (getattr(settings, "wechat_pay_apiv3_key", None) or "").strip()[:32]
-    public_key_path_raw = (getattr(settings, "wechat_pay_public_key_path", None) or "").strip()
-    public_key_id = (getattr(settings, "wechat_pay_public_key_id", None) or "").strip()
-    public_key_content: Optional[str] = None
-    if public_key_path_raw and public_key_id:
-        pub_path = Path(public_key_path_raw)
-        if not pub_path.is_absolute():
-            pub_path = _BASE_DIR / pub_path
-        try:
-            public_key_content = pub_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            pass
-    try:
-        from wechatpayv3 import WeChatPay, WeChatPayType
-        mchid = (getattr(settings, "wechat_mch_id", None) or "").strip()
-        kwargs = dict(
-            wechatpay_type=WeChatPayType.NATIVE,
-            mchid=mchid,
-            private_key=private_key,
-            cert_serial_no=(getattr(settings, "wechat_pay_serial_no", None) or "").strip(),
-            apiv3_key=apiv3_key,
-            appid=(getattr(settings, "wechat_app_id", None) or "").strip(),
-        )
-        if public_key_content and public_key_id:
-            kwargs["public_key"] = public_key_content
-            kwargs["public_key_id"] = public_key_id
-        wxpay = WeChatPay(**kwargs)
-        try:
-            result = wxpay.query_order(out_trade_no=out_trade_no, mchid=mchid)
-        except AttributeError:
-            result = wxpay.query(out_trade_no=out_trade_no, mchid=mchid)
+        result = await fubei_query_order(merchant_order_sn=out_trade_no)
     except Exception as e:
-        logger.warning("wechat query order failed: %s", e)
+        logger.warning("[fubei] query order failed: %s", e)
         return {"status": "pending", "message": "查单失败，请稍后再试"}
-    # result 可能是 (code, body) 或直接 body
-    if isinstance(result, (list, tuple)) and len(result) >= 2:
-        code, body = result[0], result[1]
-        if code != 200:
-            return {"status": "pending"}
-        resp = body if isinstance(body, dict) else (json.loads(body) if isinstance(body, str) else {})
-    else:
-        resp = result if isinstance(result, dict) else {}
-    trade_state = (resp.get("trade_state") or "").strip()
-    if trade_state != "SUCCESS":
+    code = result.get("result_code")
+    if code != 200:
+        return {"status": "pending", "message": result.get("result_message", "")}
+    data = result.get("data") or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    order_status = (data.get("order_status") or "").strip().upper()
+    if order_status not in ("SUCCESS", "TRADE_SUCCESS"):
         return {"status": "pending"}
-    amount_info = resp.get("amount")
-    paid_fen = int(amount_info.get("total")) if isinstance(amount_info, dict) and amount_info.get("total") is not None else None
-    if paid_fen is None:
+    total_fee = data.get("total_fee") or data.get("total_amount")
+    if total_fee is not None:
+        paid_fen = int(round(float(total_fee) * 100))
+    else:
         return {"status": "pending", "message": "查单结果无金额"}
-    wechat_transaction_id = (resp.get("transaction_id") or "").strip() or None
-    if not _apply_wechat_paid_to_order(order, paid_fen, wechat_transaction_id, db):
+    fubei_order_sn = (data.get("order_sn") or "").strip() or None
+    if not _apply_paid_to_order(order, paid_fen, fubei_order_sn, db, channel_label="付呗聚合支付"):
         return {"status": "pending", "message": "金额校验未通过"}
     db.refresh(order)
     return {"status": "paid", "credits": order.credits, "order_id": order.id}

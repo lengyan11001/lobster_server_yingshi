@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -60,6 +61,36 @@ def set_mcp_token_for_agent(agent_id: str, token: str, ttl_seconds: int = MCP_TO
     expiry = time.time() + ttl_seconds
     with _cache_lock:
         _mcp_token_cache[agent_id] = (token.strip(), expiry)
+
+
+def _mcp_gateway_forward_read_timeout_sec(body: bytes) -> float:
+    """tools/call invoke_capability 与 lobster_online chat._exec_tool / mcp/http_server 对齐，避免长视频被 120s 掐断。"""
+    try:
+        jb = json.loads(body)
+    except Exception:
+        return 120.0
+    if not isinstance(jb, dict) or jb.get("method") != "tools/call":
+        return 120.0
+    params = jb.get("params")
+    if not isinstance(params, dict):
+        return 120.0
+    if (params.get("name") or "").strip() != "invoke_capability":
+        return 120.0
+    args = params.get("arguments")
+    if not isinstance(args, dict):
+        return 120.0
+    cap = (args.get("capability_id") or "").strip()
+    if cap == "video.generate":
+        return 40 * 60.0
+    if cap == "task.get_result":
+        return 35 * 60.0
+    if cap == "image.generate":
+        return 25 * 60.0
+    if cap == "comfly.veo.daihuo_pipeline":
+        return 130 * 60.0
+    if cap == "comfly.veo":
+        return 40 * 60.0
+    return 120.0
 
 
 def get_mcp_token_from_request(request: Request) -> Optional[str]:
@@ -126,7 +157,9 @@ async def mcp_gateway_proxy(request: Request) -> Response:
     if xi:
         headers["X-Installation-Id"] = xi
     try:
-        async with httpx.AsyncClient(timeout=120.0, trust_env=False) as client:
+        _read_sec = _mcp_gateway_forward_read_timeout_sec(body)
+        _gw_timeout = httpx.Timeout(connect=45.0, read=_read_sec, write=600.0, pool=60.0)
+        async with httpx.AsyncClient(timeout=_gw_timeout, trust_env=False) as client:
             r = await client.post(MCP_BACKEND_URL, content=body, headers=headers)
         # 只透传对 JSON-RPC 有用的响应头，避免 hop-by-hop 等干扰
         out_headers = {}

@@ -19,7 +19,7 @@ if [ -z "$LOBSTER_DEPLOY_HOST" ]; then
   echo "未设置 LOBSTER_DEPLOY_HOST，无法远程执行。"
   echo "可创建 .env.deploy 写入 LOBSTER_DEPLOY_HOST=user@IP、LOBSTER_DEPLOY_SSH_KEY=密钥路径、LOBSTER_DEPLOY_REMOTE_DIR=服务器目录"
   echo "可选：LOBSTER_DEPLOY_HOST_OVERSEAS=root@海外IP（与 lobster-server.icu 同机时填其解析地址）"
-  echo "或在服务器上执行: cd /root/lobster_server && bash scripts/server_update_and_restart.sh"
+  echo "或在服务器上执行: cd /opt/lobster-server && bash scripts/server_update_and_restart.sh"
   exit 1
 fi
 

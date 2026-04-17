@@ -40,10 +40,9 @@ def _use_own_wechat_login() -> bool:
     return bool((getattr(settings, "wechat_app_id", None) or "").strip() and (getattr(settings, "wechat_app_secret", None) or "").strip())
 
 
-def _use_own_wechat_pay() -> bool:
-    from .billing import _wechat_pay_configured
-
-    return _wechat_pay_configured()
+def _use_fubei_pay() -> bool:
+    from ..services.fubei_pay import fubei_configured
+    return fubei_configured()
 
 
 @router.get("/api/edition", summary="当前版本（本构建仅在线版）")
@@ -55,7 +54,7 @@ def get_edition():
     use_independent = getattr(settings, "lobster_independent_auth", True)
     out["use_independent_auth"] = bool(use_independent)
     out["use_own_wechat_login"] = _use_own_wechat_login()
-    out["use_own_wechat_pay"] = _use_own_wechat_pay()
+    out["use_fubei_pay"] = _use_fubei_pay()
     if edition == "online":
         out["allow_self_config_model"] = getattr(settings, "sutui_online_model_self_config", True)
         if not use_independent:

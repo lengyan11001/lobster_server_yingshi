@@ -9,7 +9,7 @@
       "type": "object",
       "properties": {
         "prompt": { "type": "string", "description": "生成提示词" },
-        "model": { "type": "string", "description": "可选，如 fal-ai/flux-2/flash, jimeng-4.5" },
+        "model": { "type": "string", "description": "可选（省略时默认 fal-ai/flux-2/flash）" },
         "image_url": { "type": "string", "description": "图生图时传入图片 URL" },
         "image_size": { "type": "string", "description": "可选，如 square_hd, landscape_16_9" }
       },
@@ -25,7 +25,7 @@
     "arg_schema": {
       "type": "object",
       "properties": {
-        "model": { "type": "string", "description": "视频模型，如 st-ai/super-seed2(文生), wan/v2.6/image-to-video(图生), fal-ai/kling-video/o3/pro/image-to-video" },
+        "model": { "type": "string", "description": "可选（省略时默认 sora2 即 fal-ai/sora-2/text-to-video）" },
         "prompt": { "type": "string", "description": "描述/动作提示词" },
         "image_url": { "type": "string", "description": "图生视频时必传，公开可访问的图片 URL；本地图可用 sutui.transfer_url 先转存" },
         "aspect_ratio": { "type": "string", "description": "可选，宽高比 16:9 或 9:16" },
@@ -160,6 +160,23 @@
         }
       },
       "required": ["url"]
+    }
+  },
+  "comfly.chat": {
+    "description": "Comfly 对话补全（OpenAI 兼容）。可用于前端技能调用 Comfly 的 LLM 能力，如商品详情图文案等。",
+    "upstream": "comfly",
+    "upstream_tool": "chat_completions",
+    "enabled": true,
+    "is_default": false,
+    "arg_schema": {
+      "type": "object",
+      "properties": {
+        "model": { "type": "string", "description": "Comfly 模型名，如 veo3.1-fast" },
+        "messages": { "type": "array", "description": "OpenAI 格式的 messages 数组" },
+        "temperature": { "type": "number", "description": "采样温度，默认 0.7" },
+        "max_tokens": { "type": "integer", "description": "最大生成 token 数" }
+      },
+      "required": ["model", "messages"]
     }
   },
   "sutui.speak": {

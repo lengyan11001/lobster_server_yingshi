@@ -34,11 +34,22 @@ from .auth import access_token_claims, create_access_token, get_current_user, oa
 from ..models import CapabilityCallLog, ChatTurnLog, ToolCallLog, User
 
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+_COMFLY_PRICING_PATH = _BASE_DIR / "comfly_pricing.json"
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 MAX_HISTORY = 20
+
+
+def _get_comfly_image_models() -> list[str]:
+    """Return Comfly image model IDs from comfly_pricing.json (cached per process)."""
+    try:
+        data = json.loads(_COMFLY_PRICING_PATH.read_text(encoding="utf-8"))
+        models = data.get("models") or {}
+        return [k for k, v in models.items() if isinstance(v, dict) and v.get("api_format") == "dalle"]
+    except Exception:
+        return []
 MAX_TOOL_ROUNDS = 8
 # 单条历史消息最大字符数，避免长回复再次送入模型导致重复/延续上一条
 MAX_HISTORY_MESSAGE_CHARS = 1200
@@ -289,7 +300,7 @@ async def _exec_tool(
         if capability_id == "task.get_result":
             logger.info(
                 "[素材] MCP 请求 capability_id=%s task_id=%s",
-                capability_id, (pl.get("task_id") or "").strip() or "(空)",
+                capability_id, str(pl.get("task_id") or "").strip() or "(空)",
             )
         else:
             logger.info(
@@ -305,6 +316,8 @@ async def _exec_tool(
     timeout = 120.0
     if name == "invoke_capability" and (args.get("capability_id") or "").strip() == "task.get_result":
         timeout = 65 * 60.0  # 单次 get_result 调用超时，须大于 _POLL_MAX_WAIT_VIDEO
+    elif name in ("publish_content", "publish_youtube_video"):
+        timeout = 300.0  # Playwright 浏览器自动化发布可能超过 120s
 
     def _friendly_tool_error(err: Exception) -> str:
         raw = str(err or "")
@@ -527,6 +540,57 @@ def _reply_for_user(reply: str) -> str:
     if not out:
         return "正在处理…"
     return out
+
+
+# ---------------------------------------------------------------------------
+# Generation early-finish: 纯生成（图片/视频）完成后直接返回，不再跑多余 LLM 轮次
+# ---------------------------------------------------------------------------
+
+def _user_text_requests_publish(text: str) -> bool:
+    s = (text or "").strip()
+    if not s:
+        return False
+    if "发布" in s or "上传" in s or "投稿" in s:
+        return True
+    platforms = (
+        "抖音", "快手", "小红书", "b站", "B站", "视频号", "微博", "tiktok", "TikTok",
+        "youtube", "YouTube", "instagram", "Instagram",
+    )
+    return any(p in s for p in platforms)
+
+
+def _tool_call_requests_publish(fn_name: str, args: Dict[str, Any]) -> bool:
+    n = (fn_name or "").strip()
+    if n == "publish_content":
+        return True
+    if n != "invoke_capability":
+        return False
+    cap = (args.get("capability_id") or "").strip().lower()
+    return "publish" in cap
+
+
+def _round_has_publish_intent(tcs: List[Dict[str, Any]], last_user_content: str) -> bool:
+    if _user_text_requests_publish(last_user_content):
+        return True
+    for tc in tcs or []:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        try:
+            a = json.loads(fn.get("arguments") or "{}")
+        except Exception:
+            a = {}
+        if not isinstance(a, dict):
+            a = {}
+        if _tool_call_requests_publish(name, a):
+            return True
+    return False
+
+
+def _last_user_content(msgs: List[Dict]) -> str:
+    for m in reversed(msgs):
+        if m.get("role") == "user":
+            return (m.get("content") or "").strip()
+    return ""
 
 
 # 速推 task.get_result 状态：先判进行中再判终态，避免「未完成」等误判
@@ -828,22 +892,22 @@ def _extract_task_id_from_result(result_text: str) -> str:
         d = json.loads(raw) if raw.startswith("{") else {}
         if not d:
             return ""
-        tid = (d.get("task_id") or "").strip()
+        tid = str(d.get("task_id") or "").strip()
         if tid:
             return tid
         upstream = d.get("result")
         if isinstance(upstream, dict):
-            tid = (upstream.get("task_id") or "").strip()
+            tid = str(upstream.get("task_id") or "").strip()
             if tid:
                 return tid
             inner_result = upstream.get("result")
             if isinstance(inner_result, dict):
                 content = inner_result.get("content") or []
                 if content and isinstance(content[0], dict):
-                    t = (content[0].get("text") or "").strip()
+                    t = str(content[0].get("text") or "").strip()
                     if t.startswith("{"):
                         obj = json.loads(t)
-                        tid = (obj.get("task_id") or "").strip()
+                        tid = str(obj.get("task_id") or "").strip()
                         if tid:
                             return tid
         return ""
@@ -910,7 +974,7 @@ async def _poll_task_until_terminal_then_retry_video_on_504(
 
     while True:
         pl = gr_args.get("payload") if isinstance(gr_args.get("payload"), dict) else {}
-        task_id = (pl.get("task_id") or "").strip()
+        task_id = str(pl.get("task_id") or "").strip()
 
         if _is_task_result_in_progress(res):
             waited = 0
@@ -1021,8 +1085,12 @@ async def _chat_openai(
     user_id: Optional[int] = None,
 ) -> str:
     """OpenAI-compatible chat loop (DeepSeek, OpenAI, Google Gemini)."""
-    base = cfg["base_url"].rstrip("/")
-    if "googleapis.com" in base or base.endswith("/v1"):
+    base = (cfg.get("base_url") or "").rstrip("/")
+    # Server-side sutui-chat proxy: OpenAI-compatible body, but endpoint is /api/sutui-chat/completions
+    # (not /v1/chat/completions). This proxy implements "direct deepseek first, then xskill fallback".
+    if base.endswith("/api/sutui-chat"):
+        url = f"{base}/completions"
+    elif "googleapis.com" in base or base.endswith("/v1"):
         url = f"{base}/chat/completions"
     else:
         url = f"{base}/v1/chat/completions"
@@ -1076,6 +1144,10 @@ async def _chat_openai(
 
         if tcs:
             cur.append(msg)
+            last_user_text = _last_user_content(cur)
+            _wants_publish = _round_has_publish_intent(tcs, last_user_text)
+            _gen_saved: Optional[List[Dict[str, Any]]] = None
+            _gen_cap = ""
             for tc in tcs:
                 fn = tc.get("function", {})
                 try:
@@ -1182,7 +1254,7 @@ async def _chat_openai(
                 ):
                     poll_interval = 15
                     max_wait_sec = _POLL_MAX_WAIT_GENERIC
-                    task_id = (a.get("task_id") or a.get("payload", {}).get("task_id") or "").strip() if isinstance(a.get("payload"), dict) else (a.get("task_id") or "").strip()
+                    task_id = str(a.get("task_id") or a.get("payload", {}).get("task_id") or "").strip() if isinstance(a.get("payload"), dict) else str(a.get("task_id") or "").strip()
                     logger.info("[素材] task.get_result 自动轮询开始 task_id=%s interval=%ds max_wait=%ds", task_id or "(无)", poll_interval, max_wait_sec)
                     res = await _poll_task_until_terminal_then_retry_video_on_504(
                         initial_res=res,
@@ -1221,6 +1293,24 @@ async def _chat_openai(
                     "tool_call_id": tc.get("id", ""),
                     "content": res,
                 })
+                if (
+                    fn.get("name") == "invoke_capability"
+                    and cap in ("image.generate", "video.generate")
+                    and res
+                    and '"error"' not in res
+                ):
+                    try:
+                        _sa = _extract_saved_assets_from_task_result(res)
+                    except Exception:
+                        _sa = []
+                    if _sa:
+                        _gen_saved = _sa
+                        _gen_cap = cap
+            # 纯生成（无发布意图）且已拿到 saved_assets → 直接返回，不再跑多余 LLM 轮次
+            if not _wants_publish and _gen_saved and _gen_cap in ("image.generate", "video.generate"):
+                kind = "图片" if _gen_cap == "image.generate" else "视频"
+                logger.info("[CHAT] generation_early_finish: %s saved_assets=%d, skipping extra LLM round", _gen_cap, len(_gen_saved))
+                return f"{kind}已生成完成。"
             continue
 
         content = (msg.get("content") or "").strip()
@@ -1232,12 +1322,16 @@ async def _chat_openai(
             preamble = _strip_dsml(content)
             cur.append({"role": "assistant", "content": preamble or "正在调用工具..."})
             results = []
+            _tc_wants_pub = _user_text_requests_publish(_last_user_content(cur))
+            _tc_gen_saved: Optional[List[Dict[str, Any]]] = None
+            _tc_gen_cap = ""
             for tc_info in text_calls:
                 _inject_video_media_urls(tc_info["arguments"], attachment_urls or [])
                 logger.info("[CHAT] text_tool_call: %s(%s)", tc_info["name"], list(tc_info["arguments"].keys()))
                 cap = (tc_info["arguments"].get("capability_id") or "").strip()
                 if cap in ("image.generate", "video.generate", "task.get_result"):
                     logger.info("[素材] 模型请求工具(text_calls) capability_id=%s", cap)
+                _tc_wants_pub = _tc_wants_pub or _tool_call_requests_publish(tc_info["name"], tc_info["arguments"])
                 res = await _exec_tool_with_balance(
                     tc_info["name"], tc_info["arguments"], token, sutui_token, progress_cb, db, user_id,
                 )
@@ -1334,7 +1428,7 @@ async def _chat_openai(
                     poll_interval = 15
                     max_wait_sec = _POLL_MAX_WAIT_GENERIC
                     args = tc_info["arguments"]
-                    task_id = (args.get("task_id") or ((args.get("payload") or {}).get("task_id") if isinstance(args.get("payload"), dict) else None) or "").strip()
+                    task_id = str(args.get("task_id") or ((args.get("payload") or {}).get("task_id") if isinstance(args.get("payload"), dict) else None) or "").strip()
                     logger.info("[素材] task.get_result 自动轮询开始(text_calls) task_id=%s interval=%ds", task_id or "(无)", poll_interval)
                     res = await _poll_task_until_terminal_then_retry_video_on_504(
                         initial_res=res,
@@ -1369,6 +1463,23 @@ async def _chat_openai(
                         except Exception:
                             pass
                 results.append(f"[{tc_info['name']}] {res}")
+                if (
+                    tc_info["name"] == "invoke_capability"
+                    and cap in ("image.generate", "video.generate")
+                    and res
+                    and '"error"' not in res
+                ):
+                    try:
+                        _tsa = _extract_saved_assets_from_task_result(res)
+                    except Exception:
+                        _tsa = []
+                    if _tsa:
+                        _tc_gen_saved = _tsa
+                        _tc_gen_cap = cap
+            if not _tc_wants_pub and _tc_gen_saved and _tc_gen_cap in ("image.generate", "video.generate"):
+                kind = "图片" if _tc_gen_cap == "image.generate" else "视频"
+                logger.info("[CHAT] generation_early_finish(text_calls): %s saved_assets=%d", _tc_gen_cap, len(_tc_gen_saved))
+                return f"{kind}已生成完成。"
             cur.append({"role": "user", "content": "工具调用结果:\n" + "\n\n".join(results) + "\n\n请根据以上结果回答用户。"})
             continue
 
@@ -1413,6 +1524,9 @@ async def _chat_openai(
                 if tcs2:
                     logger.info("[CHAT] forced retry produced %d tool_calls", len(tcs2))
                     cur.append(msg2)
+                    _fr_wants_pub = _round_has_publish_intent(tcs2, _last_user_content(cur))
+                    _fr_gen_saved: Optional[List[Dict[str, Any]]] = None
+                    _fr_gen_cap = ""
                     for tc in tcs2:
                         fn = tc.get("function", {})
                         try:
@@ -1516,6 +1630,23 @@ async def _chat_openai(
                             "tool_call_id": tc.get("id", ""),
                             "content": res,
                         })
+                        if (
+                            fn.get("name") == "invoke_capability"
+                            and cap_f in ("image.generate", "video.generate")
+                            and res
+                            and '"error"' not in res
+                        ):
+                            try:
+                                _fsa = _extract_saved_assets_from_task_result(res)
+                            except Exception:
+                                _fsa = []
+                            if _fsa:
+                                _fr_gen_saved = _fsa
+                                _fr_gen_cap = cap_f
+                    if not _fr_wants_pub and _fr_gen_saved and _fr_gen_cap in ("image.generate", "video.generate"):
+                        kind = "图片" if _fr_gen_cap == "image.generate" else "视频"
+                        logger.info("[CHAT] generation_early_finish(forced): %s saved_assets=%d", _fr_gen_cap, len(_fr_gen_saved))
+                        return f"{kind}已生成完成。"
                     continue
                 else:
                     logger.warning("[CHAT] forced retry still no tool_calls")
@@ -1991,6 +2122,13 @@ async def chat_endpoint(
             "【工具调用】\n"
             "生成图片: invoke_capability(\"image.generate\", {prompt, model:\"jimeng-4.0\"}) → task.get_result(task_id) → saved_assets[0].asset_id\n"
             "生成视频: invoke_capability(\"video.generate\", {model:\"st-ai/super-seed2\", prompt, duration:5}) → task.get_result 轮询(30-120s)\n"
+            "生成图片: invoke_capability(\"image.generate\", {prompt, model:\"fal-ai/flux-2/flash\"}) → task.get_result(task_id) → saved_assets[0].asset_id\n"
+            "【图片模型】用户未指定模型时默认使用 fal-ai/flux-2/flash。用户指定模型时必须原样传入payload.model。可用图片模型: fal-ai/flux-2/flash, jimeng-4.0, jimeng-4.5"
+            + (", " + ", ".join(_get_comfly_image_models()) if _get_comfly_image_models() else "")
+            + "。用户说用某模型就传该模型名，禁止替换为default。\n"
+            "生成视频: invoke_capability(\"video.generate\", {model:\"sora2\", prompt, duration:5}) → task.get_result 轮询(30-120s)\n"
+            "【视频模型】用户不指定模型时默认用 sora2。可用模型仅限: sora2, seedance2, hailuo, vidu, wan, veo, kling, grok, jimeng-video。严禁使用这些之外的模型名（如stable-video-diffusion等不存在的模型）。\n"
+            "【爆款TVC/带货视频】用户说「TVC」「爆款TVC」「带货视频」「做TVC」时，不走video.generate，改用 invoke_capability(\"comfly.veo.daihuo_pipeline\", {action:\"start_pipeline\", asset_id:\"素材ID\", auto_save:true})。Comfly Veo的task_id(video_开头)禁止调task.get_result，MCP会自动轮询。\n"
             "图生视频: 用户附图时只填prompt/model/duration，禁止填image_url（系统自动注入）\n"
             "图片编辑: image.generate + image_url=附件URL，model用edit系列(wan/v2.7/edit等)，prompt中用 image 1 引用\n"
             "理解图片: invoke_capability(\"image.understand\", {image_url, prompt})\n"
@@ -1999,7 +2137,7 @@ async def chat_endpoint(
             "IG/FB: list_meta_social_accounts → publish_meta_social(account_id, platform, content_type, ...)\n"
             "IG/FB数据: sync_meta_social_data → get_meta_social_data\n\n"
             "【prompt规则】用用户原话去掉指令(发布到/用某模型等)后的内容作prompt，不改写不臆造。模型名填payload.model。\n"
-            "【发布规则】生成成功后立即发布(同一轮)，asset_id用get_result返回的saved_assets中的ID。「用生成的」指上轮结果，直接publish。\n"
+            "【发布规则】生成成功后立即发布(同一轮)，asset_id用get_result返回的saved_assets中的ID。有素材(图/视频)时asset_id用saved_assets中的ID发布。纯文字文章(笔记/头条文章等)不需要先生成图片，直接publish_content即可(asset_id留空或用已有素材)。用户说「不需要配图」时严禁调image.generate。「用生成的」指上轮结果，直接publish。\n"
             "【查询vs生成】task.get_result只查状态不新建任务，回复中禁止说「重新提交」。失败如实告知，禁止自行重试。\n"
             "【素材指代】不确定用户指哪个素材时，先list_assets列出候选让用户确认，禁止猜测。\n"
             if has_tools
@@ -2014,6 +2152,8 @@ async def chat_endpoint(
     for m in (payload.history or []):
         if m.role in ("user", "assistant") and (m.content or "").strip():
             content = m.content.strip()
+            if m.role == "assistant" and content.startswith("错误："):
+                continue
             if len(content) > MAX_HISTORY_MESSAGE_CHARS:
                 content = (
                     content[: MAX_HISTORY_MESSAGE_CHARS // 2].rstrip()
@@ -2029,7 +2169,23 @@ async def chat_endpoint(
     t0 = time.perf_counter()
 
     # ── Primary path: direct LLM API with MCP tools ──
-    cfg = _resolve_config(resolve_model) if resolve_model else None
+    cfg = None
+    # Online edition: prefer server-side sutui-chat proxy (direct DeepSeek if configured, else xskill fallback).
+    if edition == "online":
+        try:
+            base_self = str(request.base_url).rstrip("/")
+        except Exception:
+            base_self = ""
+        if base_self:
+            cfg = {
+                "base_url": f"{base_self}/api/sutui-chat",
+                "api_key": raw_token,
+                "model_name": "deepseek-chat",
+                "provider": "sutui-chat",
+            }
+    if cfg is None:
+        cfg = _resolve_config(resolve_model) if resolve_model else None
+
     if cfg:
         try:
             logger.info("[对话] 请求 model=%s tools=%d", model, len(mcp_tools))
@@ -2146,12 +2302,19 @@ async def _chat_stream_events(
                 "【工具调用】\n"
                 "生成图片: invoke_capability(\"image.generate\", {prompt, model:\"jimeng-4.0\"}) → task.get_result(task_id) → saved_assets[0].asset_id\n"
                 "生成视频: invoke_capability(\"video.generate\", {model:\"st-ai/super-seed2\", prompt, duration:5}) → task.get_result 轮询(30-120s)\n"
+                "生成图片: invoke_capability(\"image.generate\", {prompt, model:\"fal-ai/flux-2/flash\"}) → task.get_result(task_id) → saved_assets[0].asset_id\n"
+                "【图片模型】用户未指定模型时默认使用 fal-ai/flux-2/flash。用户指定模型时必须原样传入payload.model。可用图片模型: fal-ai/flux-2/flash, jimeng-4.0, jimeng-4.5"
+                + (", " + ", ".join(_get_comfly_image_models()) if _get_comfly_image_models() else "")
+                + "。用户说用某模型就传该模型名，禁止替换为default。\n"
+                "生成视频: invoke_capability(\"video.generate\", {model:\"sora2\", prompt, duration:5}) → task.get_result 轮询(30-120s)\n"
+                "【视频模型】用户不指定模型时默认用 sora2。可用模型仅限: sora2, seedance2, hailuo, vidu, wan, veo, kling, grok, jimeng-video。严禁使用这些之外的模型名。\n"
+                "【爆款TVC/带货视频】用户说「TVC」「爆款TVC」「带货视频」「做TVC」时，不走video.generate，改用 invoke_capability(\"comfly.veo.daihuo_pipeline\", {action:\"start_pipeline\", asset_id:\"素材ID\", auto_save:true})。Comfly Veo的task_id(video_开头)禁止调task.get_result。\n"
                 "图生视频: 用户附图时只填prompt/model/duration，禁止填image_url（系统自动注入）\n"
                 "图片编辑: image.generate + image_url=附件URL，model用edit系列(wan/v2.7/edit等)\n"
                 "理解图片/视频: image.understand / video.understand\n"
                 "发布: publish_content(asset_id, account_nickname, title, description, tags) — 全自动，禁止要求用户手动操作\n\n"
                 "【prompt规则】用用户原话去掉指令后的内容作prompt，不改写不臆造。模型名填payload.model。\n"
-                "【发布规则】生成成功后立即发布(同一轮)，asset_id用get_result返回的saved_assets中的ID。\n"
+                "【发布规则】生成成功后立即发布(同一轮)，asset_id用get_result返回的saved_assets中的ID。有素材(图/视频)时asset_id用saved_assets中的ID发布。纯文字文章不需要先生成图片，直接publish_content即可。用户说「不需要配图」时严禁调image.generate。\n"
                 "【查询vs生成】task.get_result只查状态不新建任务，禁止说「重新提交」。失败如实告知。\n"
                 "【素材指代】不确定时先list_assets列出候选让用户确认，禁止猜测。\n"
                 if has_tools
@@ -2165,6 +2328,8 @@ async def _chat_stream_events(
         for m in (payload.history or []):
             if m.role in ("user", "assistant") and (m.content or "").strip():
                 content = m.content.strip()
+                if m.role == "assistant" and content.startswith("错误："):
+                    continue
                 if len(content) > MAX_HISTORY_MESSAGE_CHARS:
                     content = (
                         content[: MAX_HISTORY_MESSAGE_CHARS // 2].rstrip()

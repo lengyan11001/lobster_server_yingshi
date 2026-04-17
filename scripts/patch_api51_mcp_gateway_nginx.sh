@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 api.51ins.com 的 location = /mcp-gateway 内增加读超时与关闭 proxy_cache，避免 MCP 链路易触发
+# [已废弃] 旧 api.51ins.com 宝塔面板用。新服务器 bhzn.top 的 nginx 已内置相关配置。
 # nginx error: upstream timed out while reading response header from upstream（默认 proxy_read_timeout 60s）
 set -euo pipefail
 CONF="/www/server/panel/vhost/nginx/api.51ins.com.conf"

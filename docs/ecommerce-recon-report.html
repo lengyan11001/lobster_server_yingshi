@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>5平台电商商品发布 页面结构探测报告</title>
+<style>
+:root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --heading: #f0f6fc; --accent: #58a6ff; --green: #3fb950; --yellow: #d29922; --red: #f85149; --code-bg: #1c2128; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; padding: 2rem; }
+.container { max-width: 1200px; margin: 0 auto; }
+h1 { color: var(--heading); font-size: 2rem; margin-bottom: 0.5rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem; }
+h2 { color: var(--accent); font-size: 1.5rem; margin: 2rem 0 1rem; }
+h3 { color: var(--heading); font-size: 1.2rem; margin: 1.5rem 0 0.5rem; }
+.meta { color: #8b949e; font-size: 0.9rem; margin-bottom: 2rem; }
+.platform { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; margin-left: 8px; }
+.badge-high { background: rgba(248,81,73,0.15); color: var(--red); }
+.badge-medium { background: rgba(210,153,34,0.15); color: var(--yellow); }
+.badge-api { background: rgba(88,166,255,0.15); color: var(--accent); }
+.badge-rpa { background: rgba(63,185,80,0.15); color: var(--green); }
+table { width: 100%; border-collapse: collapse; margin: 0.5rem 0 1rem; }
+th, td { padding: 8px 12px; border: 1px solid var(--border); text-align: left; font-size: 0.9rem; }
+th { background: var(--code-bg); color: var(--heading); }
+code { background: var(--code-bg); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; color: var(--accent); }
+pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; overflow-x: auto; margin: 0.5rem 0; font-size: 0.85rem; }
+pre code { background: none; padding: 0; }
+.warn { background: rgba(210,153,34,0.1); border-left: 3px solid var(--yellow); padding: 0.75rem 1rem; margin: 0.5rem 0; border-radius: 0 4px 4px 0; }
+.info { background: rgba(88,166,255,0.1); border-left: 3px solid var(--accent); padding: 0.75rem 1rem; margin: 0.5rem 0; border-radius: 0 4px 4px 0; }
+.good { background: rgba(63,185,80,0.1); border-left: 3px solid var(--green); padding: 0.75rem 1rem; margin: 0.5rem 0; border-radius: 0 4px 4px 0; }
+ul, ol { margin: 0.5rem 0 0.5rem 1.5rem; }
+li { margin: 0.3rem 0; }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; }
+@media (max-width: 768px) { body { padding: 1rem; } .grid-3 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>5 平台电商商品发布 — 页面结构探测报告</h1>
+<p class="meta">生成时间：2026-04-10 | 覆盖平台：抖音电商、小红书、1688、淘宝/天猫、拼多多</p>
+
+<!-- ===== OVERVIEW ===== -->
+<h2>总览：推荐实现路径</h2>
+<div class="good">
+<strong>方案：Playwright 浏览器自动化（RPA）+ 不自动提交</strong><br>
+5 个平台的 API 开放程度参差不齐且申请门槛高，最实际的方式是<strong>用 Playwright 打开商家后台、自动填写表单、等用户手动点发布</strong>。<br>
+用户在技能商店中登录各平台后，浏览器会话（Cookie/Storage）被持久化保存，后续发布时直接复用登录态。
+</div>
+
+<!-- ===== PLATFORM CARDS ===== -->
+<h2>一、5 平台发布页面结构</h2>
+
+<!-- DOUYIN -->
+<div class="platform">
+<h3>1. 抖音电商（抖店）<span class="badge badge-high">爬取难度：高</span><span class="badge badge-rpa">推荐 RPA</span></h3>
+<table>
+<tr><th>项目</th><th>详情</th></tr>
+<tr><td>商家后台</td><td><code>https://fxg.jinritemai.com/</code></td></tr>
+<tr><td>发布商品入口</td><td>商品管理 → 商品创建</td></tr>
+<tr><td>开放平台 API</td><td><code>POST /goodlife/v1/goods/product/save/</code>（需申请 <code>life.capacity.goods.found</code> 权限）</td></tr>
+<tr><td>登录方式</td><td>抖音扫码 / 手机号验证码</td></tr>
+<tr><td>表单核心字段</td><td>商品标题、类目、主图(≤5张)、主图视频、详情图、价格、库存、SKU规格、运费模板</td></tr>
+<tr><td>技术特征</td><td>SPA 架构，CSS class 随机哈希，动态表单（类目不同字段不同）</td></tr>
+<tr><td>反自动化</td><td>行为检测 + 验证码 + IP风控</td></tr>
+</table>
+<div class="info"><strong>RPA 策略</strong>：Playwright 打开后台 → 导航到商品创建 → 按表单区块填写（标题→类目→图片上传→价格→SKU）→ 不点提交</div>
+</div>
+
+<!-- XIAOHONGSHU -->
+<div class="platform">
+<h3>2. 小红书（千帆）<span class="badge badge-high">爬取难度：高</span><span class="badge badge-rpa">推荐 RPA</span></h3>
+<table>
+<tr><th>项目</th><th>详情</th></tr>
+<tr><td>商家后台</td><td><code>https://ark.xiaohongshu.com/</code>（千帆）</td></tr>
+<tr><td>发布商品入口</td><td>商品管理 → 发布商品</td></tr>
+<tr><td>开放平台 API</td><td><code>POST /ark/open_api/v3/common_controller</code> method=<code>product.createSpu</code></td></tr>
+<tr><td>登录方式</td><td>小红书扫码 / 手机号验证码</td></tr>
+<tr><td>表单核心字段</td><td>商品标题、英文名、品牌、类目、主图、主图视频、商品描述、规格、运费模板、FAQ</td></tr>
+<tr><td>技术特征</td><td>SPA，统一 <code>common_controller</code> 入口 + method 分发</td></tr>
+<tr><td>反自动化</td><td>Cookie 验证 + Token 加密 + 滑块验证码</td></tr>
+</table>
+</div>
+
+<!-- 1688 -->
+<div class="platform">
+<h3>3. 1688（阿里巴巴）<span class="badge badge-medium">爬取难度：中高</span><span class="badge badge-rpa">推荐 RPA</span></h3>
+<table>
+<tr><th>项目</th><th>详情</th></tr>
+<tr><td>商家后台</td><td><code>https://work.1688.com/</code>（工作台）</td></tr>
+<tr><td>发布商品入口</td><td>我的阿里 → 管理产品 → 发布产品<br>或直接 <code>https://offer.1688.com/offer/post/offerPost.htm</code></td></tr>
+<tr><td>开放平台 API</td><td>阿里巴巴开放平台 OAuth2.0 + RESTful，需 AppKey + IP 白名单（2026 新增）</td></tr>
+<tr><td>登录方式</td><td>淘宝/支付宝扫码 / 账号密码</td></tr>
+<tr><td>表单核心字段</td><td>商品标题、产品属性（两栏布局可搜索下拉）、规格+匹配图、报价（起批量/批发价/货号）、主图、主图视频、详情图</td></tr>
+<tr><td>技术特征</td><td>2025年发布框架升级，属性两栏布局 + 搜索下拉，规格与匹配图融合</td></tr>
+<tr><td>反自动化</td><td>阿里安全系体系 + 滑块 + 登录二次验证</td></tr>
+</table>
+<div class="warn"><strong>注意</strong>：1688 发布页面字段极多（尤其 B2B 批发属性如起批量、阶梯价），RPA 需要按类目动态处理。</div>
+</div>
+
+<!-- TAOBAO -->
+<div class="platform">
+<h3>4. 淘宝/天猫<span class="badge badge-high">爬取难度：高</span><span class="badge badge-rpa">推荐 RPA</span></h3>
+<table>
+<tr><th>项目</th><th>详情</th></tr>
+<tr><td>商家后台</td><td><code>https://seller.taobao.com/</code>（卖家中心）或千牛工作台</td></tr>
+<tr><td>发布商品入口</td><td>商品管理 → 发布宝贝<br>或 <code>https://sell.taobao.com/auction/goods/itemAdd.htm</code></td></tr>
+<tr><td>开放平台 API</td><td><code>alibaba.item.publish.submit</code>（XML Schema 格式，<code>taobao.item.add</code> 已废弃）</td></tr>
+<tr><td>登录方式</td><td>淘宝扫码 / 手机号验证码 / 千牛扫码</td></tr>
+<tr><td>表单核心字段</td><td>商品标题(≤30汉字)、类目、主图(≤5张)、主图视频、商品属性(2025年必填增多)、SKU规格、价格、库存、运费模板、详情描述</td></tr>
+<tr><td>技术特征</td><td>2025年发布页重构：更严格类目推荐 + 必填属性增多 + AI 标题建议 + 主图视频自动合成</td></tr>
+<tr><td>反自动化</td><td>阿里安全系 + 设备指纹 + 行为检测 + 滑块/人机验证</td></tr>
+</table>
+<div class="warn"><strong>API 限制</strong>：<code>alibaba.item.publish.submit</code> 未对所有开发者开放，XML Schema 参数极复杂。RPA 方式更可行。</div>
+</div>
+
+<!-- PINDUODUO -->
+<div class="platform">
+<h3>5. 拼多多<span class="badge badge-medium">爬取难度：中高</span><span class="badge badge-rpa">推荐 RPA</span></h3>
+<table>
+<tr><th>项目</th><th>详情</th></tr>
+<tr><td>商家后台</td><td><code>https://mms.pinduoduo.com/</code>（拼多多商家后台）</td></tr>
+<tr><td>发布商品入口</td><td>商品管理 → 发布新商品</td></tr>
+<tr><td>开放平台 API</td><td><code>pdd.goods.add</code>（需获取子级类目 + 图片/视频先上传再传 ID）</td></tr>
+<tr><td>登录方式</td><td>拼多多扫码 / 手机号验证码</td></tr>
+<tr><td>表单核心字段</td><td>商品标题(≤30汉字)、类目(三/四级)、主图、详情图、商品属性、规格(单/双/无)、SKU(批量)、价格、库存</td></tr>
+<tr><td>技术特征</td><td>相对简洁的表单结构，SKU 支持批量设置</td></tr>
+<tr><td>反自动化</td><td>拼多多安全检测 + 滑块验证</td></tr>
+</table>
+<div class="good"><strong>相对友好</strong>：拼多多发布页结构较简单，影刀 RPA 已有成熟方案（200+ SKU 10 分钟内完成）。</div>
+</div>
+
+<!-- ===== COMPARISON TABLE ===== -->
+<h2>二、5 平台对比</h2>
+<table>
+<tr>
+<th>平台</th><th>后台 URL</th><th>表单复杂度</th><th>API 可用性</th><th>RPA 难度</th><th>登录持久化</th>
+</tr>
+<tr><td>抖音</td><td><code>fxg.jinritemai.com</code></td><td>中</td><td>有（需申请权限）</td><td>高（class 哈希）</td><td>Cookie + Token</td></tr>
+<tr><td>小红书</td><td><code>ark.xiaohongshu.com</code></td><td>中</td><td>有（千帆开放平台）</td><td>高（SPA + Token）</td><td>Cookie</td></tr>
+<tr><td>1688</td><td><code>work.1688.com</code></td><td>高（B2B属性多）</td><td>有（需 IP 白名单）</td><td>中高（阿里安全）</td><td>Cookie + 阿里 Token</td></tr>
+<tr><td>淘宝</td><td><code>seller.taobao.com</code></td><td>高（2025重构）</td><td>受限（XML复杂）</td><td>高（阿里安全）</td><td>Cookie + 阿里 Token</td></tr>
+<tr><td>拼多多</td><td><code>mms.pinduoduo.com</code></td><td>中低</td><td>有（较完整）</td><td>中（结构简单）</td><td>Cookie</td></tr>
+</table>
+
+<!-- ===== ARCHITECTURE ===== -->
+<h2>三、技能商店「商品发布」架构设计</h2>
+
+<div class="platform">
+<h3>3.1 整体流程</h3>
+<pre><code>用户会话 → "用电商详情页技能生成详情图，发布到抖音店铺A、小红书店铺B"
+    ↓
+① AI 调用 comfly.ecommerce.detail_pipeline 生成主图+详情图 (已有能力)
+    ↓
+② AI 调用 ecommerce.publish 能力：
+    - 从素材库取出生成的图片 URL
+    - 打开 Playwright 浏览器（复用已保存的登录态）
+    - 导航到对应平台的商品发布页
+    - 自动填写标题、上传主图/详情图、选类目、填价格等
+    - 停在发布页，不点提交按钮
+    - 返回 "已填写完毕，请查看浏览器并确认发布"
+    ↓
+③ 用户在浏览器中检查，手动点「发布」</code></pre>
+</div>
+
+<div class="platform">
+<h3>3.2 技能商店配置界面</h3>
+<pre><code>技能商店 → 「商品发布」卡片
+├── 平台账号管理
+│   ├── 抖音店铺：[店铺名] [启动浏览器登录] [状态: 已登录✓]
+│   ├── 小红书店铺：[店铺名] [启动浏览器登录] [状态: 已登录✓]
+│   ├── 1688店铺：[店铺名] [启动浏览器登录] [状态: 未登录]
+│   ├── 淘宝店铺：[店铺名] [启动浏览器登录] [状态: 未登录]
+│   └── 拼多多店铺：[店铺名] [启动浏览器登录] [状态: 未登录]
+├── 默认发布参数
+│   ├── 默认运费模板
+│   ├── 默认库存数量
+│   └── 默认发货地址
+└── 登录态有效期提醒</code></pre>
+</div>
+
+<div class="platform">
+<h3>3.3 Playwright 浏览器管理</h3>
+<ul>
+<li><strong>登录固化</strong>：用户点「启动浏览器登录」→ 打开 Playwright 有头浏览器 → 用户手动完成扫码/验证码 → <code>context.storage_state()</code> 保存 Cookie/localStorage 到 <code>browser_states/{platform}_{store_name}.json</code></li>
+<li><strong>复用登录</strong>：发布时 <code>browser.new_context(storage_state="xxx.json")</code> 直接进入已登录状态</li>
+<li><strong>会话刷新</strong>：定期检测登录态是否过期，过期提示用户重新登录</li>
+<li><strong>独立 profile</strong>：每个平台+店铺一个独立的浏览器 profile，互不干扰</li>
+</ul>
+</div>
+
+<div class="platform">
+<h3>3.4 各平台发布自动化要点</h3>
+
+<table>
+<tr><th>步骤</th><th>抖音</th><th>小红书</th><th>1688</th><th>淘宝</th><th>拼多多</th></tr>
+<tr><td>进入发布页</td><td>商品管理→商品创建</td><td>商品管理→发布商品</td><td>发布产品</td><td>发布宝贝</td><td>发布新商品</td></tr>
+<tr><td>选类目</td><td>搜索+选择</td><td>搜索+选择</td><td>搜索+选择</td><td>搜索+选择</td><td>搜索+选择(三/四级)</td></tr>
+<tr><td>填标题</td><td>input 填写</td><td>input 填写</td><td>input 填写</td><td>input (≤30汉字)</td><td>input (≤30汉字)</td></tr>
+<tr><td>上传主图</td><td>file input</td><td>file input</td><td>file input</td><td>file input</td><td>file input</td></tr>
+<tr><td>上传详情</td><td>富文本/图片上传</td><td>图文描述上传</td><td>图片上传</td><td>富文本编辑器</td><td>图片上传</td></tr>
+<tr><td>价格/SKU</td><td>input 填写</td><td>input 填写</td><td>阶梯价格表</td><td>input + SKU 表</td><td>input + 批量 SKU</td></tr>
+<tr><td>停在发布</td><td>不点提交</td><td>不点提交</td><td>不点提交</td><td>不点提交</td><td>不点提交</td></tr>
+</table>
+</div>
+
+<!-- ===== EXISTING CODE ===== -->
+<h2>四、项目中可复用的代码</h2>
+<div class="platform">
+<table>
+<tr><th>文件</th><th>复用点</th></tr>
+<tr><td><code>skills/comfly_ecommerce_detail/</code></td><td>电商详情页生成（主图→详情长图），作为发布前的素材准备</td></tr>
+<tr><td><code>backend/app/services/creator_content_sync.py</code></td><td>抖音/小红书创作者中心 XHR 监听 + Cookie 传递架构</td></tr>
+<tr><td><code>backend/app/api/publish.py</code></td><td>已有的发布框架（内容发布到创作者平台）</td></tr>
+<tr><td><code>static/js/skill.js</code></td><td>技能商店 UI 和浏览器启动交互模式（OpenClaw 微信登录同款）</td></tr>
+</table>
+</div>
+
+</div>
+</body>
+</html>

@@ -277,7 +277,7 @@ def delete_account(
 # ── Publish tasks ─────────────────────────────────────────────────
 
 class PublishReq(BaseModel):
-    asset_id: str
+    asset_id: Optional[str] = None
     account_id: Optional[int] = None
     account_nickname: Optional[str] = None
     title: Optional[str] = None
@@ -333,12 +333,15 @@ async def create_publish_task(
     db: Session = Depends(get_db),
 ):
     logger.info("[PUBLISH-API] 请求: asset_id=%s account_nickname=%s", body.asset_id, body.account_nickname)
-    asset = db.query(Asset).filter(
-        Asset.asset_id == body.asset_id,
-        Asset.user_id == current_user.id,
-    ).first()
-    if not asset:
-        raise HTTPException(404, detail=f"素材不存在: {body.asset_id}")
+    asset = None
+    text_only = not str(body.asset_id or "").strip()
+    if not text_only:
+        asset = db.query(Asset).filter(
+            Asset.asset_id == body.asset_id,
+            Asset.user_id == current_user.id,
+        ).first()
+        if not asset:
+            raise HTTPException(404, detail=f"素材不存在: {body.asset_id}")
 
     acct = None
     if body.account_id:
@@ -359,7 +362,7 @@ async def create_publish_task(
 
     task = PublishTask(
         user_id=current_user.id,
-        asset_id=body.asset_id,
+        asset_id=body.asset_id or "",
         account_id=acct.id,
         title=body.title,
         description=body.description,
@@ -370,6 +373,7 @@ async def create_publish_task(
             "cover_asset_id": body.cover_asset_id,
             "platform": acct.platform,
             "account_nickname": acct.nickname,
+            "text_only": text_only,
         },
     )
     db.add(task)
@@ -401,11 +405,14 @@ async def create_publish_task(
                 return path, path
             raise HTTPException(400, detail="素材文件不可用（无本地文件且无公网 URL）")
 
-        file_path, temp_video = await _resolve_asset_path(asset)
-        logger.info("[PUBLISH-API] asset file=%s exists=%s",
-                     file_path, Path(file_path).exists())
+        file_path = None
+        temp_video = None
         cover_path = None
         temp_cover = None
+        if not text_only:
+            file_path, temp_video = await _resolve_asset_path(asset)
+            logger.info("[PUBLISH-API] asset file=%s exists=%s",
+                         file_path, Path(file_path).exists())
         if body.cover_asset_id:
             cover = db.query(Asset).filter(
                 Asset.asset_id == body.cover_asset_id,
@@ -413,8 +420,8 @@ async def create_publish_task(
             ).first()
             if cover:
                 cover_path, temp_cover = await _resolve_asset_path(cover)
-        logger.info("[PUBLISH-API] calling run_publish_task: platform=%s profile=%s title=%s",
-                     acct.platform, acct.browser_profile, body.title)
+        logger.info("[PUBLISH-API] calling run_publish_task: platform=%s profile=%s title=%s text_only=%s",
+                     acct.platform, acct.browser_profile, body.title, text_only)
         result = await run_publish_task(
             profile_dir=acct.browser_profile,
             platform=acct.platform,
@@ -422,7 +429,7 @@ async def create_publish_task(
             title=body.title or "",
             description=body.description or "",
             tags=body.tags or "",
-            options=body.options or {},
+            options={**(body.options or {}), "text_only": text_only},
             cover_path=cover_path,
         )
         for p in (temp_video, temp_cover):

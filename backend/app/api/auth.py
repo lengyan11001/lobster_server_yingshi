@@ -67,6 +67,7 @@ class UserOut(BaseModel):
     credits: Optional[float] = None
     brand_mark: Optional[str] = None
     wecom_userid: Optional[str] = None
+    is_agent: bool = False
 
 
 class Token(BaseModel):
@@ -126,6 +127,7 @@ class RegisterPhoneBody(BaseModel):
     code: str
     password: str
     brand_mark: Optional[str] = None
+    parent_account: Optional[str] = None
 
 
 def _normalize_cn_mobile(raw: str) -> str:
@@ -355,6 +357,16 @@ def register_phone(body: RegisterPhoneBody, request: Request, db: Session = Depe
     if existing:
         raise HTTPException(status_code=400, detail="该手机号已注册，请直接登录")
     reg_iid = optional_installation_id_from_request(request)
+    parent_uid = None
+    raw_parent = (body.parent_account or "").strip()
+    if raw_parent:
+        parent_key = _login_account_key(raw_parent)
+        parent_user = db.query(User).filter(User.email == parent_key).first() if parent_key else None
+        if parent_user:
+            parent_uid = parent_user.id
+            logger.info("[auth/register-phone] parent_account=%s resolved parent_user_id=%s", raw_parent[:20], parent_uid)
+        else:
+            logger.warning("[auth/register-phone] parent_account=%s not found", raw_parent[:20])
     user = User(
         email=email,
         hashed_password=get_password_hash(body.password),
@@ -362,6 +374,7 @@ def register_phone(body: RegisterPhoneBody, request: Request, db: Session = Depe
         role="user",
         preferred_model="sutui",
         brand_mark=_normalize_brand_mark(body.brand_mark),
+        parent_user_id=parent_uid,
     )
     db.add(user)
     db.flush()
@@ -371,12 +384,13 @@ def register_phone(body: RegisterPhoneBody, request: Request, db: Session = Depe
     _remote = getattr(request.client, "host", None) if request.client else None
     _xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or None
     logger.info(
-        "[auth/register-phone] user_id=%s mobile_tail=%s slots_enabled=%s installation_id_ok=%s credits=%s remote=%s",
+        "[auth/register-phone] user_id=%s mobile_tail=%s slots_enabled=%s installation_id_ok=%s credits=%s parent=%s remote=%s",
         user.id,
         mobile[-4:],
         installation_slots_enabled(),
         bool(reg_iid),
         user.credits,
+        parent_uid,
         _remote,
         _xff,
     )
@@ -412,6 +426,7 @@ def get_me(
         credits=credits_json_float(getattr(current_user, "credits", None) or 0),
         brand_mark=getattr(current_user, "brand_mark", None),
         wecom_userid=getattr(current_user, "wecom_userid", None),
+        is_agent=bool(getattr(current_user, "is_agent", False)),
     )
 
 
@@ -930,3 +945,32 @@ def sutui_callback(
         )
         return HTMLResponse(html)
     return RedirectResponse(url=f"/?token={access_token}", status_code=302)
+
+
+# ── 代理商 API ────────────────────────────────────────────────────────
+
+@router.get("/agent/sub-users", summary="代理商：查看下级用户列表与充值情况")
+def agent_sub_users(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not getattr(current_user, "is_agent", False):
+        raise HTTPException(status_code=403, detail="非代理商，无权访问")
+    from sqlalchemy import func
+    from ..models import RechargeOrder
+    subs = db.query(User).filter(User.parent_user_id == current_user.id).order_by(User.created_at.desc()).all()
+    result = []
+    for u in subs:
+        paid_sum = (
+            db.query(func.coalesce(func.sum(RechargeOrder.credits), 0))
+            .filter(RechargeOrder.user_id == u.id, RechargeOrder.status == "paid")
+            .scalar()
+        )
+        result.append({
+            "id": u.id,
+            "email": u.email,
+            "credits": credits_json_float(getattr(u, "credits", None) or 0),
+            "total_recharged": int(paid_sum or 0),
+            "created_at": u.created_at.isoformat() if u.created_at else None,
+        })
+    return {"sub_users": result, "count": len(result)}

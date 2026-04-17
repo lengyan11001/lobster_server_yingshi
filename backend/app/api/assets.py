@@ -170,7 +170,7 @@ def get_asset_public_url(
                     is_internal = True
                 elif hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
                     is_internal = True
-                elif "api.51ins.com" in hostname:
+                elif "42.194.209.150" in hostname:
                     is_internal = True
                 elif "token=" in url or "?token" in url:
                     # 包含 token 参数，很可能是内部 API
@@ -197,7 +197,7 @@ def get_asset_public_url(
             except Exception as e:
                 # 检测失败时，如果 URL 包含明显的内网标识，也认为是内部地址
                 logger.debug("[素材] get_asset_public_url 检测内部地址失败: %s", e)
-                if "api.51ins.com" in url or "token=" in url or "?token" in url:
+                if "42.194.209.150" in url or "token=" in url or "?token" in url:
                     logger.warning("[素材] get_asset_public_url 检测异常但包含内网标识，返回 None: %s", url[:100])
                     return None
             # 只有确认不是内部地址时才返回原始 URL
@@ -500,7 +500,7 @@ async def upload_temp_file(
         except Exception:
             pass
     if not base:
-        base = "http://47.120.39.220:8000"  # 服务器公网地址（默认值）
+        base = "http://42.194.209.150"  # 服务器公网地址（默认值）
         logger.info("[服务器端-步骤3.4] 使用默认base_url=%s", base)
     expiry_ts = int(time.time()) + _ASSET_FILE_EXPIRY_SEC
     public_url = f"{base}/api/assets/temp/{temp_id}?token={_asset_file_token(temp_id, expiry_ts)}&expiry={expiry_ts}"

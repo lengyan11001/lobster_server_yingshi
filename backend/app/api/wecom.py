@@ -10,7 +10,7 @@ from typing import Optional
 from urllib.parse import unquote
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -108,11 +108,10 @@ def create_wecom_config(
     WXBizMsgCrypt, _, _ = _get_crypt_and_helpers()
     if not WXBizMsgCrypt:
         raise HTTPException(status_code=503, detail="企业微信能力未加载（请安装 pycryptodome）")
-    key = (body.encoding_aes_key or "").strip()
-    if not key.endswith("="):
-        key = key + "="
+    raw_key = (body.encoding_aes_key or "").strip().rstrip("=")
+    key = raw_key + "="
     try:
-        WXBizMsgCrypt(body.token.strip(), key, body.corp_id or "default")
+        WXBizMsgCrypt(body.token.strip(), raw_key, body.corp_id or "default")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"EncodingAESKey 无效: {e}")
     path = (body.callback_path or "").strip()
@@ -299,9 +298,26 @@ async def wecom_callback_post(
             raise
         parsed = _parse_incoming_xml(msg_xml)
         msg_type = (parsed.get("MsgType") or "").strip().lower()
+        event_type = (parsed.get("Event") or "").strip()
         from_user = (parsed.get("FromUserName") or "").strip()
         to_user = (parsed.get("ToUserName") or "").strip()
+
+        # ── 微信客服事件：kf_msg_or_event ──
+        # 回调仅通知"有新消息"，实际内容由 sync_msg 拉取；此处只需返回 success，不入队
+        if msg_type == "event" and event_type == "kf_msg_or_event":
+            kf_token = (parsed.get("Token") or "").strip()
+            open_kfid = (parsed.get("OpenKfId") or "").strip()
+            logger.info("[WeCom-KF] kf_msg_or_event path=%s open_kfid=%s token=%s", callback_path, open_kfid, kf_token[:20] if kf_token else "")
+            try:
+                from .wecom_kf import notify_kf_event
+                notify_kf_event(callback_path)
+            except Exception as exc:
+                logger.warning("[WeCom-KF] notify_kf_event failed: %s", exc)
+            return Response(content="success", media_type="text/plain", status_code=200)
+
         content = (parsed.get("Content") or "").strip()
+        if not content and msg_type == "image":
+            content = (parsed.get("PicUrl") or "").strip()
         agent_id_raw = (parsed.get("AgentID") or parsed.get("AgentId") or "").strip()
         try:
             agent_id = int(agent_id_raw) if agent_id_raw else None
@@ -354,6 +370,7 @@ def _check_forward_secret(x_forward_secret: Optional[str] = Header(None, alias="
 class SubmitReplyBody(BaseModel):
     message_id: int
     reply_text: str
+    skip_send: bool = False
 
 
 @router.get("/api/wecom/pending", summary="本地轮询：拉取待处理消息")
@@ -417,23 +434,29 @@ async def wecom_submit_reply(
     _auth: bool = Depends(_check_forward_secret),
     db: Session = Depends(get_db),
 ):
-    logger.info("[WeCom] POST submit-reply message_id=%s", body.message_id)
+    logger.info("[WeCom] POST submit-reply message_id=%s skip_send=%s", body.message_id, body.skip_send)
     row = db.query(WecomPendingMessage).filter(
         WecomPendingMessage.id == body.message_id,
         WecomPendingMessage.status == "pending",
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="消息不存在或已处理")
+    cfg = db.query(WecomConfig).filter(WecomConfig.id == row.wecom_config_id).first()
+    owner_user_id = cfg.user_id if cfg else None
     # 企微自动回复：未解锁不可使用
-    if db.query(SkillUnlock).filter(
-        SkillUnlock.user_id == row.user_id,
+    if owner_user_id is None or db.query(SkillUnlock).filter(
+        SkillUnlock.user_id == owner_user_id,
         SkillUnlock.package_id == WECOM_REPLY_PACKAGE_ID,
     ).first() is None:
         raise HTTPException(
             status_code=402,
             detail="未解锁「企业微信自动回复」技能，无法使用。请在技能商店用 1000 积分解锁后再用。",
         )
-    cfg = db.query(WecomConfig).filter(WecomConfig.id == row.wecom_config_id).first()
+    if body.skip_send:
+        row.status = "replied"
+        row.reply_text = (body.reply_text or "").strip()[:2000]
+        db.commit()
+        return {"ok": True}
     if not cfg or not (cfg.corp_id or "").strip() or not (cfg.secret or "").strip():
         row.status = "failed"
         row.reply_text = (body.reply_text or "")[:500]
@@ -485,3 +508,594 @@ async def wecom_submit_reply(
     row.reply_text = (body.reply_text or "").strip()[:2000]
     db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 通用：获取 access_token
+# ---------------------------------------------------------------------------
+async def _get_access_token(corp_id: str, secret: str) -> str:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(
+            "https://qyapi.weixin.qq.com/cgi-bin/gettoken",
+            params={"corpid": corp_id, "corpsecret": secret},
+        )
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"企微 gettoken 失败: {data.get('errmsg', '')}")
+    return data["access_token"]
+
+
+def _require_config_with_secret(db: Session, config_id: int, user_id: Optional[int] = None) -> WecomConfig:
+    q = db.query(WecomConfig).filter(WecomConfig.id == config_id)
+    if user_id is not None:
+        q = q.filter(WecomConfig.user_id == user_id)
+    cfg = q.first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="配置不存在")
+    if not (cfg.corp_id or "").strip() or not (cfg.secret or "").strip():
+        raise HTTPException(status_code=400, detail="该应用未配置 corp_id 或 secret")
+    return cfg
+
+
+def _find_config_by_callback(db: Session, callback_path: str) -> WecomConfig:
+    cfg = db.query(WecomConfig).filter(WecomConfig.callback_path == callback_path).first()
+    if not cfg:
+        raise HTTPException(status_code=404, detail="配置不存在")
+    if not (cfg.corp_id or "").strip() or not (cfg.secret or "").strip():
+        raise HTTPException(status_code=400, detail="该应用未配置 corp_id 或 secret")
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# 通讯录：部门列表
+# ---------------------------------------------------------------------------
+def _get_contacts_secret(cfg: WecomConfig) -> str:
+    """通讯录 API 优先使用应用 secret（已授权通讯录权限），回退到 contacts_secret。"""
+    s = (cfg.secret or "").strip()
+    if s:
+        return s
+    return (getattr(cfg, 'contacts_secret', None) or "").strip()
+
+
+@router.get("/api/wecom/contacts/departments", summary="获取企微通讯录-部门列表")
+async def wecom_contact_departments(
+    config_id: int,
+    parent_id: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+):
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
+    cfg = _require_config_with_secret(db, config_id, current_user.id)
+    contacts_sec = _get_contacts_secret(cfg)
+    if not contacts_sec:
+        raise HTTPException(status_code=400, detail="未配置通讯录 Secret 或应用 Secret")
+    token = await _get_access_token(cfg.corp_id, contacts_sec)
+    url = "https://qyapi.weixin.qq.com/cgi-bin/department/list"
+    params = {"access_token": token}
+    if parent_id:
+        params["id"] = parent_id
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(url, params=params)
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"获取部门列表失败: {data.get('errmsg', '')}")
+    return {"departments": data.get("department", [])}
+
+
+# ---------------------------------------------------------------------------
+# 通讯录：成员列表
+# ---------------------------------------------------------------------------
+@router.get("/api/wecom/contacts/users", summary="获取企微通讯录-成员列表")
+async def wecom_contact_users(
+    config_id: int,
+    department_id: int = 1,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+):
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
+    cfg = _require_config_with_secret(db, config_id, current_user.id)
+    contacts_sec = _get_contacts_secret(cfg)
+    if not contacts_sec:
+        raise HTTPException(status_code=400, detail="未配置通讯录 Secret 或应用 Secret")
+    token = await _get_access_token(cfg.corp_id, contacts_sec)
+    url = "https://qyapi.weixin.qq.com/cgi-bin/user/list"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(url, params={"access_token": token, "department_id": department_id})
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"获取成员列表失败: {data.get('errmsg', '')}")
+    users = data.get("userlist", [])
+    return {
+        "users": [
+            {
+                "userid": u.get("userid", ""),
+                "name": u.get("name", ""),
+                "department": u.get("department", []),
+                "position": u.get("position", ""),
+                "mobile": u.get("mobile", ""),
+                "email": u.get("email", ""),
+                "status": u.get("status", 0),
+                "avatar": u.get("avatar", ""),
+            }
+            for u in users
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# 素材上传：上传临时素材到企微，返回 media_id
+# ---------------------------------------------------------------------------
+MEDIA_TYPE_MAP = {"image": ["jpg", "jpeg", "png", "gif", "bmp"], "video": ["mp4", "avi", "wmv"], "voice": ["amr", "mp3"], "file": []}
+MAX_MEDIA_SIZE = 20 * 1024 * 1024  # 20MB
+
+@router.post("/api/wecom/media/upload", summary="上传临时素材到企微（图片/视频/文件）")
+async def wecom_media_upload(
+    config_id: int = Query(...),
+    media_type: str = Query("image"),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+):
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
+    cfg = _require_config_with_secret(db, config_id, current_user.id)
+    if media_type not in ("image", "video", "voice", "file"):
+        raise HTTPException(status_code=400, detail="media_type 须为 image/video/voice/file")
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_MEDIA_SIZE:
+        raise HTTPException(status_code=400, detail=f"文件过大，最大 {MAX_MEDIA_SIZE // 1024 // 1024}MB")
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    upload_url = f"https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token={token}&type={media_type}"
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(upload_url, files={"media": (file.filename or "file", file_bytes, file.content_type or "application/octet-stream")})
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") and data["errcode"] != 0:
+        raise HTTPException(status_code=502, detail=f"企微素材上传失败: {data.get('errmsg', '')}")
+    return {"media_id": data.get("media_id", ""), "type": data.get("type", media_type), "created_at": data.get("created_at", "")}
+
+
+# ---------------------------------------------------------------------------
+# 主动发消息：给指定用户发送应用消息
+# ---------------------------------------------------------------------------
+class SendMessageBody(BaseModel):
+    config_id: int
+    to_user: Optional[str] = None
+    to_party: Optional[str] = None
+    to_tag: Optional[str] = None
+    msg_type: str = "text"
+    content: str = ""
+    media_id: Optional[str] = None
+
+
+@router.post("/api/wecom/send-message", summary="主动发送应用消息给指定用户/部门/标签")
+async def wecom_send_message(
+    body: SendMessageBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+):
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
+    cfg = _require_config_with_secret(db, body.config_id, current_user.id)
+    if not body.to_user and not body.to_party and not body.to_tag:
+        raise HTTPException(status_code=400, detail="至少指定 to_user、to_party、to_tag 中的一个")
+    agent_id = cfg.agent_id
+    if agent_id is None:
+        raise HTTPException(status_code=400, detail="该应用未配置 agent_id，请先在配置中填写应用 AgentId")
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    payload: dict = {"agentid": agent_id, "msgtype": body.msg_type}
+    if body.to_user:
+        payload["touser"] = body.to_user
+    if body.to_party:
+        payload["toparty"] = body.to_party
+    if body.to_tag:
+        payload["totag"] = body.to_tag
+    if body.msg_type == "text":
+        payload["text"] = {"content": body.content or ""}
+    elif body.msg_type == "markdown":
+        payload["markdown"] = {"content": body.content or ""}
+    elif body.msg_type == "image":
+        payload["image"] = {"media_id": body.media_id or ""}
+    elif body.msg_type == "file":
+        payload["file"] = {"media_id": body.media_id or ""}
+    else:
+        payload["text"] = {"content": body.content or ""}
+    send_url = f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(send_url, json=payload)
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"发送消息失败: {data.get('errmsg', '')}")
+    return {"ok": True, "invaliduser": data.get("invaliduser", ""), "invalidparty": data.get("invalidparty", ""), "invalidtag": data.get("invalidtag", "")}
+
+
+# ---------------------------------------------------------------------------
+# 群聊：创建群聊
+# ---------------------------------------------------------------------------
+class CreateGroupChatBody(BaseModel):
+    config_id: int
+    name: str = ""
+    userlist: list[str]
+    owner: Optional[str] = None
+    chatid: Optional[str] = None
+
+
+@router.post("/api/wecom/group-chat/create", summary="创建企微群聊")
+async def wecom_create_group_chat(
+    body: CreateGroupChatBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+):
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
+    cfg = _require_config_with_secret(db, body.config_id, current_user.id)
+    if len(body.userlist) < 2:
+        raise HTTPException(status_code=400, detail="群聊至少需要 2 个成员")
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    payload: dict = {"name": body.name, "userlist": body.userlist}
+    if body.owner:
+        payload["owner"] = body.owner
+    if body.chatid:
+        payload["chatid"] = body.chatid
+    url = f"https://qyapi.weixin.qq.com/cgi-bin/appchat/create?access_token={token}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"创建群聊失败: {data.get('errmsg', '')}")
+    return {"ok": True, "chatid": data.get("chatid", "")}
+
+
+# ---------------------------------------------------------------------------
+# 群聊：发送群聊消息
+# ---------------------------------------------------------------------------
+class SendGroupMessageBody(BaseModel):
+    config_id: int
+    chatid: str
+    msg_type: str = "text"
+    content: str = ""
+    media_id: Optional[str] = None
+
+
+@router.post("/api/wecom/group-chat/send", summary="发送群聊消息")
+async def wecom_send_group_message(
+    body: SendGroupMessageBody,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+):
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
+    cfg = _require_config_with_secret(db, body.config_id, current_user.id)
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    payload: dict = {"chatid": body.chatid, "msgtype": body.msg_type}
+    if body.msg_type == "text":
+        payload["text"] = {"content": body.content or ""}
+    elif body.msg_type == "markdown":
+        payload["markdown"] = {"content": body.content or ""}
+    elif body.msg_type == "image":
+        payload["image"] = {"media_id": body.media_id or ""}
+    elif body.msg_type == "file":
+        payload["file"] = {"media_id": body.media_id or ""}
+    else:
+        payload["text"] = {"content": body.content or ""}
+    url = f"https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token={token}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"发送群聊消息失败: {data.get('errmsg', '')}")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 群聊：获取群聊信息
+# ---------------------------------------------------------------------------
+@router.get("/api/wecom/group-chat/info", summary="获取群聊详情")
+async def wecom_get_group_chat(
+    config_id: int,
+    chatid: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
+):
+    _require_wecom_unlock(db, current_user.id, x_installation_id)
+    cfg = _require_config_with_secret(db, config_id, current_user.id)
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    url = f"https://qyapi.weixin.qq.com/cgi-bin/appchat/get?access_token={token}&chatid={chatid}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"获取群聊信息失败: {data.get('errmsg', '')}")
+    return {"chat_info": data.get("chat_info", {})}
+
+
+# ---------------------------------------------------------------------------
+# 代理端点：X-Forward-Secret 认证（供 lobster_online 本地端调用）
+# 使用 callback_path 定位配置，无需 JWT 登录
+# ---------------------------------------------------------------------------
+
+@router.post("/api/wecom/proxy/media/upload", summary="[代理] 上传临时素材")
+async def proxy_media_upload(
+    callback_path: str = Query(...),
+    media_type: str = Query("image"),
+    file: UploadFile = File(...),
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    cfg = _find_config_by_callback(db, callback_path)
+    if media_type not in ("image", "video", "voice", "file"):
+        raise HTTPException(status_code=400, detail="media_type 须为 image/video/voice/file")
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_MEDIA_SIZE:
+        raise HTTPException(status_code=400, detail=f"文件过大，最大 {MAX_MEDIA_SIZE // 1024 // 1024}MB")
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    upload_url = f"https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token={token}&type={media_type}"
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(upload_url, files={"media": (file.filename or "file", file_bytes, file.content_type or "application/octet-stream")})
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") and data["errcode"] != 0:
+        raise HTTPException(status_code=502, detail=f"企微素材上传失败: {data.get('errmsg', '')}")
+    return {"media_id": data.get("media_id", ""), "type": data.get("type", media_type), "created_at": data.get("created_at", "")}
+
+
+@router.get("/api/wecom/proxy/contacts/departments", summary="[代理] 通讯录-部门列表")
+async def proxy_contact_departments(
+    callback_path: str,
+    parent_id: int = 0,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    cfg = _find_config_by_callback(db, callback_path)
+    contacts_sec = _get_contacts_secret(cfg)
+    if not contacts_sec:
+        raise HTTPException(status_code=400, detail="未配置通讯录 Secret")
+    token = await _get_access_token(cfg.corp_id, contacts_sec)
+    params: dict = {"access_token": token}
+    if parent_id:
+        params["id"] = parent_id
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get("https://qyapi.weixin.qq.com/cgi-bin/department/list", params=params)
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"获取部门列表失败: {data.get('errmsg', '')}")
+    return {"departments": data.get("department", [])}
+
+
+@router.get("/api/wecom/proxy/contacts/users", summary="[代理] 通讯录-成员列表")
+async def proxy_contact_users(
+    callback_path: str,
+    department_id: int = 1,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    cfg = _find_config_by_callback(db, callback_path)
+    contacts_sec = _get_contacts_secret(cfg)
+    if not contacts_sec:
+        raise HTTPException(status_code=400, detail="未配置通讯录 Secret")
+    token = await _get_access_token(cfg.corp_id, contacts_sec)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.get(
+            "https://qyapi.weixin.qq.com/cgi-bin/user/list",
+            params={"access_token": token, "department_id": department_id},
+        )
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"获取成员列表失败: {data.get('errmsg', '')}")
+    return {
+        "users": [
+            {
+                "userid": u.get("userid", ""),
+                "name": u.get("name", ""),
+                "department": u.get("department", []),
+                "position": u.get("position", ""),
+                "mobile": u.get("mobile", ""),
+                "email": u.get("email", ""),
+                "status": u.get("status", 0),
+                "avatar": u.get("avatar", ""),
+            }
+            for u in data.get("userlist", [])
+        ]
+    }
+
+
+class ProxySendMessageBody(BaseModel):
+    callback_path: str
+    to_user: Optional[str] = None
+    to_party: Optional[str] = None
+    to_tag: Optional[str] = None
+    msg_type: str = "text"
+    content: str = ""
+    media_id: Optional[str] = None
+
+
+@router.post("/api/wecom/proxy/send-message", summary="[代理] 发送应用消息")
+async def proxy_send_message(
+    body: ProxySendMessageBody,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    cfg = _find_config_by_callback(db, body.callback_path)
+    if not body.to_user and not body.to_party and not body.to_tag:
+        raise HTTPException(status_code=400, detail="至少指定 to_user、to_party、to_tag 中的一个")
+    agent_id = cfg.agent_id
+    if agent_id is None:
+        raise HTTPException(status_code=400, detail="该应用未配置 agent_id")
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    payload: dict = {"agentid": agent_id, "msgtype": body.msg_type}
+    if body.to_user:
+        payload["touser"] = body.to_user
+    if body.to_party:
+        payload["toparty"] = body.to_party
+    if body.to_tag:
+        payload["totag"] = body.to_tag
+    if body.msg_type in ("text", "markdown"):
+        payload[body.msg_type] = {"content": body.content or ""}
+    elif body.msg_type in ("image", "video", "voice", "file") and body.media_id:
+        payload[body.msg_type] = {"media_id": body.media_id}
+    else:
+        payload["text"] = {"content": body.content or ""}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}",
+            json=payload,
+        )
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"发送消息失败: {data.get('errmsg', '')}")
+    return {"ok": True, "invaliduser": data.get("invaliduser", ""), "invalidparty": data.get("invalidparty", "")}
+
+
+class ProxyCreateGroupBody(BaseModel):
+    callback_path: str
+    name: str = ""
+    userlist: list[str]
+    owner: Optional[str] = None
+
+
+@router.post("/api/wecom/proxy/group-chat/create", summary="[代理] 创建群聊")
+async def proxy_create_group_chat(
+    body: ProxyCreateGroupBody,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    cfg = _find_config_by_callback(db, body.callback_path)
+    if len(body.userlist) < 2:
+        raise HTTPException(status_code=400, detail="群聊至少需要 2 个成员")
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    payload: dict = {"name": body.name, "userlist": body.userlist}
+    if body.owner:
+        payload["owner"] = body.owner
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"https://qyapi.weixin.qq.com/cgi-bin/appchat/create?access_token={token}",
+            json=payload,
+        )
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"创建群聊失败: {data.get('errmsg', '')}")
+    return {"ok": True, "chatid": data.get("chatid", "")}
+
+
+class ProxySendGroupMsgBody(BaseModel):
+    callback_path: str
+    chatid: str
+    msg_type: str = "text"
+    content: str = ""
+
+
+@router.post("/api/wecom/proxy/group-chat/send", summary="[代理] 发送群聊消息")
+async def proxy_send_group_message(
+    body: ProxySendGroupMsgBody,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    cfg = _find_config_by_callback(db, body.callback_path)
+    token = await _get_access_token(cfg.corp_id, cfg.secret)
+    payload: dict = {"chatid": body.chatid, "msgtype": body.msg_type}
+    if body.msg_type in ("text", "markdown"):
+        payload[body.msg_type] = {"content": body.content or ""}
+    else:
+        payload["text"] = {"content": body.content or ""}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        r = await client.post(
+            f"https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token={token}",
+            json=payload,
+        )
+        r.raise_for_status()
+        data = r.json()
+    if data.get("errcode") != 0:
+        raise HTTPException(status_code=502, detail=f"发送群聊消息失败: {data.get('errmsg', '')}")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 同步配置：本地端推送配置到云端（自动创建或更新）
+# ---------------------------------------------------------------------------
+class SyncConfigBody(BaseModel):
+    callback_path: str
+    name: str = "默认应用"
+    token: str
+    encoding_aes_key: str
+    corp_id: str = ""
+    secret: Optional[str] = None
+    contacts_secret: Optional[str] = None
+    agent_id: Optional[int] = None
+    user_id: Optional[int] = None
+
+
+@router.post("/api/wecom/proxy/sync-config", summary="[代理] 同步/创建配置")
+def proxy_sync_config(
+    body: SyncConfigBody,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    existing = db.query(WecomConfig).filter(WecomConfig.callback_path == body.callback_path).first()
+    if existing:
+        existing.name = (body.name or "默认应用").strip() or "默认应用"
+        existing.token = body.token.strip()
+        key = (body.encoding_aes_key or "").strip()
+        if not key.endswith("="):
+            key = key + "="
+        existing.encoding_aes_key = key
+        existing.corp_id = (body.corp_id or "").strip()
+        if body.secret:
+            existing.secret = body.secret.strip()
+        if body.contacts_secret:
+            existing.contacts_secret = body.contacts_secret.strip()
+        if body.agent_id is not None:
+            existing.agent_id = body.agent_id
+        if body.user_id is not None:
+            existing.user_id = body.user_id
+        db.commit()
+        return {"ok": True, "action": "updated", "config_id": existing.id}
+    key = (body.encoding_aes_key or "").strip()
+    if not key.endswith("="):
+        key = key + "="
+    row = WecomConfig(
+        user_id=body.user_id or 1,
+        name=(body.name or "默认应用").strip() or "默认应用",
+        callback_path=body.callback_path,
+        token=body.token.strip(),
+        encoding_aes_key=key,
+        corp_id=(body.corp_id or "").strip(),
+        secret=(body.secret or "").strip() or None,
+        contacts_secret=(body.contacts_secret or "").strip() or None,
+        agent_id=body.agent_id,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"ok": True, "action": "created", "config_id": row.id}
+
+
+class DeleteConfigBody(BaseModel):
+    callback_path: str
+
+
+@router.post("/api/wecom/proxy/delete-config", summary="[代理] 删除配置")
+def proxy_delete_config(
+    body: DeleteConfigBody,
+    _auth: bool = Depends(_check_forward_secret),
+    db: Session = Depends(get_db),
+):
+    row = db.query(WecomConfig).filter(WecomConfig.callback_path == body.callback_path).first()
+    if not row:
+        return {"ok": True, "action": "not_found"}
+    db.delete(row)
+    db.commit()
+    return {"ok": True, "action": "deleted"}

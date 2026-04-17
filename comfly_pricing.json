@@ -1,0 +1,21 @@
+{
+  "_doc": "Comfly 定价表。price_per_unit: Comfly 采购价。sutui_price_per_unit: 速推同模型采购价（可选，填写后会自动比价选便宜的）。user_price_multiplier: 用户消耗 = 采购价 × 倍率（默认用 user_price_multiplier_default）。price_type: per_call / per_second。api_format: dalle / unified_video / kling。comfly_model: Comfly 侧模型名（不填用原值）。sutui_equivalent: 速推侧对应的模型 ID（列表），用于 dry_run 比价时从速推名反查 Comfly 价格。token_group: 指定使用哪个 token 分组（对应环境变量 COMFLY_API_KEY_<GROUP>），不填则用默认 COMFLY_API_KEY。",
+  "user_price_multiplier_default": 3,
+  "models": {
+    "veo3.1-fast": {
+      "price_type": "per_call",
+      "price_per_unit": 20,
+      "api_format": "unified_video",
+      "comfly_model": "veo3.1-fast",
+      "sutui_equivalent": ["fal-ai/veo3.1"],
+      "_note": "速推无此模型，仅 Comfly 可用；但 fal-ai/veo3.1 是速推侧同系列模型"
+    },
+    "nano-banana-2": {
+      "price_type": "per_call",
+      "price_per_unit": 42,
+      "api_format": "dalle",
+      "comfly_model": "nano-banana-2",
+      "token_group": "premium"
+    }
+  }
+}

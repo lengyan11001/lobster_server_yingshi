@@ -204,6 +204,14 @@ def _slim_messages(messages: list) -> list:
         return messages
     sys_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"]
     non_sys = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
+    non_sys = [
+        m for m in non_sys
+        if not (
+            m.get("role") == "assistant"
+            and isinstance(m.get("content"), str)
+            and m["content"].startswith("错误：")
+        )
+    ]
     if len(non_sys) > _SLIM_MSG_MAX_TURNS:
         non_sys = non_sys[-_SLIM_MSG_MAX_TURNS:]
     result = []
@@ -259,6 +267,72 @@ def _optimize_request_body(body: dict) -> int:
             orig_len, new_len, saved_chars, saved_chars // 3,
         )
     return saved_chars
+
+
+def _messages_already_ran_search_models(messages: Any) -> bool:
+    """
+    防止同一轮对话里反复调用 sutui.search_models。
+
+    只在“已经真正执行过一次 search_models（出现 tool 结果/工具回传）”后才认为已完成，
+    这样不会误伤首次查询（否则会导致模型拿不到 tools，只能用文本伪造一段 JSON 工具调用）。
+    """
+    if not isinstance(messages, list) or not messages:
+        return False
+
+    needles = ("sutui.search_models", "capability_id\": \"sutui.search_models\"")
+    for m in messages[-24:]:
+        if not isinstance(m, dict):
+            continue
+        role = (m.get("role") or "").strip().lower()
+
+        # OpenAI: tool role message content often contains tool result JSON/text
+        if role == "tool":
+            c = m.get("content")
+            if isinstance(c, str) and any(n in c for n in needles):
+                return True
+            # some gateways use list parts
+            if isinstance(c, list):
+                for part in c:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str) and any(
+                        n in part["text"] for n in needles
+                    ):
+                        return True
+
+        # Also accept assistant message that includes tool_calls array (structured)
+        if role == "assistant":
+            tcs = m.get("tool_calls")
+            if isinstance(tcs, list):
+                for tc in tcs:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function")
+                    if not isinstance(fn, dict):
+                        continue
+                    if (fn.get("name") or "").strip() != "invoke_capability":
+                        continue
+                    args = fn.get("arguments")
+                    if isinstance(args, str) and "sutui.search_models" in args:
+                        return True
+
+    return False
+
+
+def _enforce_single_search_models_tool_call(body: Dict[str, Any], trace_id: str) -> None:
+    tools = body.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return
+    msgs = body.get("messages")
+    if not _messages_already_ran_search_models(msgs):
+        return
+    # 已经查过一次：不再允许再次 tool_call，让模型直接总结已有 tool_result。
+    prev = body.get("tool_choice")
+    body["tool_choice"] = "none"
+    body.pop("tools", None)
+    logger.info(
+        "[chat_trace] trace_id=%s enforce_single_search_models tool_choice %r -> none (tools stripped)",
+        trace_id,
+        prev,
+    )
 
 
 def _strip_provider_prefix(mid: str) -> str:
@@ -865,6 +939,7 @@ async def sutui_chat_completions(
 
     _remap_sutui_chat_model(body)
     _optimize_request_body(body)
+    _enforce_single_search_models_tool_call(body, trace_id)
 
     bm = brand_mark_for_jwt_claim(getattr(current_user, "brand_mark", None))
     if bm not in ("bihuo", "yingshi"):
@@ -926,8 +1001,11 @@ async def sutui_chat_completions(
     out_req_for_audit = clip_openai_chat_completions_json_for_audit(body)
 
     # ── Build attempts list: direct API first, then xskill fallback ──
-    _DIRECT_TIMEOUT = 30.0
-    _XSKILL_TIMEOUT = 45.0
+    # Merged: E (HEAD) used shorter caps; D (main) extended for long completions — use the more permissive ceiling.
+    _DIRECT_TIMEOUT_E, _XSKILL_TIMEOUT_E = 30.0, 45.0
+    _DIRECT_TIMEOUT_D, _XSKILL_TIMEOUT_D = 180.0, 180.0
+    _DIRECT_TIMEOUT = max(_DIRECT_TIMEOUT_E, _DIRECT_TIMEOUT_D)
+    _XSKILL_TIMEOUT = max(_XSKILL_TIMEOUT_E, _XSKILL_TIMEOUT_D)
     attempts: List[Dict[str, Any]] = []
     for mid in model_candidates:
         dr = _get_direct_route(mid)

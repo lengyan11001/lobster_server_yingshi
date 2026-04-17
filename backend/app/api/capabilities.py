@@ -4,7 +4,9 @@
 invoke_capability 顺序触发，不在此之外再实现第二套扣费。
 """
 import json
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -23,6 +25,25 @@ from .installation_slots import installation_slots_enabled, parse_installation_i
 from .skills import user_can_use_capability
 
 router = APIRouter()
+
+_PRICING_JSON_PATH = Path(__file__).resolve().parent.parent.parent.parent / "comfly_pricing.json"
+
+
+def _get_user_price_multiplier() -> float:
+    """用户消耗 = 采购价 × 倍率。优先环境变量，其次 comfly_pricing.json，默认 3。"""
+    env_val = os.environ.get("USER_PRICE_MULTIPLIER", "").strip()
+    if env_val:
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
+    try:
+        if _PRICING_JSON_PATH.exists():
+            data = json.loads(_PRICING_JSON_PATH.read_text("utf-8"))
+            return float(data.get("user_price_multiplier_default", 3))
+    except Exception:
+        pass
+    return 3.0
 
 
 def _installation_id_for_capability_checks(x_installation_id: Optional[str]) -> Optional[str]:
@@ -144,6 +165,8 @@ class PreDeductIn(BaseModel):
     params: Optional[dict] = None
     sutui_pool: Optional[str] = None
     sutui_token_ref: Optional[str] = None
+    force_credits: Optional[float] = None
+    dry_run: bool = False
 
 
 def _sutui_recon_for_ledger(
@@ -224,7 +247,10 @@ def pre_deduct(
     x_installation_id: Optional[str] = Header(None, alias="X-Installation-Id"),
 ):
     idem_key = _billing_idempotency_key(request)
-    iid = _installation_id_for_capability_checks(x_installation_id)
+    if body.dry_run:
+        iid = (x_installation_id or "").strip() or None
+    else:
+        iid = _installation_id_for_capability_checks(x_installation_id)
     if not user_can_use_capability(db, current_user.id, body.capability_id, iid):
         raise HTTPException(
             status_code=403,
@@ -232,7 +258,7 @@ def pre_deduct(
         )
     if not _should_deduct_credits():
         return {"credits_charged": 0, "message": "未启用积分扣减"}
-    if not _billing_request_may_mutate_balance(request):
+    if not body.dry_run and not _billing_request_may_mutate_balance(request):
         raise HTTPException(
             status_code=403,
             detail=(
@@ -250,7 +276,48 @@ def pre_deduct(
     upstream_tool = (cap.upstream_tool or "").strip() if cap else ""
     _require_sutui_brand_for_billing(current_user, upstream=upstream)
 
-    if upstream == "sutui" and upstream_tool == "generate":
+    # ── force_credits: MCP 已算好金额（Comfly 路由等场景）──
+    if body.force_credits is not None and body.force_credits > 0:
+        fc = quantize_credits(body.force_credits)
+        if body.dry_run:
+            return {"credits_charged": credits_json_float(fc), "dry_run": True, "model": body.model or ""}
+        db.refresh(current_user)
+        if user_balance_decimal(current_user) < fc:
+            raise HTTPException(
+                status_code=402,
+                detail=f"积分不足：本次需 {float(fc)} 积分，当前余额 {float(user_balance_decimal(current_user))}。请先充值。",
+            )
+        current_user.credits = user_balance_decimal(current_user) - fc
+        bal = quantize_credits(current_user.credits)
+        _recon_fc = _sutui_recon_for_ledger(
+            request,
+            upstream="comfly",
+            sutui_pool=body.sutui_pool,
+            sutui_token_ref=body.sutui_token_ref,
+        )
+        append_credit_ledger(
+            db,
+            current_user.id,
+            -fc,
+            "pre_deduct",
+            bal,
+            description="能力预扣（Comfly 固定价）",
+            ref_type="capability",
+            meta={
+                **(_recon_fc or {}),
+                "capability_id": body.capability_id,
+                "model": body.model or "",
+                "pre_estimated": credits_json_float(fc),
+                "upstream": "comfly",
+            },
+        )
+        db.commit()
+        out = {"credits_charged": credits_json_float(fc)}
+        _pre_deduct_idempotent_store(db, current_user.id, idem_key, out)
+        return out
+
+    _UNDERSTAND_CAPS = ("image.understand", "video.understand")
+    if upstream == "sutui" and upstream_tool == "generate" and body.capability_id not in _UNDERSTAND_CAPS:
         from ..services.sutui_billing_gate import assert_pricing_pre_deduct_allows_upstream_or_http
 
         model = (body.model or "").strip()
@@ -260,6 +327,32 @@ def pre_deduct(
                 detail="调用生成能力时必须提供 model 以按速推定价预扣积分。",
             )
         params = body.params if isinstance(body.params, dict) else None
+
+        if body.dry_run:
+            _multiplier = _get_user_price_multiplier()
+            sutui_price = None
+            try:
+                _s = assert_pricing_pre_deduct_allows_upstream_or_http(
+                    db, current_user, model, params, action_label="素材生成",
+                )
+                sutui_price = float(_s)
+            except Exception:
+                pass
+            comfly_price = None
+            try:
+                from mcp.comfly_upstream import lookup_comfly_model
+                _cm = lookup_comfly_model(model)
+                if _cm and isinstance(_cm, dict) and _cm.get("price_per_unit") is not None:
+                    comfly_price = float(_cm["price_per_unit"])
+            except Exception:
+                pass
+            candidates = [p for p in (sutui_price, comfly_price) if p is not None and p > 0]
+            if candidates:
+                best = min(candidates)
+                est_final = quantize_credits(best * _multiplier)
+                return {"credits_charged": credits_json_float(est_final), "dry_run": True, "model": model}
+            return {"credits_charged": 0, "dry_run": True, "model": model}
+
         est_d = assert_pricing_pre_deduct_allows_upstream_or_http(
             db,
             current_user,
@@ -267,6 +360,14 @@ def pre_deduct(
             params,
             action_label="素材生成",
         )
+        _multiplier = _get_user_price_multiplier()
+        est_d = quantize_credits(float(est_d) * _multiplier)
+        db.refresh(current_user)
+        if user_balance_decimal(current_user) < est_d:
+            raise HTTPException(
+                status_code=402,
+                detail=f"积分不足：本次需 {float(est_d)} 积分（模型估价×{_multiplier:.0f}），当前余额 {float(user_balance_decimal(current_user))}。请先充值。",
+            )
         current_user.credits = user_balance_decimal(current_user) - est_d
         bal = quantize_credits(current_user.credits)
         _recon = _sutui_recon_for_ledger(
@@ -281,13 +382,14 @@ def pre_deduct(
             -est_d,
             "pre_deduct",
             bal,
-            description="能力预扣（按模型估价）",
+            description=f"能力预扣（按模型估价×{_multiplier:.0f}）",
             ref_type="capability",
             meta={
                 **(_recon or {}),
                 "capability_id": body.capability_id,
                 "model": model,
                 "pre_estimated": credits_json_float(est_d),
+                "price_multiplier": _multiplier,
             },
         )
         db.commit()
@@ -295,9 +397,25 @@ def pre_deduct(
         _pre_deduct_idempotent_store(db, current_user.id, idem_key, out)
         return out
 
+    # ── Comfly 定价查找（dry_run 兜底：MCP 尚未介入时用 comfly_pricing.json 估价）──
+    if body.dry_run and (body.model or "").strip():
+        try:
+            from mcp.comfly_upstream import lookup_comfly_model
+            _cm_entry = lookup_comfly_model((body.model or "").strip())
+            if _cm_entry and isinstance(_cm_entry, dict):
+                _cm_price = _cm_entry.get("price_per_unit")
+                if _cm_price is not None and float(_cm_price) > 0:
+                    _multiplier = _get_user_price_multiplier()
+                    _cm_est = quantize_credits(float(_cm_price) * _multiplier)
+                    return {"credits_charged": credits_json_float(_cm_est), "dry_run": True, "model": body.model}
+        except Exception:
+            pass
+
     unit_credits = int(cap.unit_credits or 0) if cap else 0
     if unit_credits <= 0:
         return {"credits_charged": 0}
+    if body.dry_run:
+        return {"credits_charged": 0, "dry_run": True, "model": body.model or ""}
     db.refresh(current_user)
     uc = quantize_credits(unit_credits)
     if user_balance_decimal(current_user) < uc:
@@ -439,9 +557,9 @@ def record_call(
         ledger_kind = "settle"
         ledger_meta = {
             "capability_id": body.capability_id,
-            "pre_deducted": pre,
-            "final": final,
-            "delta_settle": -delta,
+            "pre_deducted": credits_json_float(pre),
+            "final": credits_json_float(final),
+            "delta_settle": credits_json_float(-delta),
         }
     elif credits_charged_body > 0 and _should_deduct_credits() and not pre_applied:
         if user_balance_decimal(current_user) < credits_charged_body:
@@ -452,7 +570,7 @@ def record_call(
         current_user.credits = user_balance_decimal(current_user) - credits_charged_body
         credits_charged = credits_charged_body
         ledger_kind = "direct_charge"
-        ledger_meta = {"capability_id": body.capability_id, "credits_charged": credits_charged_body}
+        ledger_meta = {"capability_id": body.capability_id, "credits_charged": credits_json_float(credits_charged_body)}
     elif credits_charged_body == 0 and _should_deduct_credits() and not pre_applied and unit_credits > 0:
         uc = quantize_credits(unit_credits)
         if user_balance_decimal(current_user) < uc:
@@ -564,3 +682,71 @@ def my_call_logs(
     ]
 
 
+@router.get("/capabilities/comfly-pricing", summary="Comfly 定价表（供 lobster_online 算力确认使用）")
+def comfly_pricing():
+    """返回 comfly_pricing.json 内容，前端可据此判断哪些模型走 Comfly 并展示预估算力。"""
+    import json as _json
+    from pathlib import Path as _Path
+    p = _Path(__file__).resolve().parent.parent.parent.parent / "comfly_pricing.json"
+    if not p.exists():
+        return {"models": {}}
+    try:
+        return _json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {"models": {}}
+
+
+# --------------- 速推模型与定价列表（用户展示用，乘以 user_price_multiplier） ---------------
+
+import math as _math
+
+
+@router.get("/api/sutui/models", summary="速推模型与定价（展示用，已乘用户倍率）")
+def get_sutui_models():
+    from ..services.sutui_pricing import (
+        fetch_all_media_models,
+        estimate_credits_from_pricing,
+    )
+
+    try:
+        raw_models = fetch_all_media_models()
+    except Exception as exc:
+        raise HTTPException(502, detail=f"拉取速推模型失败: {exc}")
+
+    multiplier = _get_user_price_multiplier()
+    results = []
+    for m in raw_models:
+        pricing_raw = m.get("pricing")
+        pricing_display = None
+        if pricing_raw and isinstance(pricing_raw, dict):
+            est_raw = estimate_credits_from_pricing(pricing_raw, {})
+            est_user = int(_math.ceil(est_raw * multiplier)) if est_raw > 0 else 0
+            pricing_display = {
+                "default_credits": est_user,
+                "price_type": pricing_raw.get("price_type", ""),
+                "base_price_user": int(_math.ceil(float(pricing_raw.get("base_price") or 0) * multiplier)) if pricing_raw.get("base_price") else None,
+                "examples": [],
+            }
+            for ex in (pricing_raw.get("examples") or []):
+                ex_price = ex.get("price")
+                if ex_price is not None:
+                    try:
+                        pricing_display["examples"].append({
+                            "description": ex.get("description", ""),
+                            "price": int(_math.ceil(float(ex_price) * multiplier)),
+                        })
+                    except (TypeError, ValueError):
+                        pass
+
+        results.append({
+            "id": m["id"],
+            "name": m.get("name", ""),
+            "category": m.get("category", ""),
+            "task_type": m.get("task_type", ""),
+            "description": m.get("description", ""),
+            "isHot": m.get("isHot", False),
+            "isNew": m.get("isNew", False),
+            "pricing": pricing_display,
+        })
+
+    return {"ok": True, "models": results, "multiplier": multiplier}
