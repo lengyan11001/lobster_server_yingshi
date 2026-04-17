@@ -530,3 +530,54 @@ def extract_upstream_reported_credits(obj: Any, _depth: int = 0) -> Decimal:
         for it in obj:
             best = max(best, extract_upstream_reported_credits(it, _depth + 1))
     return best
+
+
+# --------------- 批量拉取所有多媒体模型列表 + 预填充定价缓存 ---------------
+
+import logging as _logging
+
+_models_log = _logging.getLogger(__name__ + ".models_catalog")
+
+_XSKILL_MODELS_URL = "https://api.apiz.ai/api/v3/mcp/models?lang=zh-CN"
+_ALL_MODELS_CACHE: Dict[str, Any] = {"data": None, "ts": 0.0}
+_ALL_MODELS_CACHE_TTL = 3600
+
+
+def fetch_all_media_models() -> list:
+    """拉取 xSkill 全部多媒体模型列表，同时预填充 _DOCS_CACHE 供 billing 使用。
+
+    返回的每个 model dict 含 id/name/category/task_type/description/isHot/isNew/pricing（原始）。
+    """
+    now = time.time()
+    if _ALL_MODELS_CACHE["data"] is not None and now - _ALL_MODELS_CACHE["ts"] < _ALL_MODELS_CACHE_TTL:
+        return _ALL_MODELS_CACHE["data"]
+
+    try:
+        r = httpx.get(_XSKILL_MODELS_URL, timeout=20.0)
+        r.raise_for_status()
+        models = r.json().get("data", {}).get("models", [])
+    except Exception as exc:
+        _models_log.warning("拉取模型列表失败: %s", exc)
+        cached = _ALL_MODELS_CACHE.get("data")
+        return cached if cached else []
+
+    media = [m for m in models if m.get("category") in ("video", "image", "audio")]
+    results = []
+    for m in media:
+        mid = m["id"]
+        pricing = fetch_model_pricing(mid)
+        results.append({
+            "id": mid,
+            "name": m.get("name", ""),
+            "category": m.get("category", ""),
+            "task_type": m.get("task_type", ""),
+            "description": m.get("description", ""),
+            "isHot": m.get("isHot", False),
+            "isNew": m.get("isNew", False),
+            "pricing": pricing,
+        })
+
+    _ALL_MODELS_CACHE["data"] = results
+    _ALL_MODELS_CACHE["ts"] = time.time()
+    _models_log.info("已缓存 %d 个多媒体模型定价", len(results))
+    return results
