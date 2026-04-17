@@ -239,6 +239,25 @@ def skill_store_admin_flag(current_user: User = Depends(get_current_user)):
     return {"is_skill_store_admin": _skill_store_admin(current_user)}
 
 
+@router.get("/skills/user-allowed-capability-ids", summary="当前用户可使用的 capability_id 列表（MCP 过滤用）")
+def user_allowed_capability_ids(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """根据用户可见技能包，返回该用户允许调用的 capability_id 列表。管理员返回全部。"""
+    registry = _load_registry()
+    packages = registry.get("packages", {})
+    is_admin = _skill_store_admin(current_user)
+    if is_admin:
+        cap_ids = []
+        for pkg in packages.values():
+            cap_ids.extend((pkg.get("capabilities") or {}).keys())
+        return {"is_admin": True, "capability_ids": sorted(set(cap_ids))}
+    visible = _user_visible_package_ids(db, current_user.id)
+    cap_ids = []
+    for pkg_id in visible:
+        pkg = packages.get(pkg_id, {})
+        cap_ids.extend((pkg.get("capabilities") or {}).keys())
+    return {"is_admin": False, "capability_ids": sorted(set(cap_ids))}
+
+
 @router.get("/skills/unlocked-packages", summary="当前用户已解锁的技能包 ID 列表（MCP 校验用）")
 def unlocked_packages(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     ids = list(_user_unlocked_package_ids(db, current_user.id))

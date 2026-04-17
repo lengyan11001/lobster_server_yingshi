@@ -169,6 +169,32 @@ async def _fetch_is_skill_store_admin(token: Optional[str]) -> bool:
         return False
 
 
+async def _fetch_user_allowed_capability_ids(token: Optional[str]) -> Optional[set]:
+    """获取用户可使用的 capability_id 集合。管理员返回 None（不限制），匿名返回空集。"""
+    if not (token or "").strip():
+        return set()
+    auth = (token or "").strip()
+    if not auth.lower().startswith("bearer "):
+        auth = f"Bearer {auth}"
+    auth_base = (os.environ.get("AUTH_SERVER_BASE") or "").strip().rstrip("/")
+    if not auth_base:
+        auth_base = BASE_URL
+    url = f"{auth_base.rstrip('/')}/skills/user-allowed-capability-ids"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(url, headers={"Authorization": auth})
+        if r.status_code != 200:
+            logger.warning("[MCP] user-allowed-capability-ids HTTP %s", r.status_code)
+            return None
+        data = r.json()
+        if data.get("is_admin"):
+            return None
+        return set(data.get("capability_ids") or [])
+    except Exception as e:
+        logger.warning("[MCP] user-allowed-capability-ids 请求失败: %s", e)
+        return None
+
+
 def _load_upstream_urls() -> Dict[str, str]:
     urls: Dict[str, str] = {}
     try:
@@ -250,11 +276,17 @@ async def _find_account_id_by_nickname(
     return None
 
 
-def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admin: bool = True) -> List[Dict[str, Any]]:
+def _tool_definitions(
+    catalog: Dict[str, Dict[str, Any]],
+    *,
+    is_skill_store_admin: bool = True,
+    allowed_capability_ids: Optional[set] = None,
+) -> List[Dict[str, Any]]:
     capability_list = sorted(
         cid
         for cid in catalog.keys()
         if not (_capability_id_is_debug_only_in_registry(cid) and not is_skill_store_admin)
+        and (allowed_capability_ids is None or cid in allowed_capability_ids)
     )
     tools = [
         {
@@ -1929,7 +1961,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
         if name == "list_capabilities":
             is_admin = await _fetch_is_skill_store_admin(token)
-            # Collect Comfly model names per capability type for dynamic hints
+            allowed = await _fetch_user_allowed_capability_ids(token)
             _comfly_image_models: list[str] = []
             _comfly_video_models: list[str] = []
             try:
@@ -1950,6 +1982,8 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 if catalog[cid].get("enabled") is False:
                     continue
                 if _capability_id_is_debug_only_in_registry(cid) and not is_admin:
+                    continue
+                if allowed is not None and cid not in allowed:
                     continue
                 desc = catalog[cid].get("description") or cid
                 if cid == "image.generate" and _comfly_image_models:
@@ -2076,6 +2110,9 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             )
             if _capability_id_is_debug_only_in_registry(capability_id) and not await _fetch_is_skill_store_admin(token):
                 return [{"type": "text", "text": "该能力为调试中技能，当前账号不可用。"}], True
+            allowed = await _fetch_user_allowed_capability_ids(token)
+            if allowed is not None and capability_id not in allowed:
+                return [{"type": "text", "text": f"当前账号未开通此能力: {capability_id}"}], True
             cfg = catalog[capability_id]
             upstream_tool = str(cfg.get("upstream_tool") or "").strip()
             if not upstream_tool:
@@ -2992,8 +3029,9 @@ async def _handle_single_message(msg: Dict[str, Any], request: Request) -> Optio
         catalog = _load_capability_catalog()
         token = _get_token_from_request(request)
         is_admin = await _fetch_is_skill_store_admin(token)
-        tools = _tool_definitions(catalog, is_skill_store_admin=is_admin)
-        logger.info("[MCP] tools/list -> %s tools", len(tools))
+        allowed = await _fetch_user_allowed_capability_ids(token)
+        tools = _tool_definitions(catalog, is_skill_store_admin=is_admin, allowed_capability_ids=allowed)
+        logger.info("[MCP] tools/list -> %s tools (allowed=%s)", len(tools), "all" if allowed is None else len(allowed))
         return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
     if method == "tools/call":
         name = params.get("name")
