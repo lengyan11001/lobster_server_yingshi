@@ -694,3 +694,87 @@ def comfly_pricing():
         return _json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return {"models": {}}
+
+
+# --------------- 速推模型与定价列表（用户展示用，乘以 user_price_multiplier） ---------------
+
+import logging as _logging
+import time as _time
+import urllib.parse as _url_parse
+import math as _math
+
+import httpx as _httpx
+
+_sutui_models_log = _logging.getLogger(__name__ + ".sutui_models")
+_XSKILL_MODELS_URL = "https://api.apiz.ai/api/v3/mcp/models?lang=zh-CN"
+_sutui_models_cache: dict = {"data": None, "ts": 0.0}
+_SUTUI_MODELS_CACHE_TTL = 3600
+
+
+async def _fetch_sutui_models_with_pricing() -> list:
+    """拉取全部多媒体模型，用 sutui_pricing.py 同源定价 × 用户倍率返回。"""
+    now = _time.time()
+    if _sutui_models_cache["data"] is not None and now - _sutui_models_cache["ts"] < _SUTUI_MODELS_CACHE_TTL:
+        return _sutui_models_cache["data"]
+
+    from ..services.sutui_pricing import (
+        fetch_model_pricing as _fmp,
+        estimate_credits_from_pricing as _ecp,
+    )
+
+    async with _httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.get(_XSKILL_MODELS_URL)
+        r.raise_for_status()
+        models = r.json().get("data", {}).get("models", [])
+
+    media = [m for m in models if m.get("category") in ("video", "image", "audio")]
+    multiplier = _get_user_price_multiplier()
+    results = []
+    for m in media:
+        mid = m["id"]
+        pricing_raw = _fmp(mid)
+        pricing_display = None
+        if pricing_raw and isinstance(pricing_raw, dict):
+            est_raw = _ecp(pricing_raw, {})
+            est_user = int(_math.ceil(est_raw * multiplier)) if est_raw > 0 else 0
+            pricing_display = {
+                "default_credits": est_user,
+                "price_type": pricing_raw.get("price_type", ""),
+                "base_price_user": int(_math.ceil(float(pricing_raw.get("base_price") or 0) * multiplier)) if pricing_raw.get("base_price") else None,
+                "examples": [],
+            }
+            for ex in (pricing_raw.get("examples") or []):
+                ex_price = ex.get("price")
+                if ex_price is not None:
+                    try:
+                        pricing_display["examples"].append({
+                            "description": ex.get("description", ""),
+                            "price": int(_math.ceil(float(ex_price) * multiplier)),
+                        })
+                    except (TypeError, ValueError):
+                        pass
+
+        results.append({
+            "id": mid,
+            "name": m.get("name", ""),
+            "category": m.get("category", ""),
+            "task_type": m.get("task_type", ""),
+            "description": m.get("description", ""),
+            "isHot": m.get("isHot", False),
+            "isNew": m.get("isNew", False),
+            "pricing": pricing_display,
+        })
+
+    _sutui_models_cache["data"] = results
+    _sutui_models_cache["ts"] = _time.time()
+    return results
+
+
+@router.get("/api/sutui/models", summary="速推模型与定价（展示用，已乘用户倍率）")
+async def get_sutui_models():
+    try:
+        data = await _fetch_sutui_models_with_pricing()
+        return {"ok": True, "models": data, "multiplier": _get_user_price_multiplier()}
+    except Exception as exc:
+        _sutui_models_log.warning("拉取失败: %s", exc)
+        raise HTTPException(502, detail=f"拉取速推模型失败: {exc}")
