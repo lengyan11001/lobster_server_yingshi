@@ -175,9 +175,12 @@ def _slim_tools(tools: list) -> list:
             out.append(t)
             continue
         fn2 = dict(fn)
+        name = fn2.get("name", "")
+        is_lobster = isinstance(name, str) and name.startswith("lobster__")
         desc = fn2.get("description", "")
-        if isinstance(desc, str) and len(desc) > _SLIM_TOOL_DESC_MAX:
-            fn2["description"] = desc[:_SLIM_TOOL_DESC_MAX].rstrip() + "…"
+        desc_limit = 500 if is_lobster else _SLIM_TOOL_DESC_MAX
+        if isinstance(desc, str) and len(desc) > desc_limit:
+            fn2["description"] = desc[:desc_limit].rstrip() + "…"
         params = fn2.get("parameters") or fn2.get("inputSchema")
         if isinstance(params, dict):
             fn2["parameters" if "parameters" in fn2 else "inputSchema"] = _slim_schema(params)
@@ -262,6 +265,41 @@ def _truncate_msg(m: dict) -> dict:
     return m
 
 
+_LOBSTER_SYSTEM_HINT = (
+    "【龙虾工具使用规则】"
+    "1. 生成图片：用 lobster__invoke_capability，capability_id=\"image.generate\"，"
+    "用户未指定模型时 payload.model 填 \"fal-ai/flux-2/flash\"。"
+    "2. 生成视频：用 lobster__invoke_capability，capability_id=\"video.generate\"，"
+    "用户未指定模型时 payload.model 填 \"sora2\"，未指定时长时 duration=4。"
+    "3. 如果调用失败（积分不足、模型错误等），直接将错误信息告知用户，不要尝试用其他方式（搜索、网页等）来替代。"
+    "4. 用户说TVC/带货视频时用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
+    "5. 生成后如需保存素材用 lobster__save_asset；发布内容用 lobster__publish_content。"
+)
+
+
+def _inject_lobster_system_hint(body: dict) -> None:
+    """Append lobster usage rules to the first system message, or prepend a new one."""
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return
+    has_lobster_tool = any(
+        isinstance(t, dict) and (t.get("function", t) or {}).get("name", "").startswith("lobster__")
+        for t in tools
+    )
+    if not has_lobster_tool:
+        return
+    for m in msgs:
+        if isinstance(m, dict) and m.get("role") == "system":
+            existing = m.get("content") or ""
+            if "龙虾工具使用规则" not in existing:
+                m["content"] = existing + "\n\n" + _LOBSTER_SYSTEM_HINT
+            return
+    msgs.insert(0, {"role": "system", "content": _LOBSTER_SYSTEM_HINT})
+
+
 def _optimize_request_body(body: dict) -> int:
     """Optimise body in-place before forwarding. Returns estimated token savings."""
     import copy
@@ -271,6 +309,8 @@ def _optimize_request_body(body: dict) -> int:
     if isinstance(tools, list) and tools:
         tools = _filter_local_tools(tools)
         body["tools"] = _slim_tools(tools)
+
+    _inject_lobster_system_hint(body)
 
     msgs = body.get("messages")
     if isinstance(msgs, list):
