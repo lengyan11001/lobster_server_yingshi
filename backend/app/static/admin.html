@@ -465,7 +465,7 @@ function renderBarChart(elId, items, valueKey, color) {
   const el = document.getElementById(elId);
   if (!items || !items.length) { el.innerHTML = '<div class="empty">暂无数据</div>'; return; }
   const max = Math.max(...items.map(i => i[valueKey] || 0), 1);
-  const recent = items.slice(-15);
+  const recent = items.slice(-10).reverse();
   let html = '';
   for (const item of recent) {
     const v = item[valueKey] || 0;

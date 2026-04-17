@@ -405,7 +405,7 @@ def admin_stats(
         .filter(CapabilityCallLog.created_at >= range_start)
         .group_by(CapabilityCallLog.capability_id)
         .order_by(func.count(CapabilityCallLog.id).desc())
-        .limit(15)
+        .limit(10)
         .all()
     )
     capability_ranking = [
