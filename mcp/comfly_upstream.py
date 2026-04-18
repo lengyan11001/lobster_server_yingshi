@@ -337,11 +337,17 @@ async def call_comfly_video_generate(
         if first_image:
             body["image_url"] = first_image
 
-    logger.info("[Comfly] 视频生成请求 model=%s url=%s", comfly_model, url)
+    logger.info("[Comfly] 视频生成请求 model=%s url=%s body=%s", comfly_model, url, json.dumps(body, ensure_ascii=False)[:300])
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             r = await client.post(url, json=body, headers=headers)
         resp = r.json() if r.content else {}
+        logger.info(
+            "[Comfly] 视频生成响应 HTTP=%s keys=%s preview=%s",
+            r.status_code,
+            list(resp.keys()) if isinstance(resp, dict) else type(resp).__name__,
+            str(resp)[:500],
+        )
         if r.status_code >= 400:
             err = resp.get("error", {})
             msg = err.get("message", str(resp)) if isinstance(err, dict) else str(err)
@@ -441,8 +447,30 @@ async def call_comfly_chat_completions(
 
 def format_comfly_video_response_as_sutui(resp: Dict[str, Any]) -> Dict[str, Any]:
     """将 Comfly 视频响应转换为速推兼容格式。"""
-    task_id = resp.get("task_id") or resp.get("id") or resp.get("data", {}).get("task_id", "")
-    status = resp.get("status") or "pending"
+    data = resp.get("data") or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    task_id = (
+        resp.get("task_id")
+        or resp.get("taskId")
+        or resp.get("id")
+        or (data.get("task_id") if isinstance(data, dict) else "")
+        or (data.get("taskId") if isinstance(data, dict) else "")
+        or (data.get("id") if isinstance(data, dict) else "")
+        or ""
+    )
+    status = resp.get("status") or (data.get("status") if isinstance(data, dict) else "") or "pending"
+
+    if not task_id:
+        logger.warning(
+            "[Comfly] format_video: task_id 为空! resp_keys=%s data_keys=%s resp_preview=%s",
+            list(resp.keys()),
+            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            str(resp)[:500],
+        )
 
     result: Dict[str, Any] = {
         "task_id": task_id,
