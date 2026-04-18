@@ -105,6 +105,7 @@ def is_comfly_configured() -> bool:
 def lookup_comfly_model(model_id: str) -> Optional[Dict[str, Any]]:
     """查找模型是否在 Comfly 定价表中。返回定价条目或 None。
     支持直接按 Comfly 模型名查找，也支持通过 sutui_equivalent 反查。
+    当精确匹配失败时，尝试前缀匹配（如 fal-ai/veo3.1/xxx 匹配 fal-ai/veo3.1）。
     """
     if not model_id:
         return None
@@ -125,6 +126,21 @@ def lookup_comfly_model(model_id: str) -> Optional[Dict[str, Any]]:
             return v
         if isinstance(eq, str) and eq.lower() == low:
             return v
+    # Prefix fallback: fal-ai/veo3.1/lite → try fal-ai/veo3.1, then fal-ai
+    parts = low.rsplit("/", 1)
+    while len(parts) == 2 and parts[0]:
+        prefix = parts[0]
+        for k, v in models.items():
+            if k.lower() == prefix:
+                return v
+        for _k, v in models.items():
+            if not isinstance(v, dict):
+                continue
+            eq = v.get("sutui_equivalent")
+            _eqs = eq if isinstance(eq, list) else ([eq] if isinstance(eq, str) else [])
+            if any(e.lower() == prefix for e in _eqs if isinstance(e, str)):
+                return v
+        parts = prefix.rsplit("/", 1)
     return None
 
 

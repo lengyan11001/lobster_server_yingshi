@@ -14,7 +14,7 @@
       "price_per_unit": 20,
       "api_format": "unified_video",
       "comfly_model": "veo3.1-fast",
-      "sutui_equivalent": ["fal-ai/veo3.1"]
+      "sutui_equivalent": ["fal-ai/veo3.1/lite"]
     },
     "nano-banana-2": {
       "price_type": "per_call",
