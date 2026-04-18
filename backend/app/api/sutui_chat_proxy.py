@@ -321,6 +321,9 @@ _LOBSTER_SYSTEM_HINT = (
     "3. 如果调用失败（积分不足、模型错误等），直接将错误信息告知用户，不要尝试用其他方式（搜索、网页等）来替代。"
     "4. 用户说TVC/带货视频时用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
     "5. 生成后如需保存素材用 lobster__save_asset；发布内容用 lobster__publish_content。"
+    "6. 用户问"有哪些技能/能力/功能"时，只需调 list_capabilities 一次即可总结回复，"
+    "不要额外调 manage_skills(list_installed/list_store/search_online)。"
+    "7. 工具调用要精简高效，拿到足够信息后立即用文本回复，禁止冗余重复调用。"
 )
 
 
@@ -746,7 +749,7 @@ def _strip_fake_tool_text_from_response(data: Any) -> bool:
     return False
 
 
-_MAX_TOOL_CALL_ROUNDS = 6
+_MAX_TOOL_CALL_ROUNDS = 4
 
 
 def _enforce_max_tool_call_rounds(body: Dict[str, Any], trace_id: str) -> bool:
