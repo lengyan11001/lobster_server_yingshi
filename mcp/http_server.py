@@ -282,11 +282,13 @@ def _tool_definitions(
     is_skill_store_admin: bool = True,
     allowed_capability_ids: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
+    _HIDDEN_FROM_AI = {"comfly.veo", "comfly.veo.daihuo_pipeline"}
     capability_list = sorted(
         cid
         for cid in catalog.keys()
         if not (_capability_id_is_debug_only_in_registry(cid) and not is_skill_store_admin)
         and (allowed_capability_ids is None or cid in allowed_capability_ids)
+        and cid not in _HIDDEN_FROM_AI
     )
     tools = [
         {
