@@ -257,6 +257,44 @@
             "required": ["prompt"]
           }
         },
+        "video.generate": {
+          "description": "生成视频（统一能力入口）",
+          "upstream": "sutui",
+          "upstream_tool": "generate",
+          "enabled": true,
+          "is_default": true,
+          "arg_schema": {
+            "type": "object",
+            "properties": {
+              "prompt": {"type": "string", "description": "生成提示词"},
+              "model": {"type": "string", "description": "可选，模型名"},
+              "image_url": {"type": "string", "description": "可选，参考图片 URL（图生视频）"},
+              "duration": {"type": "integer", "description": "可选，视频时长（秒）"}
+            },
+            "required": ["prompt"]
+          }
+        },
+        "image.understand": {
+          "description": "图片理解/识别",
+          "upstream": "sutui",
+          "upstream_tool": "generate",
+          "enabled": true,
+          "is_default": false
+        },
+        "video.understand": {
+          "description": "视频理解/识别",
+          "upstream": "sutui",
+          "upstream_tool": "generate",
+          "enabled": true,
+          "is_default": false
+        },
+        "sutui.account": {
+          "description": "查询速推账户信息",
+          "upstream": "sutui",
+          "upstream_tool": "account",
+          "enabled": true,
+          "is_default": false
+        },
         "task.get_result": {
           "description": "查询任务结果（统一能力入口）",
           "upstream": "sutui",

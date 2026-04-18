@@ -169,6 +169,32 @@ async def _fetch_is_skill_store_admin(token: Optional[str]) -> bool:
         return False
 
 
+async def _fetch_user_allowed_capability_ids(token: Optional[str]) -> Optional[set]:
+    """获取用户可使用的 capability_id 集合。管理员返回 None（不限制），匿名返回空集。"""
+    if not (token or "").strip():
+        return set()
+    auth = (token or "").strip()
+    if not auth.lower().startswith("bearer "):
+        auth = f"Bearer {auth}"
+    auth_base = (os.environ.get("AUTH_SERVER_BASE") or "").strip().rstrip("/")
+    if not auth_base:
+        auth_base = BASE_URL
+    url = f"{auth_base.rstrip('/')}/skills/user-allowed-capability-ids"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            r = await client.get(url, headers={"Authorization": auth})
+        if r.status_code != 200:
+            logger.warning("[MCP] user-allowed-capability-ids HTTP %s", r.status_code)
+            return None
+        data = r.json()
+        if data.get("is_admin"):
+            return None
+        return set(data.get("capability_ids") or [])
+    except Exception as e:
+        logger.warning("[MCP] user-allowed-capability-ids 请求失败: %s", e)
+        return None
+
+
 def _load_upstream_urls() -> Dict[str, str]:
     urls: Dict[str, str] = {}
     try:
@@ -250,11 +276,17 @@ async def _find_account_id_by_nickname(
     return None
 
 
-def _tool_definitions(catalog: Dict[str, Dict[str, Any]], *, is_skill_store_admin: bool = True) -> List[Dict[str, Any]]:
+def _tool_definitions(
+    catalog: Dict[str, Dict[str, Any]],
+    *,
+    is_skill_store_admin: bool = True,
+    allowed_capability_ids: Optional[set] = None,
+) -> List[Dict[str, Any]]:
     capability_list = sorted(
         cid
         for cid in catalog.keys()
         if not (_capability_id_is_debug_only_in_registry(cid) and not is_skill_store_admin)
+        and (allowed_capability_ids is None or cid in allowed_capability_ids)
     )
     tools = [
         {
@@ -1286,6 +1318,18 @@ def _clamp_num_images_for_image_model(num: int, model: str) -> int:
     return n
 
 
+_IMAGE_MODEL_ALIASES: Dict[str, str] = {
+    "flux-2/flash": "fal-ai/flux-2/flash",
+    "flux2/flash": "fal-ai/flux-2/flash",
+    "flux2-flash": "fal-ai/flux-2/flash",
+    "flux-2-flash": "fal-ai/flux-2/flash",
+    "flux2": "fal-ai/flux-2/flash",
+    "flux-2": "fal-ai/flux-2/flash",
+}
+
+_DEFAULT_IMAGE_MODEL = "fal-ai/flux-2/flash"
+
+
 def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     按图片模型把「统一 payload」转成该模型 API 需要的参数，并保证用户输入的 prompt 原样传入。
@@ -1295,7 +1339,8 @@ def _normalize_image_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
     payload = dict(payload)
     model = (payload.get("model") or payload.get("model_id") or "").strip()
     if not model:
-        raise ValueError("请指定图片模型（model），例如 flux-2/flash、seedream、nano-banana-pro、jimeng-4.5、gemini 等。")
+        model = _DEFAULT_IMAGE_MODEL
+    model = _IMAGE_MODEL_ALIASES.get(model, model)
     payload["model"] = model
     prompt = (payload.get("prompt") or "").strip()
     image_url = (payload.get("image_url") or "").strip()
@@ -1396,6 +1441,9 @@ def _normalize_understand_payload(
     return out
 
 
+_DEFAULT_VIDEO_MODEL = "sora2"
+
+
 def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     按视频模型把「统一 payload」转成该模型 API 需要的参数，与 lobster 对齐：支持 backend 注入的 filePaths/media_files。
@@ -1404,7 +1452,7 @@ def _normalize_video_generate_payload(payload: Dict[str, Any]) -> Dict[str, Any]
         return payload
     model = (payload.get("model") or payload.get("model_id") or "").strip()
     if not model:
-        raise ValueError("请指定视频模型（model），例如 sora2、seedance2、hailuo、vidu、wan、veo、kling、grok、jimeng 等。")
+        model = _DEFAULT_VIDEO_MODEL
     prompt = (payload.get("prompt") or "").strip()
     fp = payload.get("filePaths") or []
     image_url = (payload.get("image_url") or "").strip()
@@ -1938,7 +1986,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
         if name == "list_capabilities":
             is_admin = await _fetch_is_skill_store_admin(token)
-            # Collect Comfly model names per capability type for dynamic hints
+            allowed = await _fetch_user_allowed_capability_ids(token)
             _comfly_image_models: list[str] = []
             _comfly_video_models: list[str] = []
             try:
@@ -1959,6 +2007,8 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                 if catalog[cid].get("enabled") is False:
                     continue
                 if _capability_id_is_debug_only_in_registry(cid) and not is_admin:
+                    continue
+                if allowed is not None and cid not in allowed:
                     continue
                 desc = catalog[cid].get("description") or cid
                 if cid == "image.generate" and _comfly_image_models:
@@ -2085,6 +2135,9 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
             )
             if _capability_id_is_debug_only_in_registry(capability_id) and not await _fetch_is_skill_store_admin(token):
                 return [{"type": "text", "text": "该能力为调试中技能，当前账号不可用。"}], True
+            allowed = await _fetch_user_allowed_capability_ids(token)
+            if allowed is not None and capability_id not in allowed:
+                return [{"type": "text", "text": f"当前账号未开通此能力: {capability_id}"}], True
             cfg = catalog[capability_id]
             upstream_tool = str(cfg.get("upstream_tool") or "").strip()
             if not upstream_tool:
@@ -2312,7 +2365,7 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                             is_internal = True
                         elif hostname in ("localhost", "127.0.0.1", "0.0.0.0"):
                             is_internal = True
-                        elif "api.51ins.com" in hostname:
+                        elif "api.51ins.com" in hostname or "bhzn.top" in hostname or "42.194.209.150" in hostname:
                             is_internal = True
                         else:
                             # 尝试解析为 IP 地址，判断是否为内网 IP
@@ -2668,28 +2721,38 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
             settle_final = quantize_credits(0) if upstream_error else quantize_credits(actual_used)
 
+            _UNDERSTAND_CAPS_SETTLE = ("image.understand", "video.understand")
+            _settle_multiplier = 1.0
+            if (
+                upstream_name == "sutui"
+                and upstream_tool == "generate"
+                and capability_id not in _UNDERSTAND_CAPS_SETTLE
+            ):
+                try:
+                    from backend.app.api.capabilities import _get_user_price_multiplier
+                    _settle_multiplier = _get_user_price_multiplier()
+                except Exception:
+                    _settle_multiplier = 3.0
+
             if pre_deduct_amount > 0:
-                if (
-                    not upstream_error
-                    and upstream_tool == "generate"
-                    and settle_final == 0
-                    and pre_deduct_amount > 0
-                ):
-                    logger.warning(
-                        "[MCP] 速推创建成功但未解析到 price/credits_used，预扣 %s 积分将全额退回，请检查上游响应或定价解析",
-                        pre_deduct_amount,
-                    )
                 pre_applied_flag = True
                 bill_credits = pre_deduct_amount
+                actual_user_price = quantize_credits(float(actual_used) * _settle_multiplier) if actual_used > 0 else quantize_credits(0)
                 if upstream_error:
                     cf_out: Optional[int] = 0
-                elif actual_used == pre_deduct_amount:
+                elif actual_used <= 0:
+                    cf_out = None
+                    logger.info(
+                        "[MCP] 上游未返回实际扣费，保留预扣 %s 作为最终价格 capability_id=%s",
+                        pre_deduct_amount, capability_id,
+                    )
+                elif actual_user_price == pre_deduct_amount:
                     cf_out = None
                 else:
-                    cf_out = float(quantize_credits(actual_used))
+                    cf_out = float(actual_user_price)
                 logger.info(
-                    "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s settle_final=%s credits_final_out=%s",
-                    capability_id, pre_deduct_amount, actual_used, settle_final, cf_out,
+                    "[MCP] invoke_capability 计费 capability_id=%s pre_deduct=%s upstream_parsed=%s settle_final=%s multiplier=%.1f user_price=%s credits_final_out=%s",
+                    capability_id, pre_deduct_amount, actual_used, settle_final, _settle_multiplier, actual_user_price, cf_out,
                 )
                 await _record_call(
                     token, record_capability_id, not bool(upstream_error), latency_ms, payload,
@@ -3005,8 +3068,9 @@ async def _handle_single_message(msg: Dict[str, Any], request: Request) -> Optio
         catalog = _load_capability_catalog()
         token = _get_token_from_request(request)
         is_admin = await _fetch_is_skill_store_admin(token)
-        tools = _tool_definitions(catalog, is_skill_store_admin=is_admin)
-        logger.info("[MCP] tools/list -> %s tools", len(tools))
+        allowed = await _fetch_user_allowed_capability_ids(token)
+        tools = _tool_definitions(catalog, is_skill_store_admin=is_admin, allowed_capability_ids=allowed)
+        logger.info("[MCP] tools/list -> %s tools (allowed=%s)", len(tools), "all" if allowed is None else len(allowed))
         return {"jsonrpc": "2.0", "id": msg_id, "result": {"tools": tools}}
     if method == "tools/call":
         name = params.get("name")

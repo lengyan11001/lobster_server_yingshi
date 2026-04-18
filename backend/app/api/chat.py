@@ -493,17 +493,27 @@ def _raise_api_err(resp: httpx.Response, model: str = ""):
 
 
 _DSML_FC_RE = re.compile(
-    r'<[\uff5c|]DSML[\uff5c|]function_calls>(.*?)</[\uff5c|]DSML[\uff5c|]function_calls>',
+    r'<\s*[\uff5c|]\s*DSML\s*[\uff5c|]\s*function_calls\s*>(.*?)<\s*/\s*[\uff5c|]\s*DSML\s*[\uff5c|]\s*function_calls\s*>',
     re.DOTALL,
 )
 _DSML_INVOKE_RE = re.compile(
-    r'<[\uff5c|]DSML[\uff5c|]invoke\s+name="([^"]+)">(.*?)</[\uff5c|]DSML[\uff5c|]invoke>',
+    r'<\s*[\uff5c|]\s*DSML\s*[\uff5c|]\s*invoke\s+name="([^"]+)"\s*>(.*?)<\s*/\s*[\uff5c|]\s*DSML\s*[\uff5c|]\s*invoke\s*>',
     re.DOTALL,
 )
 _DSML_PARAM_RE = re.compile(
-    r'<[\uff5c|]DSML[\uff5c|]parameter\s+name="([^"]+)"\s+string="(true|false)">(.*?)</[\uff5c|]DSML[\uff5c|]parameter>',
+    r'<\s*[\uff5c|]\s*DSML\s*[\uff5c|]\s*parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)<\s*/\s*[\uff5c|]\s*DSML\s*[\uff5c|]\s*parameter\s*>',
     re.DOTALL,
 )
+
+
+_DSML_TOOL_NAME_MAP = {
+    "lobster__invoke_capability": "invoke_capability",
+    "lobster__list_capabilities": "list_capabilities",
+    "lobster__manage_skills": "manage_skills",
+    "lobster__save_asset": "save_asset",
+    "lobster__list_assets": "list_assets",
+    "lobster__publish_content": "publish_content",
+}
 
 
 def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
@@ -512,7 +522,8 @@ def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
     for fc_match in _DSML_FC_RE.finditer(content):
         block = fc_match.group(1)
         for inv in _DSML_INVOKE_RE.finditer(block):
-            name = inv.group(1)
+            name = inv.group(1).strip()
+            name = _DSML_TOOL_NAME_MAP.get(name, name)
             body = inv.group(2)
             args: Dict[str, Any] = {}
             for pm in _DSML_PARAM_RE.finditer(body):
@@ -530,7 +541,7 @@ def _parse_text_tool_calls(content: str) -> List[Dict[str, Any]]:
 def _strip_dsml(content: str) -> str:
     """Remove DSML markup from text content, return readable portion."""
     cleaned = _DSML_FC_RE.sub("", content).strip()
-    cleaned = re.sub(r'<[\uff5c|]DSML[\uff5c|][^>]*>', '', cleaned).strip()
+    cleaned = re.sub(r'<\s*/?\s*[\uff5c|]\s*DSML\s*[\uff5c|]\s*[^>]*>', '', cleaned).strip()
     return cleaned
 
 
@@ -1880,7 +1891,7 @@ async def get_reply_for_channel(
                         sutui_token=sutui_token,
                         db=db, user_id=uid,
                     )
-                return (reply or "").strip() or "收到。"
+                return _reply_for_user(reply or "") or "收到。"
             except HTTPException:
                 return "服务暂时不可用，请稍后再试。"
             except Exception as e:
@@ -1888,7 +1899,7 @@ async def get_reply_for_channel(
                 return "处理时遇到问题，请稍后再试。"
         oc_reply = await _try_openclaw(messages, model or "openclaw", raw_token)
         if oc_reply:
-            return (oc_reply or "").strip() or "收到。"
+            return _reply_for_user(oc_reply or "") or "收到。"
         return "抱歉，当前未配置对话模型或 OpenClaw，无法回复。"
     finally:
         db.close()

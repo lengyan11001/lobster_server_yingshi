@@ -39,7 +39,7 @@ def main() -> int:
     ap.add_argument("--build", type=int, default=5, help="manifest.build（须大于客户端 CLIENT_CODE_VERSION.build 才会强拉）")
     ap.add_argument(
         "--public-base",
-        default="https://api.51ins.com",
+        default="https://bhzn.top",
         help="manifest.bundle_url 使用的 API 根（与线上一致）",
     )
     args = ap.parse_args()

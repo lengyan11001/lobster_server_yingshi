@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from ..core.config import settings
 from ..db import get_db
 from .auth import get_current_user
-from ..models import CapabilityConfig, SkillUnlock, SkillUnlockOrder, User
+from ..models import CapabilityConfig, SkillUnlock, SkillUnlockOrder, User, UserSkillVisibility
 from ..services.credit_ledger import append_credit_ledger
 from ..services.credits_amount import quantize_credits, user_balance_decimal
 from .installation_slots import ensure_installation_slot, installation_slots_enabled, parse_installation_id_strict
@@ -47,6 +47,32 @@ def _skill_store_admin(user: User) -> bool:
         return True
     login_account = (getattr(user, "email", None) or "").strip().lower()
     return login_account in (_SKILL_STORE_ADMIN_LOGIN_ACCOUNTS | _skill_store_admin_extra_from_env())
+
+
+DEFAULT_VISIBLE_PACKAGES: tuple[str, ...] = (
+    "sutui_mcp",
+    "xiaohongshu_publish",
+    "douyin_publish",
+    "toutiao_publish",
+    "openclaw_weixin_channel",
+    "media_edit_skill",
+)
+
+
+def _ensure_user_visibility_seeded(db: Session, user_id: int) -> None:
+    """如果用户还没有任何可见技能记录，自动种入默认列表。"""
+    existing = db.query(UserSkillVisibility).filter(UserSkillVisibility.user_id == user_id).first()
+    if existing is not None:
+        return
+    for pkg_id in DEFAULT_VISIBLE_PACKAGES:
+        db.add(UserSkillVisibility(user_id=user_id, package_id=pkg_id))
+    db.commit()
+
+
+def _user_visible_package_ids(db: Session, user_id: int) -> set:
+    _ensure_user_visibility_seeded(db, user_id)
+    rows = db.query(UserSkillVisibility.package_id).filter(UserSkillVisibility.user_id == user_id).all()
+    return {r[0] for r in rows}
 
 
 def _pkg_store_visibility(pkg: dict) -> str:
@@ -173,11 +199,12 @@ def list_store(current_user: User = Depends(get_current_user), db: Session = Dep
     unlocked = _user_unlocked_package_ids(db, current_user.id)
     packages = registry.get("packages", {})
     is_admin = _skill_store_admin(current_user)
+    visible = _user_visible_package_ids(db, current_user.id) if not is_admin else None
     out = []
     for pkg_id, pkg in packages.items():
         if pkg.get("show_in_store") is False:
             continue
-        if _pkg_store_visibility(pkg) == "debug" and not is_admin:
+        if not is_admin and visible is not None and pkg_id not in visible:
             continue
         is_installed = (
             pkg_id in installed
@@ -210,6 +237,25 @@ def list_store(current_user: User = Depends(get_current_user), db: Session = Dep
 @router.get("/skills/skill-store-admin", summary="当前用户是否为技能商店管理员（可见调试包与调试能力）")
 def skill_store_admin_flag(current_user: User = Depends(get_current_user)):
     return {"is_skill_store_admin": _skill_store_admin(current_user)}
+
+
+@router.get("/skills/user-allowed-capability-ids", summary="当前用户可使用的 capability_id 列表（MCP 过滤用）")
+def user_allowed_capability_ids(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """根据用户可见技能包，返回该用户允许调用的 capability_id 列表。管理员返回全部。"""
+    registry = _load_registry()
+    packages = registry.get("packages", {})
+    is_admin = _skill_store_admin(current_user)
+    if is_admin:
+        cap_ids = []
+        for pkg in packages.values():
+            cap_ids.extend((pkg.get("capabilities") or {}).keys())
+        return {"is_admin": True, "capability_ids": sorted(set(cap_ids))}
+    visible = _user_visible_package_ids(db, current_user.id)
+    cap_ids = []
+    for pkg_id in visible:
+        pkg = packages.get(pkg_id, {})
+        cap_ids.extend((pkg.get("capabilities") or {}).keys())
+    return {"is_admin": False, "capability_ids": sorted(set(cap_ids))}
 
 
 @router.get("/skills/unlocked-packages", summary="当前用户已解锁的技能包 ID 列表（MCP 校验用）")

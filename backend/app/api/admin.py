@@ -1,4 +1,4 @@
-"""管理后台：管理员登录、用户查询、积分充值。
+"""管理后台：管理员登录、用户查询、积分充值、数据统计。
 
 路由挂载在 /admin 前缀。
 - GET  /admin/              管理后台页面
@@ -7,11 +7,12 @@
 - GET  /admin/api/user/{id} 用户详情 + 最近流水
 - POST /admin/api/add-credits 给用户加积分
 - GET  /admin/api/users     用户列表（分页）
+- GET  /admin/api/stats     数据统计
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
@@ -19,12 +20,12 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-from sqlalchemy import func, or_
+from sqlalchemy import cast, func, or_, Date
 from sqlalchemy.orm import Session
 
 from ..core.config import settings
 from ..db import get_db
-from ..models import CreditLedger, User
+from ..models import CapabilityCallLog, CreditLedger, RechargeOrder, User, UserSkillVisibility
 from ..services.credit_ledger import append_credit_ledger
 from ..services.credits_amount import quantize_credits
 
@@ -215,4 +216,245 @@ def admin_list_users(
             }
             for u in users
         ],
+    }
+
+
+# ── 技能可见性管理 ──
+
+
+@router.get("/admin/api/user-skill-visibility/{user_id}")
+def admin_get_user_skill_visibility(
+    user_id: int,
+    _auth: bool = Depends(_verify_admin_token),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    from .skills import _user_visible_package_ids, _load_registry, _pkg_store_visibility, _skill_store_admin
+    visible = _user_visible_package_ids(db, user_id)
+    registry = _load_registry()
+    packages = registry.get("packages", {})
+    all_pkgs = [
+        {"id": k, "name": v.get("name", k), "store_visibility": _pkg_store_visibility(v)}
+        for k, v in packages.items()
+    ]
+    return {
+        "user_id": user_id,
+        "is_admin": _skill_store_admin(user),
+        "visible_ids": sorted(visible),
+        "all_packages": all_pkgs,
+    }
+
+
+class AdminSkillVisUpdate(BaseModel):
+    add: list[str] = []
+    remove: list[str] = []
+
+
+@router.post("/admin/api/user-skill-visibility/{user_id}")
+def admin_update_user_skill_visibility(
+    user_id: int,
+    body: AdminSkillVisUpdate,
+    _auth: bool = Depends(_verify_admin_token),
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    from .skills import _ensure_user_visibility_seeded
+    _ensure_user_visibility_seeded(db, user_id)
+    added, removed = [], []
+    for pkg_id in body.add:
+        pkg_id = pkg_id.strip()
+        if not pkg_id:
+            continue
+        exists = db.query(UserSkillVisibility).filter(
+            UserSkillVisibility.user_id == user_id,
+            UserSkillVisibility.package_id == pkg_id,
+        ).first()
+        if not exists:
+            db.add(UserSkillVisibility(user_id=user_id, package_id=pkg_id))
+            added.append(pkg_id)
+    for pkg_id in body.remove:
+        pkg_id = pkg_id.strip()
+        if not pkg_id:
+            continue
+        row = db.query(UserSkillVisibility).filter(
+            UserSkillVisibility.user_id == user_id,
+            UserSkillVisibility.package_id == pkg_id,
+        ).first()
+        if row:
+            db.delete(row)
+            removed.append(pkg_id)
+    db.commit()
+    return {"ok": True, "added": added, "removed": removed}
+
+
+# ── 数据统计 ──
+
+
+@router.get("/admin/api/stats")
+def admin_stats(
+    days: int = 30,
+    _auth: bool = Depends(_verify_admin_token),
+    db: Session = Depends(get_db),
+):
+    now_utc = datetime.now(timezone.utc)
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    range_start = today_start - timedelta(days=max(1, min(days, 90)))
+
+    total_users = db.query(func.count(User.id)).scalar() or 0
+    today_new_users = (
+        db.query(func.count(User.id))
+        .filter(User.created_at >= today_start)
+        .scalar() or 0
+    )
+    total_credits = float(
+        db.query(func.coalesce(func.sum(User.credits), 0)).scalar() or 0
+    )
+
+    today_recharge_paid = float(
+        db.query(func.coalesce(func.sum(RechargeOrder.credits), 0))
+        .filter(
+            RechargeOrder.status == "paid",
+            RechargeOrder.paid_at >= today_start,
+        )
+        .scalar() or 0
+    )
+
+    today_recharge_admin = float(
+        db.query(func.coalesce(func.sum(CreditLedger.delta), 0))
+        .filter(
+            CreditLedger.entry_type == "recharge",
+            CreditLedger.description.like("%管理员%"),
+            CreditLedger.created_at >= today_start,
+        )
+        .scalar() or 0
+    )
+
+    today_consume = float(
+        db.query(func.coalesce(func.sum(CreditLedger.delta), 0))
+        .filter(
+            CreditLedger.entry_type.in_(["sutui_chat", "pre_deduct", "settle", "unit_deduct"]),
+            CreditLedger.delta < 0,
+            CreditLedger.created_at >= today_start,
+        )
+        .scalar() or 0
+    )
+
+    paid_orders_today = (
+        db.query(func.count(RechargeOrder.id))
+        .filter(
+            RechargeOrder.status == "paid",
+            RechargeOrder.paid_at >= today_start,
+        )
+        .scalar() or 0
+    )
+
+    total_paid_revenue_fen = (
+        db.query(func.coalesce(func.sum(RechargeOrder.callback_amount_fen), 0))
+        .filter(RechargeOrder.status == "paid")
+        .scalar() or 0
+    )
+
+    date_col = func.date(User.created_at)
+    daily_users_raw = (
+        db.query(date_col.label("d"), func.count(User.id).label("cnt"))
+        .filter(User.created_at >= range_start)
+        .group_by(date_col)
+        .order_by(date_col)
+        .all()
+    )
+    daily_users = [{"date": str(r.d), "count": r.cnt} for r in daily_users_raw]
+
+    order_date = func.date(RechargeOrder.paid_at)
+    daily_recharge_raw = (
+        db.query(order_date.label("d"), func.sum(RechargeOrder.credits).label("total"))
+        .filter(
+            RechargeOrder.status == "paid",
+            RechargeOrder.paid_at >= range_start,
+        )
+        .group_by(order_date)
+        .order_by(order_date)
+        .all()
+    )
+    daily_recharge = [{"date": str(r.d), "amount": float(r.total)} for r in daily_recharge_raw]
+
+    ledger_date = func.date(CreditLedger.created_at)
+
+    daily_consume_raw = (
+        db.query(ledger_date.label("d"), func.sum(CreditLedger.delta).label("total"))
+        .filter(
+            CreditLedger.entry_type.in_(["sutui_chat", "pre_deduct", "settle", "unit_deduct"]),
+            CreditLedger.delta < 0,
+            CreditLedger.created_at >= range_start,
+        )
+        .group_by(ledger_date)
+        .order_by(ledger_date)
+        .all()
+    )
+    daily_consume = [{"date": str(r.d), "amount": abs(float(r.total))} for r in daily_consume_raw]
+
+    cap_ranking_raw = (
+        db.query(
+            CapabilityCallLog.capability_id,
+            func.count(CapabilityCallLog.id).label("calls"),
+            func.sum(CapabilityCallLog.credits_charged).label("credits"),
+        )
+        .filter(CapabilityCallLog.created_at >= range_start)
+        .group_by(CapabilityCallLog.capability_id)
+        .order_by(func.count(CapabilityCallLog.id).desc())
+        .limit(10)
+        .all()
+    )
+    capability_ranking = [
+        {"capability_id": r.capability_id, "calls": r.calls, "credits": float(r.credits or 0)}
+        for r in cap_ranking_raw
+    ]
+
+    top_consumers_raw = (
+        db.query(
+            CreditLedger.user_id,
+            func.sum(CreditLedger.delta).label("total_consumed"),
+        )
+        .filter(
+            CreditLedger.delta < 0,
+            CreditLedger.created_at >= range_start,
+        )
+        .group_by(CreditLedger.user_id)
+        .order_by(func.sum(CreditLedger.delta))
+        .limit(10)
+        .all()
+    )
+    top_consumer_ids = [r.user_id for r in top_consumers_raw]
+    user_map = {}
+    if top_consumer_ids:
+        for u in db.query(User).filter(User.id.in_(top_consumer_ids)).all():
+            user_map[u.id] = u.email
+    top_consumers = [
+        {
+            "user_id": r.user_id,
+            "email": user_map.get(r.user_id, "?"),
+            "consumed": abs(float(r.total_consumed)),
+        }
+        for r in top_consumers_raw
+    ]
+
+    return {
+        "overview": {
+            "total_users": total_users,
+            "today_new_users": today_new_users,
+            "total_credits_pool": round(total_credits, 2),
+            "today_recharge_paid": round(today_recharge_paid, 2),
+            "today_recharge_admin": round(today_recharge_admin, 2),
+            "today_consume": round(abs(today_consume), 2),
+            "paid_orders_today": paid_orders_today,
+            "total_revenue_yuan": round(int(total_paid_revenue_fen) / 100, 2),
+        },
+        "daily_users": daily_users,
+        "daily_recharge": daily_recharge,
+        "daily_consume": daily_consume,
+        "capability_ranking": capability_ranking,
+        "top_consumers": top_consumers,
     }

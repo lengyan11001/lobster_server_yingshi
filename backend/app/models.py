@@ -303,6 +303,18 @@ class SkillUnlockOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class UserSkillVisibility(Base):
+    """用户可见技能：每行 = 该用户可在技能商店看到的一个 package_id。管理员可增删，新用户自动种子默认列表。"""
+
+    __tablename__ = "user_skill_visibility"
+    __table_args__ = (UniqueConstraint("user_id", "package_id", name="uq_user_skill_visibility"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    package_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class BillingIdempotency(Base):
     """预扣幂等：同一用户同一 X-Billing-Idempotency-Key 在窗口内只扣一次，避免双通道重复 pre_deduct。"""
 

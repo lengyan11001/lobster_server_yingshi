@@ -145,6 +145,22 @@ _SLIM_PROP_DESC_MAX = 40          # max chars for property-level description; 0 
 _BASE64_RE = __import__("re").compile(r"data:[^;]{0,60};base64,[A-Za-z0-9+/=]{200,}")
 
 
+_TOOLS_BLACKLIST = frozenset({
+    "browser", "canvas", "exec", "process",
+})
+
+
+def _filter_local_tools(tools: list) -> list:
+    """Remove OpenClaw-local tools that the server-side LLM should not control."""
+    if not isinstance(tools, list):
+        return tools
+    return [
+        t for t in tools
+        if not isinstance(t, dict)
+        or (t.get("function", t) or {}).get("name", "") not in _TOOLS_BLACKLIST
+    ]
+
+
 def _slim_tools(tools: list) -> list:
     """Shorten tool definitions: truncate descriptions, strip verbose property docs."""
     if not isinstance(tools, list):
@@ -159,9 +175,12 @@ def _slim_tools(tools: list) -> list:
             out.append(t)
             continue
         fn2 = dict(fn)
+        name = fn2.get("name", "")
+        is_lobster = isinstance(name, str) and name.startswith("lobster__")
         desc = fn2.get("description", "")
-        if isinstance(desc, str) and len(desc) > _SLIM_TOOL_DESC_MAX:
-            fn2["description"] = desc[:_SLIM_TOOL_DESC_MAX].rstrip() + "…"
+        desc_limit = 500 if is_lobster else _SLIM_TOOL_DESC_MAX
+        if isinstance(desc, str) and len(desc) > desc_limit:
+            fn2["description"] = desc[:desc_limit].rstrip() + "…"
         params = fn2.get("parameters") or fn2.get("inputSchema")
         if isinstance(params, dict):
             fn2["parameters" if "parameters" in fn2 else "inputSchema"] = _slim_schema(params)
@@ -214,12 +233,59 @@ def _slim_messages(messages: list) -> list:
     ]
     if len(non_sys) > _SLIM_MSG_MAX_TURNS:
         non_sys = non_sys[-_SLIM_MSG_MAX_TURNS:]
+    non_sys = _repair_orphan_tool_messages(non_sys)
     result = []
     for m in sys_msgs:
         result.append(_truncate_msg(m))
     for m in non_sys:
         result.append(_truncate_msg(m))
     return result
+
+
+def _repair_orphan_tool_messages(messages: list) -> list:
+    """Remove orphaned tool messages whose preceding tool_calls assistant message was truncated.
+
+    DeepSeek (and OpenAI) require every message with role='tool' to follow
+    an assistant message that contains a matching tool_calls entry.  After
+    truncation this invariant can break.  We also strip assistant messages
+    whose tool_calls all lost their tool responses (to avoid dangling calls).
+    """
+    if not messages:
+        return messages
+
+    tool_call_ids_from_assistants: set = set()
+    tool_call_id_to_tool_idx: dict = {}
+
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict):
+            continue
+        role = (m.get("role") or "").strip().lower()
+        if role == "assistant":
+            tcs = m.get("tool_calls")
+            if isinstance(tcs, list):
+                for tc in tcs:
+                    tc_id = (tc.get("id") or "") if isinstance(tc, dict) else ""
+                    if tc_id:
+                        tool_call_ids_from_assistants.add(tc_id)
+        elif role == "tool":
+            tc_id = (m.get("tool_call_id") or "").strip()
+            if tc_id:
+                tool_call_id_to_tool_idx[tc_id] = i
+
+    orphan_indices: set = set()
+    for tc_id, idx in tool_call_id_to_tool_idx.items():
+        if tc_id not in tool_call_ids_from_assistants:
+            orphan_indices.add(idx)
+
+    if not orphan_indices:
+        return messages
+
+    repaired = [m for i, m in enumerate(messages) if i not in orphan_indices]
+    logger.info(
+        "[body-slim] removed %d orphan tool message(s) to fix conversation structure",
+        len(orphan_indices),
+    )
+    return repaired
 
 
 def _truncate_msg(m: dict) -> dict:
@@ -246,6 +312,41 @@ def _truncate_msg(m: dict) -> dict:
     return m
 
 
+_LOBSTER_SYSTEM_HINT = (
+    "【龙虾工具使用规则】"
+    "1. 生成图片：用 lobster__invoke_capability，capability_id=\"image.generate\"，"
+    "用户未指定模型时 payload.model 填 \"fal-ai/flux-2/flash\"。"
+    "2. 生成视频：用 lobster__invoke_capability，capability_id=\"video.generate\"，"
+    "用户未指定模型时 payload.model 填 \"sora2\"，未指定时长时 duration=4。"
+    "3. 如果调用失败（积分不足、模型错误等），直接将错误信息告知用户，不要尝试用其他方式（搜索、网页等）来替代。"
+    "4. 用户说TVC/带货视频时用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
+    "5. 生成后如需保存素材用 lobster__save_asset；发布内容用 lobster__publish_content。"
+)
+
+
+def _inject_lobster_system_hint(body: dict) -> None:
+    """Append lobster usage rules to the first system message, or prepend a new one."""
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return
+    has_lobster_tool = any(
+        isinstance(t, dict) and (t.get("function", t) or {}).get("name", "").startswith("lobster__")
+        for t in tools
+    )
+    if not has_lobster_tool:
+        return
+    for m in msgs:
+        if isinstance(m, dict) and m.get("role") == "system":
+            existing = m.get("content") or ""
+            if "龙虾工具使用规则" not in existing:
+                m["content"] = existing + "\n\n" + _LOBSTER_SYSTEM_HINT
+            return
+    msgs.insert(0, {"role": "system", "content": _LOBSTER_SYSTEM_HINT})
+
+
 def _optimize_request_body(body: dict) -> int:
     """Optimise body in-place before forwarding. Returns estimated token savings."""
     import copy
@@ -253,7 +354,10 @@ def _optimize_request_body(body: dict) -> int:
 
     tools = body.get("tools")
     if isinstance(tools, list) and tools:
+        tools = _filter_local_tools(tools)
         body["tools"] = _slim_tools(tools)
+
+    _inject_lobster_system_hint(body)
 
     msgs = body.get("messages")
     if isinstance(msgs, list):
@@ -324,15 +428,38 @@ def _enforce_single_search_models_tool_call(body: Dict[str, Any], trace_id: str)
     msgs = body.get("messages")
     if not _messages_already_ran_search_models(msgs):
         return
-    # 已经查过一次：不再允许再次 tool_call，让模型直接总结已有 tool_result。
-    prev = body.get("tool_choice")
-    body["tool_choice"] = "none"
-    body.pop("tools", None)
-    logger.info(
-        "[chat_trace] trace_id=%s enforce_single_search_models tool_choice %r -> none (tools stripped)",
-        trace_id,
-        prev,
-    )
+    # 已查过 search_models：从工具的 capability_id enum 中移除 search_models，保留其他工具。
+    _search_needles = {"sutui.search_models"}
+    modified = False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function")
+        if not isinstance(fn, dict):
+            continue
+        params = fn.get("parameters")
+        if not isinstance(params, dict):
+            continue
+        props = params.get("properties")
+        if not isinstance(props, dict):
+            continue
+        cap_prop = props.get("capability_id")
+        if isinstance(cap_prop, dict) and isinstance(cap_prop.get("enum"), list):
+            original = cap_prop["enum"]
+            filtered = [e for e in original if e not in _search_needles]
+            if len(filtered) < len(original):
+                cap_prop["enum"] = filtered
+                modified = True
+    if modified:
+        logger.info(
+            "[chat_trace] trace_id=%s enforce_single_search_models: removed search_models from capability enum (tools preserved)",
+            trace_id,
+        )
+    else:
+        logger.info(
+            "[chat_trace] trace_id=%s enforce_single_search_models: no enum to filter, keeping tools as-is",
+            trace_id,
+        )
 
 
 def _strip_provider_prefix(mid: str) -> str:
@@ -431,6 +558,32 @@ def _api_base() -> str:
     return (getattr(settings, "sutui_api_base", None) or "https://api.xskill.ai").rstrip("/")
 
 
+# ---------------------------------------------------------------------------
+# xskill v3 (OpenRouter) — new endpoint with provider-prefixed model IDs
+# ---------------------------------------------------------------------------
+_XSKILL_V3_MODEL_MAP: Dict[str, str] = {
+    "deepseek-chat": "deepseek/deepseek-v3.2",
+    "deepseek-reasoner": "deepseek/deepseek-v3.2-speciale",
+}
+_XSKILL_V3_CREDITS_PER_USD = 400
+
+
+def _get_v3_route(model: str, token: str) -> Optional[Dict[str, Any]]:
+    """Return v3 attempt dict if model has a v3 mapping, else None."""
+    v3_model = _XSKILL_V3_MODEL_MAP.get(model)
+    if not v3_model:
+        return None
+    return {
+        "model": v3_model,
+        "api_base": _api_base(),
+        "api_key": token,
+        "provider": "xskill-v3",
+        "endpoint_prefix": "/v3",
+        "is_direct": False,
+        "v1_model": model,
+    }
+
+
 def _upstream_chat_error_dict(data: Any) -> Optional[Dict[str, Any]]:
     """从速推 chat/completions 错误 JSON 中取出 error 对象（兼容 detail.error）。"""
     if not isinstance(data, dict):
@@ -462,7 +615,8 @@ def _xskill_upstream_pool_quota_error(data: Any) -> bool:
     return (
         code in ("insufficient_balance", "insufficient_user_quota")
         or typ == "billing_error"
-        or (typ == "rix_api_error" and ("insufficient" in code or "预扣费" in raw_msg))
+        or (typ.replace("_", "") == "rixapierror" and ("insufficient" in code or "预扣费" in raw_msg))
+        or "预扣费" in raw_msg
         or "insufficient" in msg
     )
 
@@ -768,7 +922,14 @@ def _credits_for_sutui_chat(
     *,
     is_direct_api: bool = False,
 ) -> Tuple[Decimal, str]:
-    """LLM 实扣：直连官方定价 → 上游显式价字段 → docs 定价+usage → usage×fallback。"""
+    """LLM 实扣：v3 cost → 直连官方定价 → 上游显式价字段 → docs 定价+usage → usage×fallback。"""
+    if usage and isinstance(usage, dict):
+        v3_cost = usage.get("cost")
+        if isinstance(v3_cost, (int, float)) and v3_cost > 0:
+            v3_credits = quantize_credits(Decimal(str(v3_cost)) * _XSKILL_V3_CREDITS_PER_USD)
+            if v3_credits > 0:
+                return v3_credits, "v3_cost_field"
+
     if is_direct_api and usage and isinstance(usage, dict):
         direct_credits = credits_from_direct_api_usage(model, usage)
         if direct_credits > 0:
@@ -1000,12 +1161,9 @@ async def sutui_chat_completions(
         user_bal_str = str(user_balance_decimal(current_user))
     out_req_for_audit = clip_openai_chat_completions_json_for_audit(body)
 
-    # ── Build attempts list: direct API first, then xskill fallback ──
-    # Merged: E (HEAD) used shorter caps; D (main) extended for long completions — use the more permissive ceiling.
-    _DIRECT_TIMEOUT_E, _XSKILL_TIMEOUT_E = 30.0, 45.0
-    _DIRECT_TIMEOUT_D, _XSKILL_TIMEOUT_D = 180.0, 180.0
-    _DIRECT_TIMEOUT = max(_DIRECT_TIMEOUT_E, _DIRECT_TIMEOUT_D)
-    _XSKILL_TIMEOUT = max(_XSKILL_TIMEOUT_E, _XSKILL_TIMEOUT_D)
+    # ── Build attempts list: direct → xskill-v3 → xskill-v1 ──
+    _DIRECT_TIMEOUT = 180.0
+    _XSKILL_TIMEOUT = 180.0
     attempts: List[Dict[str, Any]] = []
     for mid in model_candidates:
         dr = _get_direct_route(mid)
@@ -1013,6 +1171,13 @@ async def sutui_chat_completions(
             attempts.append({
                 "model": mid, "api_base": dr["api_base"], "api_key": dr["api_key"],
                 "provider": "direct:" + dr["provider"], "timeout": _DIRECT_TIMEOUT, "is_direct": True,
+            })
+        v3 = _get_v3_route(mid, token)
+        if v3:
+            attempts.append({
+                "model": v3["model"], "api_base": v3["api_base"], "api_key": v3["api_key"],
+                "provider": v3["provider"], "timeout": _XSKILL_TIMEOUT, "is_direct": False,
+                "endpoint_prefix": v3["endpoint_prefix"], "v1_model": mid,
             })
         attempts.append({
             "model": mid, "api_base": _api_base(), "api_key": token,
@@ -1029,18 +1194,21 @@ async def sutui_chat_completions(
         data: Any = None
         winning_model = model_id
         winning_is_direct = False
+        winning_provider = ""
         last_connect_error: Optional[Exception] = None
         last_timeout_error: Optional[Exception] = None
 
         for attempt_idx, att in enumerate(attempts):
             mid_try = att["model"]
-            att_url = f"{att['api_base']}/v1/chat/completions"
+            _epfx = att.get("endpoint_prefix", "/v1")
+            att_url = f"{att['api_base']}{_epfx}/chat/completions"
             att_headers = {
                 "Authorization": f"Bearer {att['api_key']}",
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
             }
             att_is_direct = att["is_direct"]
+            _saved_model = body.get("model")
             body["model"] = mid_try
 
             if att_is_direct:
@@ -1083,6 +1251,7 @@ async def sutui_chat_completions(
             if not att_is_direct and _sutui_chat_abort_model_fallback(r.status_code, data if isinstance(data, dict) else {}):
                 winning_model = mid_try
                 winning_is_direct = att_is_direct
+                winning_provider = att["provider"]
                 break
 
             if _openai_nonstream_completion_usable(data, r.status_code):
@@ -1124,6 +1293,7 @@ async def sutui_chat_completions(
                             continue
                 winning_model = mid_try
                 winning_is_direct = att_is_direct
+                winning_provider = att["provider"]
                 model_id = mid_try
                 break
 
@@ -1143,6 +1313,7 @@ async def sutui_chat_completions(
                 continue
             winning_model = mid_try
             winning_is_direct = att_is_direct
+            winning_provider = att["provider"]
             break
 
         if r is None:
@@ -1155,7 +1326,7 @@ async def sutui_chat_completions(
         if data is None:
             raise HTTPException(status_code=502, detail=(r.text or "")[:2000])
 
-        _route_label = "direct" if winning_is_direct else "xskill"
+        _route_label = "direct" if winning_is_direct else (winning_provider or "xskill")
         logger.info(
             "[chat_trace] trace_id=%s path=sutui_chat upstream roundtrip http=%s model=%s route=%s summary=%s",
             trace_id, r.status_code, winning_model or "-", _route_label,
@@ -1239,7 +1410,8 @@ async def sutui_chat_completions(
         try:
             for cand_idx, att in enumerate(attempts):
                 mid_try = att["model"]
-                att_url = f"{att['api_base']}/v1/chat/completions"
+                _epfx = att.get("endpoint_prefix", "/v1")
+                att_url = f"{att['api_base']}{_epfx}/chat/completions"
                 att_headers = {
                     "Authorization": f"Bearer {att['api_key']}",
                     "Content-Type": "application/json",
