@@ -78,6 +78,19 @@ class Settings(BaseSettings):
     wechat_oa_token: Optional[str] = None
     """服务号消息推送：EncodingAESKey（明文模式可不参与解密）"""
     wechat_oa_encoding_aes_key: Optional[str] = None
+    # ── 自建微信支付（不用速推）：商户号、APIv3 密钥，配置后充值可走微信 Native 扫码 ──
+    wechat_mch_id: Optional[str] = None
+    wechat_pay_apiv3_key: Optional[str] = None
+    """微信支付商户证书序列号（回调验签用）"""
+    wechat_pay_serial_no: Optional[str] = None
+    """微信支付商户私钥文件路径（pem）或 PEM 内容，统一下单签名用"""
+    wechat_pay_private_key_path: Optional[str] = None
+    """微信支付平台证书目录：SDK 会从此目录读取或下载平台证书"""
+    wechat_pay_cert_dir: Optional[str] = None
+    """微信支付公钥模式：公钥文件路径（商户平台-API安全-微信支付公钥-下载）"""
+    wechat_pay_public_key_path: Optional[str] = None
+    """微信支付公钥模式：公钥ID（形如 PUB_KEY_ID_011736889298...），勿与 APIv3 密钥混淆"""
+    wechat_pay_public_key_id: Optional[str] = None
     # ── 付呗聚合支付（替代自建微信支付）──
     """付呗商户开放平台 API ID"""
     fubei_app_id: Optional[str] = None
