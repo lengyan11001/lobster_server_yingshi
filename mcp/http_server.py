@@ -300,7 +300,8 @@ def _tool_definitions(
                 "调用能力(图片生成/视频/语音等)。"
                 "【默认模型】image.generate 用户未指定模型时 payload.model 必须填 \"fal-ai/flux-2/flash\"（不要自动选 jimeng）；用户明确指定 jimeng-4.0/jimeng-4.5 等时正常使用。"
                 "video.generate 用户未指定模型时 payload.model 填 \"sora2\"，用户未指定时长时 duration 必须填 4（即 4 秒）。"
-                "【爆款TVC】用户说TVC/带货视频时不走video.generate，改用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
+                "【重要】用户指定 veo3.1/veo3.1-fast 等模型生成视频时，使用 capability_id=\"video.generate\"，payload.model 填用户指定的模型名（如 veo3.1）。系统会自动路由到最优上游。"
+                "【爆款TVC】仅当用户明确说「TVC」「带货视频」时才用 capability_id=\"comfly.veo.daihuo_pipeline\"，不要仅因模型名含 veo 就选 comfly.veo。"
             ),
             "inputSchema": {
                 "type": "object",
