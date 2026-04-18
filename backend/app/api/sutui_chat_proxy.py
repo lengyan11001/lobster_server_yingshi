@@ -321,6 +321,9 @@ _LOBSTER_SYSTEM_HINT = (
     "3. 如果调用失败（积分不足、模型错误等），直接将错误信息告知用户，不要尝试用其他方式（搜索、网页等）来替代。"
     "4. 用户说TVC/带货视频时用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
     "5. 生成后如需保存素材用 lobster__save_asset；发布内容用 lobster__publish_content。"
+    "6. 用户问有哪些技能、能力、功能时，只需调 list_capabilities 一次即可总结回复，"
+    "不要额外调 manage_skills(list_installed/list_store/search_online)。"
+    "7. 工具调用要精简高效，拿到足够信息后立即用文本回复，禁止冗余重复调用。"
 )
 
 
@@ -697,7 +700,7 @@ def _openai_nonstream_completion_usable(data: Any, http_status: int) -> bool:
 
 
 _FAKE_TOOL_CALL_RE = __import__("re").compile(
-    r"tool\u2581call|<\|tool|```json\s*\{[^}]*capability|function<\u2581",
+    r"tool\u2581call|<\|tool|<\uff5cDSML\uff5c|```json\s*\{[^}]*capability|function<\u2581",
 )
 
 
@@ -713,6 +716,65 @@ def _response_has_fake_tool_text(data: Any) -> bool:
     if isinstance(content, str) and _FAKE_TOOL_CALL_RE.search(content):
         return True
     return False
+
+
+_DSML_BLOCK_RE = __import__("re").compile(
+    r"<\uff5cDSML\uff5c[\s\S]*?(?:</\uff5cDSML\uff5c>|$)",
+)
+
+
+def _strip_fake_tool_text_from_response(data: Any) -> bool:
+    """Strip DSML / fake tool call markup from content in-place. Returns True if cleaned."""
+    if not isinstance(data, dict):
+        return False
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    msg = (choices[0] if isinstance(choices[0], dict) else {}).get("message")
+    if not isinstance(msg, dict):
+        return False
+    content = msg.get("content")
+    if not isinstance(content, str):
+        return False
+    if not _FAKE_TOOL_CALL_RE.search(content):
+        return False
+    cleaned = _DSML_BLOCK_RE.sub("", content).strip()
+    if not cleaned:
+        cleaned = "好的，我来为您总结一下已获取的信息。"
+    if cleaned != content:
+        msg["content"] = cleaned
+        logger.warning("[dsml-clean] stripped fake tool markup from response content (%d→%d chars)",
+                       len(content), len(cleaned))
+        return True
+    return False
+
+
+_MAX_TOOL_CALL_ROUNDS = 4
+
+
+def _enforce_max_tool_call_rounds(body: Dict[str, Any], trace_id: str) -> bool:
+    """If conversation already has >= _MAX_TOOL_CALL_ROUNDS tool call round-trips,
+    remove tools to force a text-only response. Returns True if tools were stripped."""
+    tools = body.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return False
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return False
+    rounds = 0
+    for m in msgs:
+        if isinstance(m, dict) and (m.get("role") or "").strip().lower() == "tool":
+            rounds += 1
+    if rounds < _MAX_TOOL_CALL_ROUNDS:
+        return False
+    body.pop("tools", None)
+    body.pop("tool_choice", None)
+    logger.warning(
+        "[chat_trace] trace_id=%s enforce_max_tool_rounds: %d tool rounds detected (max=%d), "
+        "stripped tools to force text response",
+        trace_id, rounds, _MAX_TOOL_CALL_ROUNDS,
+    )
+    return True
 
 
 def _openai_completion_missing_tool_calls(data: Any, request_body: Dict[str, Any]) -> bool:
@@ -1101,6 +1163,7 @@ async def sutui_chat_completions(
     _remap_sutui_chat_model(body)
     _optimize_request_body(body)
     _enforce_single_search_models_tool_call(body, trace_id)
+    _enforce_max_tool_call_rounds(body, trace_id)
 
     bm = brand_mark_for_jwt_claim(getattr(current_user, "brand_mark", None))
     if bm not in ("bihuo", "yingshi"):
@@ -1385,6 +1448,8 @@ async def sutui_chat_completions(
             )
 
         out = data
+        if isinstance(out, dict) and r.status_code == 200:
+            _strip_fake_tool_text_from_response(out)
         resp_status = r.status_code
         if r.status_code in (402, 403):
             out = _normalize_upstream_xskill_pool_errors_for_client(data)
