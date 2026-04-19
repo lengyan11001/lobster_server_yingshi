@@ -324,6 +324,12 @@ _LOBSTER_SYSTEM_HINT = (
     "6. 用户问有哪些技能、能力、功能时，只需调 list_capabilities 一次即可总结回复，"
     "不要额外调 manage_skills(list_installed/list_store/search_online)。"
     "7. 工具调用要精简高效，拿到足够信息后立即用文本回复，禁止冗余重复调用。"
+    "8. 【写文章/写文案 — 先文字后工具】用户说「写一篇 XX 字的文章」「帮我写 XX 文案」「写一段 XX」等纯文字创作任务时，"
+    "**第一步必须**直接用文字写出正文回复用户，**禁止**先调 image.generate / video.generate 生成配图/封面"
+    "（除非用户原话中明确说「配图」「封面」「图文」「带图」）。"
+    "用户在写文章请求里追加「发去头条/公众号/发布」时，正确流程是：① 直接写出正文给用户看 → ② 询问"
+    "「是否直接发布纯文字版（无封面），还是要我加配图」 → ③ 按用户回答调 publish_content（纯文字时设 toutiao_graphic_no_cover:true）。"
+    "头条号支持纯文字发布，**禁止**报「已完成」但实际只调了 image.generate 而没调 publish_content。"
 )
 
 
