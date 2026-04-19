@@ -23,15 +23,15 @@ _pricing_cache: Optional[Dict[str, Any]] = None
 _pricing_mtime: float = 0
 
 _MAX_COMFLY_TASK_TRACK = 5000
-_comfly_task_ids: "OrderedDict[str, str]" = OrderedDict()
+_comfly_task_ids: "OrderedDict[str, Tuple[str, str]]" = OrderedDict()
 
 
-def register_comfly_task(task_id: str, token_group: str = "") -> None:
-    """记录由 Comfly 创建的 task_id 及其 token_group，用于 task.get_result 路由。"""
+def register_comfly_task(task_id: str, token_group: str = "", api_format: str = "") -> None:
+    """记录由 Comfly 创建的 task_id 及其 token_group 和 api_format，用于 task.get_result 路由。"""
     tid = (task_id or "").strip()
     if not tid:
         return
-    _comfly_task_ids[tid] = token_group or ""
+    _comfly_task_ids[tid] = (token_group or "", api_format or "")
     while len(_comfly_task_ids) > _MAX_COMFLY_TASK_TRACK:
         _comfly_task_ids.popitem(last=False)
 
@@ -43,7 +43,18 @@ def is_comfly_task(task_id: str) -> bool:
 
 def get_comfly_task_token_group(task_id: str) -> str:
     """获取 Comfly task 对应的 token_group。"""
-    return _comfly_task_ids.get((task_id or "").strip(), "")
+    entry = _comfly_task_ids.get((task_id or "").strip())
+    if entry is None:
+        return ""
+    return entry[0] if isinstance(entry, tuple) else entry
+
+
+def get_comfly_task_api_format(task_id: str) -> str:
+    """获取 Comfly task 对应的 api_format。"""
+    entry = _comfly_task_ids.get((task_id or "").strip())
+    if entry is None:
+        return ""
+    return entry[1] if isinstance(entry, tuple) else ""
 
 
 def _load_pricing() -> Dict[str, Any]:
@@ -105,6 +116,7 @@ def is_comfly_configured() -> bool:
 def lookup_comfly_model(model_id: str) -> Optional[Dict[str, Any]]:
     """查找模型是否在 Comfly 定价表中。返回定价条目或 None。
     支持直接按 Comfly 模型名查找，也支持通过 sutui_equivalent 反查。
+    当精确匹配失败时，尝试前缀匹配（如 fal-ai/veo3.1/xxx 匹配 fal-ai/veo3.1）。
     """
     if not model_id:
         return None
@@ -125,6 +137,21 @@ def lookup_comfly_model(model_id: str) -> Optional[Dict[str, Any]]:
             return v
         if isinstance(eq, str) and eq.lower() == low:
             return v
+    # Prefix fallback: fal-ai/veo3.1/lite → try fal-ai/veo3.1, then fal-ai
+    parts = low.rsplit("/", 1)
+    while len(parts) == 2 and parts[0]:
+        prefix = parts[0]
+        for k, v in models.items():
+            if k.lower() == prefix:
+                return v
+        for _k, v in models.items():
+            if not isinstance(v, dict):
+                continue
+            eq = v.get("sutui_equivalent")
+            _eqs = eq if isinstance(eq, list) else ([eq] if isinstance(eq, str) else [])
+            if any(e.lower() == prefix for e in _eqs if isinstance(e, str)):
+                return v
+        parts = prefix.rsplit("/", 1)
     return None
 
 
@@ -168,11 +195,39 @@ def _user_price_multiplier() -> float:
 
 
 def estimate_comfly_credits(model_id: str, params: Dict[str, Any], *, for_user: bool = False) -> Optional[int]:
-    """按 Comfly 定价表估算算力消耗。for_user=True 时返回用户价（采购价 × 倍率）。"""
+    """按 Comfly 定价表估算算力消耗。for_user=True 时返回用户价（采购价 × 倍率）。
+
+    支持的 price_type：
+    - per_call：base = price_per_unit
+    - per_second：base = price_per_unit × duration
+    - per_token：base = (input_tokens/1000 × input_price + output_tokens/1000 × output_price)
+                 estimate 时若 params 未提供实际 token，则按 prompt_tokens=5000, completion_tokens=1000 粗估。
+    """
     entry = lookup_comfly_model(model_id)
     if not entry:
         return None
     price_type = (entry.get("price_type") or "per_call").strip()
+    multiplier = float(entry.get("user_price_multiplier", _user_price_multiplier())) if for_user else 1.0
+
+    if price_type == "per_token":
+        input_unit = entry.get("input_price_per_1k_tokens")
+        output_unit = entry.get("output_price_per_1k_tokens")
+        if input_unit is None and output_unit is None:
+            return None
+        input_unit = float(input_unit or 0)
+        output_unit = float(output_unit or 0)
+        # 实际计费传 usage 时优先用真实 token 数；估算时给典型值
+        usage = params.get("usage") if isinstance(params.get("usage"), dict) else None
+        if usage:
+            in_tok = float(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+            out_tok = float(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        else:
+            in_tok = float(params.get("estimate_prompt_tokens") or 5000)
+            out_tok = float(params.get("estimate_completion_tokens") or 1000)
+        base = (in_tok / 1000.0) * input_unit + (out_tok / 1000.0) * output_unit
+        # per_token 价格非常小，避免 round 后变成 0；至少计 1 积分（按 multiplier 后）
+        return max(1, int(round(base * multiplier))) if base > 0 else 0
+
     unit_price = entry.get("price_per_unit")
     if unit_price is None:
         return None
@@ -186,7 +241,6 @@ def estimate_comfly_credits(model_id: str, params: Dict[str, Any], *, for_user: 
         base = unit_price * duration
     else:
         base = unit_price
-    multiplier = float(entry.get("user_price_multiplier", _user_price_multiplier())) if for_user else 1.0
     return int(round(base * multiplier))
 
 
@@ -286,10 +340,21 @@ async def call_comfly_video_generate(
     media_files = payload.get("media_files") or []
     first_image = image_url or (file_paths[0] if file_paths else "") or (media_files[0] if media_files else "")
 
-    if api_format == "unified_video":
+    if api_format == "veo":
+        url = f"{base}/v2/videos/generations"
+        body: Dict[str, Any] = {
+            "model": comfly_model,
+            "prompt": prompt,
+            "enhance_prompt": True,
+        }
+        aspect_ratio = payload.get("aspect_ratio") or "16:9"
+        body["aspect_ratio"] = aspect_ratio
+        if first_image:
+            body["image_url"] = first_image
+    elif api_format == "unified_video":
         if first_image:
             url = f"{base}/task/submit/i2v"
-            body: Dict[str, Any] = {
+            body = {
                 "model": comfly_model,
                 "prompt": prompt,
                 "image_url": first_image,
@@ -321,33 +386,52 @@ async def call_comfly_video_generate(
         if first_image:
             body["image_url"] = first_image
 
-    logger.info("[Comfly] 视频生成请求 model=%s url=%s", comfly_model, url)
+    logger.info("[Comfly] 视频生成请求 model=%s url=%s api_format=%s body=%s", comfly_model, url, api_format, json.dumps(body, ensure_ascii=False)[:300])
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             r = await client.post(url, json=body, headers=headers)
         resp = r.json() if r.content else {}
+        logger.info(
+            "[Comfly] 视频生成响应 HTTP=%s keys=%s preview=%s",
+            r.status_code,
+            list(resp.keys()) if isinstance(resp, dict) else type(resp).__name__,
+            str(resp)[:500],
+        )
         if r.status_code >= 400:
             err = resp.get("error", {})
             msg = err.get("message", str(resp)) if isinstance(err, dict) else str(err)
             return {"error": {"message": f"Comfly 返回 HTTP {r.status_code}: {msg}"}}
+        if isinstance(resp, dict):
+            resp["_api_format"] = api_format
         return resp
     except Exception as e:
         logger.exception("[Comfly] 视频生成请求异常")
         return {"error": {"message": f"Comfly 请求失败: {e}"}}
 
 
-async def call_comfly_task_query(task_id: str, token_group: str = "") -> Dict[str, Any]:
-    """查询 Comfly 任务状态。"""
+async def call_comfly_task_query(task_id: str, token_group: str = "", api_format: str = "") -> Dict[str, Any]:
+    """查询 Comfly 任务状态。api_format=veo 时用 /v2/videos/generations/{task_id}。"""
     base, key = get_comfly_config(token_group)
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    url = f"{base}/task/query/{task_id}"
+    if api_format == "veo":
+        url = f"{base}/v2/videos/generations/{task_id}"
+    else:
+        url = f"{base}/task/query/{task_id}"
+    logger.info("[Comfly] 任务查询 task_id=%s url=%s api_format=%s", task_id, url, api_format or "(default)")
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             r = await client.get(url, headers=headers)
-        return r.json() if r.content else {}
+        resp = r.json() if r.content else {}
+        logger.info(
+            "[Comfly] 任务查询响应 HTTP=%s keys=%s preview=%s",
+            r.status_code,
+            list(resp.keys()) if isinstance(resp, dict) else type(resp).__name__,
+            str(resp)[:500],
+        )
+        return resp
     except Exception as e:
         logger.exception("[Comfly] 任务查询异常 task_id=%s", task_id)
         return {"error": {"message": f"Comfly 查询失败: {e}"}}
@@ -425,8 +509,37 @@ async def call_comfly_chat_completions(
 
 def format_comfly_video_response_as_sutui(resp: Dict[str, Any]) -> Dict[str, Any]:
     """将 Comfly 视频响应转换为速推兼容格式。"""
-    task_id = resp.get("task_id") or resp.get("id") or resp.get("data", {}).get("task_id", "")
-    status = resp.get("status") or "pending"
+    data = resp.get("data") or {}
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            data = {}
+    task_id = (
+        resp.get("task_id")
+        or resp.get("taskId")
+        or resp.get("id")
+        or (data.get("task_id") if isinstance(data, dict) else "")
+        or (data.get("taskId") if isinstance(data, dict) else "")
+        or (data.get("id") if isinstance(data, dict) else "")
+        or ""
+    )
+    raw_status = resp.get("status") or (data.get("status") if isinstance(data, dict) else "") or "pending"
+    _VEO_STATUS_MAP = {
+        "NOT_START": "pending",
+        "IN_PROGRESS": "pending",
+        "SUCCESS": "completed",
+        "FAILURE": "failed",
+    }
+    status = _VEO_STATUS_MAP.get(raw_status, raw_status)
+
+    if not task_id:
+        logger.warning(
+            "[Comfly] format_video: task_id 为空! resp_keys=%s data_keys=%s resp_preview=%s",
+            list(resp.keys()),
+            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            str(resp)[:500],
+        )
 
     result: Dict[str, Any] = {
         "task_id": task_id,
@@ -436,13 +549,19 @@ def format_comfly_video_response_as_sutui(resp: Dict[str, Any]) -> Dict[str, Any
 
     video_url = resp.get("video_url") or resp.get("url") or ""
     if not video_url:
-        data = resp.get("data") or resp.get("output") or {}
-        if isinstance(data, dict):
-            video_url = data.get("video_url") or data.get("url") or ""
+        out = resp.get("data") or resp.get("output") or {}
+        if isinstance(out, dict):
+            video_url = out.get("output") or out.get("video_url") or out.get("url") or ""
 
     if video_url:
         result["output"] = {"video_url": video_url}
         result["url"] = video_url
         result["status"] = "completed"
+
+    if raw_status == "FAILURE":
+        result["status"] = "failed"
+        fail_reason = resp.get("fail_reason") or ""
+        if fail_reason:
+            result["output"] = {"error": fail_reason}
 
     return result

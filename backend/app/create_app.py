@@ -18,6 +18,7 @@ from .api.skills import router as skills_router
 from .api.settings_api import router as settings_router
 from .api.sutui_llm import router as sutui_llm_router
 from .api.sutui_chat_proxy import router as sutui_chat_proxy_router
+from .api.comfly_proxy import router as comfly_proxy_router
 from .api.mcp_gateway import router as mcp_gateway_router
 # 自定义配置已迁至客户端；openclaw_config 保留（含 sutui/balance、recharge 等支付）
 # from .api.custom_config import router as custom_config_router
@@ -756,6 +757,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router, prefix="")
     app.include_router(sutui_llm_router, prefix="")
     app.include_router(sutui_chat_proxy_router, prefix="")
+    app.include_router(comfly_proxy_router, prefix="")
     app.include_router(chat_router, prefix="")
     app.include_router(mcp_gateway_router, prefix="")
     app.include_router(openclaw_config_router, prefix="")

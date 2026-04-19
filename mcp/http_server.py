@@ -282,11 +282,13 @@ def _tool_definitions(
     is_skill_store_admin: bool = True,
     allowed_capability_ids: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
+    _HIDDEN_FROM_AI = {"comfly.veo", "comfly.veo.daihuo_pipeline"}
     capability_list = sorted(
         cid
         for cid in catalog.keys()
         if not (_capability_id_is_debug_only_in_registry(cid) and not is_skill_store_admin)
         and (allowed_capability_ids is None or cid in allowed_capability_ids)
+        and cid not in _HIDDEN_FROM_AI
     )
     tools = [
         {
@@ -300,7 +302,8 @@ def _tool_definitions(
                 "调用能力(图片生成/视频/语音等)。"
                 "【默认模型】image.generate 用户未指定模型时 payload.model 必须填 \"fal-ai/flux-2/flash\"（不要自动选 jimeng）；用户明确指定 jimeng-4.0/jimeng-4.5 等时正常使用。"
                 "video.generate 用户未指定模型时 payload.model 填 \"sora2\"，用户未指定时长时 duration 必须填 4（即 4 秒）。"
-                "【爆款TVC】用户说TVC/带货视频时不走video.generate，改用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
+                "【重要】用户指定 veo3.1/veo3.1-fast 等模型生成视频时，使用 capability_id=\"video.generate\"，payload.model 填用户指定的模型名（如 veo3.1）。系统会自动路由到最优上游。"
+                "【爆款TVC】仅当用户明确说「TVC」「带货视频」时才用 capability_id=\"comfly.veo.daihuo_pipeline\"，不要仅因模型名含 veo 就选 comfly.veo。"
             ),
             "inputSchema": {
                 "type": "object",
@@ -2570,11 +2573,16 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         format_comfly_video_response_as_sutui,
                         register_comfly_task,
                         get_comfly_task_token_group,
+                        get_comfly_task_api_format,
                         _get_model_token_group,
                     )
                     if _comfly_task_query:
                         _poll_tid = str(payload.get("task_id") or "").strip()
-                        _cf_resp = await call_comfly_task_query(_poll_tid, get_comfly_task_token_group(_poll_tid))
+                        _cf_resp = await call_comfly_task_query(
+                            _poll_tid,
+                            get_comfly_task_token_group(_poll_tid),
+                            api_format=get_comfly_task_api_format(_poll_tid),
+                        )
                         upstream_resp = format_comfly_video_response_as_sutui(_cf_resp)
                     elif capability_id == "comfly.chat":
                         _cf_model = (payload.get("model") or "").strip()
@@ -2603,10 +2611,11 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
                         upstream_resp = format_comfly_image_response_as_sutui(_cf_resp)
                     elif capability_id == "video.generate":
                         _cf_resp = await call_comfly_video_generate(_comfly_model_id, payload)
+                        _cf_api_fmt = _cf_resp.get("_api_format", "") if isinstance(_cf_resp, dict) else ""
                         upstream_resp = format_comfly_video_response_as_sutui(_cf_resp)
                         _cf_tid = (upstream_resp.get("task_id") or "") if isinstance(upstream_resp, dict) else ""
                         if _cf_tid:
-                            register_comfly_task(_cf_tid, _get_model_token_group(_comfly_model_id))
+                            register_comfly_task(_cf_tid, _get_model_token_group(_comfly_model_id), api_format=_cf_api_fmt)
                     else:
                         upstream_resp = {"error": {"message": f"Comfly 不支持 {capability_id}"}}
                 except Exception as _cf_call_err:

@@ -4,10 +4,13 @@
 invoke_capability 顺序触发，不在此之外再实现第二套扣费。
 """
 import json
+import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -396,6 +399,47 @@ def pre_deduct(
         out = {"credits_charged": credits_json_float(est_d)}
         _pre_deduct_idempotent_store(db, current_user.id, idem_key, out)
         return out
+
+    # ── 爆款TVC 整包流水线 dry_run 总价估算（chat 算力提醒用）──
+    # 客户端 chat 在调 invoke_capability(comfly.veo.daihuo_pipeline) 前会先做 dry_run，
+    # 这里按 N×image_model + N×video_model + 1×chat_model 累加，与实际 pipeline 调用次数一致。
+    if body.dry_run and body.capability_id == "comfly.veo.daihuo_pipeline":
+        try:
+            from mcp.comfly_upstream import estimate_comfly_credits as _est
+            params = body.params if isinstance(body.params, dict) else {}
+            try:
+                storyboard_count = int(params.get("storyboard_count") or 5)
+            except (TypeError, ValueError):
+                storyboard_count = 5
+            storyboard_count = max(1, min(storyboard_count, 20))  # safety bound
+            video_model = (params.get("video_model") or "veo3.1-fast").strip()
+            image_model = (params.get("image_model") or "nano-banana-2").strip()
+            analysis_model = (params.get("analysis_model") or "gemini-2.5-pro").strip()
+
+            per_image = _est(image_model, {}, for_user=True) or 0
+            per_video = _est(video_model, {}, for_user=True) or 0
+            chat_est = _est(analysis_model, {}, for_user=True) or 0
+            total = storyboard_count * per_image + storyboard_count * per_video + chat_est
+            est_d = quantize_credits(int(total))
+            return {
+                "credits_charged": credits_json_float(est_d),
+                "dry_run": True,
+                "model": video_model,
+                "breakdown": {
+                    "storyboard_count": storyboard_count,
+                    "image_model": image_model,
+                    "image_per_call": per_image,
+                    "image_subtotal": storyboard_count * per_image,
+                    "video_model": video_model,
+                    "video_per_call": per_video,
+                    "video_subtotal": storyboard_count * per_video,
+                    "analysis_model": analysis_model,
+                    "analysis_estimate": chat_est,
+                    "total": int(total),
+                },
+            }
+        except Exception as _e:
+            logger.warning("[pre-deduct] daihuo_pipeline dry_run 估算失败: %s", _e)
 
     # ── Comfly 定价查找（dry_run 兜底：MCP 尚未介入时用 comfly_pricing.json 估价）──
     if body.dry_run and (body.model or "").strip():
