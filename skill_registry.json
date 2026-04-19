@@ -378,6 +378,16 @@
         }
       },
       "tags": ["image", "video", "audio", "ai"]
+    },
+    "tikhub_explorer": {
+      "name": "TikHub 多平台数据",
+      "description": "一份积分跑遍抖音 / TikTok / 小红书 / B站 / 快手 / 微博 / 知乎 / YouTube / Instagram / Twitter 等 22 个平台、1000+ 数据接口：话题作品、用户作品、评论、搜索、详情，自动分页。Token 由平台统一托管，按调用次数计积分。",
+      "type": "builtin",
+      "store_visibility": "online",
+      "default_installed": true,
+      "status": "available",
+      "capabilities": {},
+      "tags": ["data", "tikhub", "douyin", "tiktok", "xhs", "zhihu", "youtube", "bilibili"]
     }
   }
 }

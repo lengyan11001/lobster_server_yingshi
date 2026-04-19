@@ -1,0 +1,28 @@
+{
+  "default_unit_credits": 1,
+  "platforms": {
+    "douyin": { "unit_credits": 1 },
+    "tiktok": { "unit_credits": 1 },
+    "xhs": { "unit_credits": 1 },
+    "bilibili": { "unit_credits": 1 },
+    "kuaishou": { "unit_credits": 1 },
+    "weibo": { "unit_credits": 1 },
+    "wechat": { "unit_credits": 1 },
+    "instagram": { "unit_credits": 1 },
+    "youtube": { "unit_credits": 1 },
+    "twitter": { "unit_credits": 1 },
+    "threads": { "unit_credits": 1 },
+    "reddit": { "unit_credits": 1 },
+    "zhihu": { "unit_credits": 1 },
+    "linkedin": { "unit_credits": 1 },
+    "toutiao": { "unit_credits": 1 },
+    "lemon8": { "unit_credits": 1 },
+    "pipixia": { "unit_credits": 1 },
+    "xigua": { "unit_credits": 1 },
+    "sora2": { "unit_credits": 1 },
+    "hybrid": { "unit_credits": 1 },
+    "tempmail": { "unit_credits": 1 },
+    "tikhub": { "unit_credits": 1 }
+  },
+  "overrides": {}
+}

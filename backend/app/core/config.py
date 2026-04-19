@@ -110,6 +110,11 @@ class Settings(BaseSettings):
     # ── Comfly 中转平台（与速推并行的生成能力上游）──
     comfly_api_base: Optional[str] = None
     comfly_api_key: Optional[str] = None
+    # ── TikHub 多平台数据（统一服务端 Token，按白名单代理）──
+    """TikHub API 根地址，默认 https://api.tikhub.io"""
+    tikhub_api_base: str = "https://api.tikhub.io"
+    """TikHub Bearer Token，统一由服务端持有，客户端不感知。"""
+    tikhub_api_key: Optional[str] = None
     capability_sutui_mcp_url: Optional[str] = None
     capability_upstream_urls_json: Optional[str] = None
     reddit_comment2video_backend_url: Optional[str] = None

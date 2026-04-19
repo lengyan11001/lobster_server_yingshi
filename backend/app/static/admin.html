@@ -118,6 +118,7 @@ tr:hover{background:var(--bg)}
       <div class="nav-tabs">
         <div class="nav-tab active" data-nav="stats" onclick="switchNav('stats')">统计</div>
         <div class="nav-tab" data-nav="users" onclick="switchNav('users')">用户信息</div>
+        <div class="nav-tab" data-nav="tikhub" onclick="switchNav('tikhub')">TikHub</div>
       </div>
     </div>
     <div class="user-info">
@@ -173,6 +174,54 @@ tr:hover{background:var(--bg)}
         <h3>积分流水（最近50条）</h3>
         <div id="ledgerTable"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- Page: TikHub -->
+  <div class="container" id="pageTikhub" style="display:none">
+    <div class="card">
+      <h3>TikHub Token</h3>
+      <div id="tikhubTokenInfo" style="margin:10px 0;font-size:13px;color:var(--text-secondary)">加载中…</div>
+      <div class="recharge-row" style="flex-wrap:wrap;gap:10px">
+        <input type="text" id="tikhubTokenInput" placeholder="粘贴新的 TikHub Bearer Token（替换后立即生效）" style="flex:1;min-width:300px;padding:10px 14px;border:1px solid var(--border);border-radius:8px;font-size:13px">
+        <button class="btn btn-primary btn-sm" onclick="tikhubSaveToken()">保存 Token</button>
+        <button class="btn btn-outline btn-sm" onclick="tikhubTestToken()">测试连接</button>
+      </div>
+      <div id="tikhubTestResult" style="margin-top:10px;font-size:12px;color:var(--text-secondary)"></div>
+    </div>
+
+    <div class="card">
+      <h3>接口目录</h3>
+      <div id="tikhubCatalogMeta" style="margin:10px 0;font-size:13px;color:var(--text-secondary)">加载中…</div>
+      <button class="btn btn-outline btn-sm" onclick="tikhubRefreshCatalog(this)">从 TikHub 重新拉取 OpenAPI</button>
+      <div id="tikhubCatalogPlatforms" style="margin-top:14px"></div>
+    </div>
+
+    <div class="card">
+      <h3>定价（积分/次）</h3>
+      <div style="margin:8px 0;font-size:12px;color:var(--text-secondary)">优先级：endpoint 覆盖 → 平台单价 → 默认值。修改后保存即生效。</div>
+      <div class="recharge-row" style="margin-top:6px">
+        <label style="font-size:13px">默认单价</label>
+        <input type="number" id="tikhubPricingDefault" step="1" min="0" value="1" style="width:120px;padding:8px 12px;border:1px solid var(--border);border-radius:8px">
+      </div>
+      <div id="tikhubPlatformPricingTable" style="margin-top:12px"></div>
+      <div style="margin-top:12px;font-size:13px;font-weight:600">单接口覆盖（endpoint_id → 单价）</div>
+      <div id="tikhubOverridesTable" style="margin-top:6px"></div>
+      <div class="recharge-row" style="margin-top:8px;gap:8px">
+        <input type="text" id="tikhubOverrideId" placeholder="endpoint_id（如 douyin_fetch_user_post_videos）" style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px">
+        <input type="number" id="tikhubOverrideCredits" placeholder="单价" step="1" min="0" style="width:120px;padding:8px 12px;border:1px solid var(--border);border-radius:8px">
+        <button class="btn btn-outline btn-sm" onclick="tikhubAddOverride()">添加覆盖</button>
+      </div>
+      <div style="margin-top:14px">
+        <button class="btn btn-primary btn-sm" onclick="tikhubSavePricing()">保存定价表</button>
+        <span id="tikhubPricingMsg" style="margin-left:10px;font-size:12px;color:var(--text-secondary)"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>调用日志（最近 100 条）</h3>
+      <div id="tikhubLogsSummary" style="margin:8px 0;font-size:13px;color:var(--text-secondary)">加载中…</div>
+      <div id="tikhubLogsTable"></div>
     </div>
   </div>
 
@@ -251,7 +300,9 @@ function switchNav(nav) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.nav === nav));
   document.getElementById('pageUsers').style.display = nav === 'users' ? '' : 'none';
   document.getElementById('pageStats').style.display = nav === 'stats' ? '' : 'none';
+  document.getElementById('pageTikhub').style.display = nav === 'tikhub' ? '' : 'none';
   if (nav === 'stats') loadStats();
+  if (nav === 'tikhub') loadTikhubAll();
 }
 
 function switchTab(tab) {
@@ -508,6 +559,200 @@ function renderTopConsumers(items) {
     </div>`;
   });
   el.innerHTML = html;
+}
+
+// ============================================================
+// TikHub admin
+// ============================================================
+let _tikhubPlatformList = [];
+
+async function loadTikhubAll() {
+  loadTikhubConfig();
+  loadTikhubCatalogMeta();
+  loadTikhubPricing();
+  loadTikhubLogs();
+}
+
+async function loadTikhubConfig() {
+  const el = document.getElementById('tikhubTokenInfo');
+  el.textContent = '加载中…';
+  try {
+    const d = await api('/admin/api/tikhub/config');
+    el.innerHTML = d.configured
+      ? `当前 Token：<code style="font-family:monospace;background:var(--bg);padding:2px 6px;border-radius:4px">${d.token_masked}</code> · API Base：${d.api_base}`
+      : `<span style="color:var(--danger)">未配置</span> · API Base：${d.api_base}`;
+  } catch(e) { el.textContent = '加载失败：' + e.message; }
+}
+
+async function tikhubSaveToken() {
+  const inp = document.getElementById('tikhubTokenInput');
+  const v = (inp.value || '').trim();
+  if (!v) { toast('请输入 Token', 'error'); return; }
+  try {
+    await api('/admin/api/tikhub/config', { method: 'POST', body: JSON.stringify({ token: v }) });
+    toast('Token 已更新');
+    inp.value = '';
+    loadTikhubConfig();
+  } catch(e) { toast('保存失败：' + e.message, 'error'); }
+}
+
+async function tikhubTestToken() {
+  const out = document.getElementById('tikhubTestResult');
+  out.textContent = '测试中…';
+  try {
+    const d = await api('/admin/api/tikhub/test', { method: 'POST' });
+    if (d.ok) {
+      out.innerHTML = `<span style="color:var(--success)">连接成功 (HTTP ${d.status})</span>`;
+    } else {
+      out.innerHTML = `<span style="color:var(--danger)">失败 (HTTP ${d.status})：${(d.detail || '').replace(/</g,'&lt;')}</span>`;
+    }
+  } catch(e) { out.textContent = '请求失败：' + e.message; }
+}
+
+async function loadTikhubCatalogMeta() {
+  const meta = document.getElementById('tikhubCatalogMeta');
+  const wrap = document.getElementById('tikhubCatalogPlatforms');
+  meta.textContent = '加载中…';
+  wrap.innerHTML = '';
+  try {
+    const d = await api('/admin/api/tikhub/catalog-meta');
+    _tikhubPlatformList = d.platforms || [];
+    const ts = d.generated_at ? new Date(d.generated_at * 1000).toLocaleString('zh-CN') : '?';
+    meta.innerHTML = `共 <strong>${d.platform_count}</strong> 个平台 · <strong>${d.endpoint_count}</strong> 个接口 · 上次生成：${ts}`;
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+    for (const p of _tikhubPlatformList) {
+      html += `<span style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px">${p.icon || ''} ${p.name} <span style="color:var(--text-secondary)">(${p.endpoints})</span></span>`;
+    }
+    html += '</div>';
+    wrap.innerHTML = html;
+  } catch(e) { meta.textContent = '加载失败：' + e.message; }
+}
+
+async function tikhubRefreshCatalog(btn) {
+  if (!confirm('将从 TikHub 重新拉取 OpenAPI 并覆盖本地 catalog.json，约需 10–30 秒，是否继续？')) return;
+  btn.disabled = true; const oldText = btn.textContent; btn.textContent = '刷新中…';
+  try {
+    const d = await api('/admin/api/tikhub/refresh-catalog', { method: 'POST' });
+    toast(`已更新：${d.platform_count} 平台 / ${d.endpoint_count} 接口`);
+    loadTikhubCatalogMeta();
+    loadTikhubPricing();
+  } catch(e) { toast('刷新失败：' + e.message, 'error'); }
+  finally { btn.disabled = false; btn.textContent = oldText; }
+}
+
+let _tikhubPricingState = null;
+
+async function loadTikhubPricing() {
+  try {
+    const d = await api('/admin/api/tikhub/pricing');
+    _tikhubPricingState = d;
+    document.getElementById('tikhubPricingDefault').value = d.default_unit_credits ?? 1;
+    renderTikhubPlatformPricing();
+    renderTikhubOverrides();
+  } catch(e) { toast('读取定价失败：' + e.message, 'error'); }
+}
+
+function renderTikhubPlatformPricing() {
+  const wrap = document.getElementById('tikhubPlatformPricingTable');
+  if (!_tikhubPricingState) { wrap.innerHTML = ''; return; }
+  const platforms = _tikhubPlatformList.length ? _tikhubPlatformList : Object.keys(_tikhubPricingState.platforms || {}).map(id => ({id, name:id}));
+  let html = '<table style="width:100%;font-size:13px"><thead><tr><th style="text-align:left">平台</th><th style="text-align:left">单价（积分/次）</th></tr></thead><tbody>';
+  for (const p of platforms) {
+    const cur = (_tikhubPricingState.platforms[p.id] || {}).unit_credits;
+    const v = (cur === undefined || cur === null) ? '' : cur;
+    html += `<tr>
+      <td style="padding:6px 4px">${p.icon || ''} ${p.name} <span style="color:var(--text-secondary);font-size:11px">${p.id}</span></td>
+      <td style="padding:6px 4px"><input type="number" min="0" step="1" data-tk-plat="${p.id}" value="${v}" placeholder="(默认)" style="width:100px;padding:6px 10px;border:1px solid var(--border);border-radius:6px"></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+function renderTikhubOverrides() {
+  const wrap = document.getElementById('tikhubOverridesTable');
+  const overrides = (_tikhubPricingState && _tikhubPricingState.overrides) || {};
+  const keys = Object.keys(overrides);
+  if (!keys.length) { wrap.innerHTML = '<div style="color:var(--text-secondary);font-size:12px">暂无覆盖</div>'; return; }
+  let html = '<table style="width:100%;font-size:13px"><thead><tr><th style="text-align:left">endpoint_id</th><th style="text-align:left">单价</th><th></th></tr></thead><tbody>';
+  for (const k of keys) {
+    const v = overrides[k] && overrides[k].unit_credits;
+    html += `<tr>
+      <td style="padding:6px 4px;font-family:monospace;font-size:12px">${k}</td>
+      <td style="padding:6px 4px"><input type="number" min="0" step="1" data-tk-ovr="${k}" value="${v}" style="width:100px;padding:6px 10px;border:1px solid var(--border);border-radius:6px"></td>
+      <td style="padding:6px 4px"><button class="btn btn-outline btn-sm" onclick="tikhubRemoveOverride('${k}')">删除</button></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+function tikhubAddOverride() {
+  const id = (document.getElementById('tikhubOverrideId').value || '').trim();
+  const credits = parseInt(document.getElementById('tikhubOverrideCredits').value, 10);
+  if (!id) { toast('请输入 endpoint_id', 'error'); return; }
+  if (isNaN(credits) || credits < 0) { toast('请输入合法单价', 'error'); return; }
+  if (!_tikhubPricingState) _tikhubPricingState = { default_unit_credits: 1, platforms: {}, overrides: {} };
+  _tikhubPricingState.overrides[id] = { unit_credits: credits };
+  document.getElementById('tikhubOverrideId').value = '';
+  document.getElementById('tikhubOverrideCredits').value = '';
+  renderTikhubOverrides();
+}
+
+function tikhubRemoveOverride(id) {
+  if (!_tikhubPricingState) return;
+  delete _tikhubPricingState.overrides[id];
+  renderTikhubOverrides();
+}
+
+async function tikhubSavePricing() {
+  if (!_tikhubPricingState) return;
+  const def = parseInt(document.getElementById('tikhubPricingDefault').value, 10);
+  const out = { default_unit_credits: isNaN(def) ? 1 : def, platforms: {}, overrides: {} };
+  document.querySelectorAll('input[data-tk-plat]').forEach(inp => {
+    const id = inp.dataset.tkPlat; const v = inp.value.trim();
+    if (v !== '') {
+      const n = parseInt(v, 10);
+      if (!isNaN(n) && n >= 0) out.platforms[id] = { unit_credits: n };
+    }
+  });
+  document.querySelectorAll('input[data-tk-ovr]').forEach(inp => {
+    const id = inp.dataset.tkOvr; const v = parseInt(inp.value, 10);
+    if (!isNaN(v) && v >= 0) out.overrides[id] = { unit_credits: v };
+  });
+  try {
+    await api('/admin/api/tikhub/pricing', { method: 'POST', body: JSON.stringify(out) });
+    document.getElementById('tikhubPricingMsg').textContent = '已保存 ' + new Date().toLocaleTimeString();
+    _tikhubPricingState = out;
+  } catch(e) { toast('保存失败：' + e.message, 'error'); }
+}
+
+async function loadTikhubLogs() {
+  const tbl = document.getElementById('tikhubLogsTable');
+  const sm = document.getElementById('tikhubLogsSummary');
+  tbl.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const d = await api('/admin/api/tikhub/logs?limit=100');
+    const s = d.summary || {};
+    sm.innerHTML = `共 ${s.shown || 0} 条 · 成功 <span style="color:var(--success)">${s.success || 0}</span> · 失败 <span style="color:var(--danger)">${s.failed || 0}</span> · 累计扣费 ${s.total_credits || 0} 积分`;
+    if (!d.logs || !d.logs.length) { tbl.innerHTML = '<div class="empty">暂无调用记录</div>'; return; }
+    let html = '<table style="width:100%;font-size:12px"><thead><tr><th style="text-align:left">时间</th><th style="text-align:left">用户</th><th style="text-align:left">endpoint</th><th>状态</th><th>耗时(ms)</th><th>积分</th><th style="text-align:left">错误</th></tr></thead><tbody>';
+    for (const r of d.logs) {
+      const ts = r.created_at ? new Date(r.created_at).toLocaleString('zh-CN') : '-';
+      const ok = r.success ? '<span style="color:var(--success)">成功</span>' : '<span style="color:var(--danger)">失败</span>';
+      html += `<tr>
+        <td style="padding:5px 4px;white-space:nowrap">${ts}</td>
+        <td style="padding:5px 4px">${r.user || r.user_id}</td>
+        <td style="padding:5px 4px;font-family:monospace;font-size:11px">${r.endpoint_id || ''}</td>
+        <td style="padding:5px 4px;text-align:center">${ok}</td>
+        <td style="padding:5px 4px;text-align:center">${r.latency_ms ?? '-'}</td>
+        <td style="padding:5px 4px;text-align:center">${r.credits}</td>
+        <td style="padding:5px 4px;color:var(--text-secondary)">${(r.error || '').replace(/</g,'&lt;')}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+    tbl.innerHTML = html;
+  } catch(e) { tbl.innerHTML = '<div class="empty">加载失败：' + e.message + '</div>'; }
 }
 </script>
 </body>

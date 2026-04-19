@@ -56,15 +56,23 @@ DEFAULT_VISIBLE_PACKAGES: tuple[str, ...] = (
     "toutiao_publish",
     "openclaw_weixin_channel",
     "media_edit_skill",
+    "tikhub_explorer",
 )
 
 
 def _ensure_user_visibility_seeded(db: Session, user_id: int) -> None:
-    """如果用户还没有任何可见技能记录，自动种入默认列表。"""
-    existing = db.query(UserSkillVisibility).filter(UserSkillVisibility.user_id == user_id).first()
-    if existing is not None:
+    """确保用户的可见技能记录至少包含 DEFAULT_VISIBLE_PACKAGES：
+    - 新用户：种入全部默认；
+    - 老用户（已有部分可见）：补齐 DEFAULT 中缺失的项，不影响用户自己关闭过的其它包。
+    """
+    existing = {
+        r[0] for r in db.query(UserSkillVisibility.package_id)
+        .filter(UserSkillVisibility.user_id == user_id).all()
+    }
+    missing = [p for p in DEFAULT_VISIBLE_PACKAGES if p not in existing]
+    if not missing:
         return
-    for pkg_id in DEFAULT_VISIBLE_PACKAGES:
+    for pkg_id in missing:
         db.add(UserSkillVisibility(user_id=user_id, package_id=pkg_id))
     db.commit()
 

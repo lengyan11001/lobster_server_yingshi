@@ -458,3 +458,196 @@ def admin_stats(
         "capability_ranking": capability_ranking,
         "top_consumers": top_consumers,
     }
+
+
+# ============================================================================
+# TikHub 管理：Token、定价、调用日志、目录刷新
+# ============================================================================
+
+import json as _tk_json
+import os as _tk_os
+
+
+def _tk_env_path() -> Path:
+    return Path(__file__).resolve().parent.parent.parent.parent / ".env"
+
+
+def _tk_pricing_path() -> Path:
+    return Path(__file__).resolve().parent.parent.parent.parent / "tikhub_pricing.json"
+
+
+def _tk_mask(token: str) -> str:
+    if not token:
+        return ""
+    if len(token) <= 10:
+        return "*" * len(token)
+    return token[:6] + "*" * 6 + token[-4:]
+
+
+def _tk_update_env_token(new_token: str) -> None:
+    """把 .env 里的 TIKHUB_API_KEY 替换成新值；不存在则追加。同时更新进程内 settings 缓存。"""
+    p = _tk_env_path()
+    lines: list[str] = []
+    if p.exists():
+        lines = p.read_text(encoding="utf-8").splitlines()
+    found = False
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("TIKHUB_API_KEY=") or s.startswith("# TIKHUB_API_KEY="):
+            lines[i] = f"TIKHUB_API_KEY={new_token}"
+            found = True
+            break
+    if not found:
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append("# TikHub 多平台数据代理：服务端统一持有的 Bearer Token")
+        lines.append(f"TIKHUB_API_KEY={new_token}")
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    settings.tikhub_api_key = new_token
+    _tk_os.environ["TIKHUB_API_KEY"] = new_token
+
+
+@router.get("/admin/api/tikhub/config")
+def admin_tikhub_config(_auth: bool = Depends(_verify_admin_token)):
+    token = (settings.tikhub_api_key or "").strip()
+    return {
+        "configured": bool(token),
+        "token_masked": _tk_mask(token),
+        "api_base": settings.tikhub_api_base,
+    }
+
+
+class _TkSaveBody(BaseModel):
+    token: str
+
+
+@router.post("/admin/api/tikhub/config")
+def admin_tikhub_save_config(body: _TkSaveBody, _auth: bool = Depends(_verify_admin_token)):
+    new_token = (body.token or "").strip()
+    if not new_token:
+        raise HTTPException(400, "token 不能为空")
+    _tk_update_env_token(new_token)
+    return {"ok": True, "token_masked": _tk_mask(new_token)}
+
+
+@router.post("/admin/api/tikhub/test")
+async def admin_tikhub_test(_auth: bool = Depends(_verify_admin_token)):
+    """测试 Token：调用一次 TikHub 用户信息接口验活，不计费、不入库。"""
+    import httpx as _httpx
+    token = (settings.tikhub_api_key or "").strip()
+    if not token:
+        raise HTTPException(400, "尚未配置 Token")
+    base = (settings.tikhub_api_base or "https://api.tikhub.io").rstrip("/")
+    url = base + "/api/v1/tikhub/user/get_user_info"
+    try:
+        async with _httpx.AsyncClient(timeout=15) as c:
+            r = await c.get(url, headers={"Authorization": f"Bearer {token}"})
+        if r.status_code != 200:
+            return {"ok": False, "status": r.status_code, "detail": (r.text or "")[:300]}
+        data = r.json() if r.content else {}
+        return {"ok": True, "status": r.status_code, "data": data}
+    except Exception as e:
+        return {"ok": False, "status": 0, "detail": str(e)[:300]}
+
+
+@router.get("/admin/api/tikhub/pricing")
+def admin_tikhub_get_pricing(_auth: bool = Depends(_verify_admin_token)):
+    p = _tk_pricing_path()
+    if not p.exists():
+        return {"default_unit_credits": 1, "platforms": {}, "overrides": {}}
+    try:
+        return _tk_json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(500, f"读取定价表失败: {e}")
+
+
+class _TkPricingBody(BaseModel):
+    default_unit_credits: int = 1
+    platforms: dict[str, dict[str, int]] = {}
+    overrides: dict[str, dict[str, int]] = {}
+
+
+@router.post("/admin/api/tikhub/pricing")
+def admin_tikhub_save_pricing(body: _TkPricingBody, _auth: bool = Depends(_verify_admin_token)):
+    p = _tk_pricing_path()
+    out = {
+        "default_unit_credits": max(0, int(body.default_unit_credits or 1)),
+        "platforms": {k: {"unit_credits": max(0, int(v.get("unit_credits", 1)))} for k, v in (body.platforms or {}).items()},
+        "overrides": {k: {"unit_credits": max(0, int(v.get("unit_credits", 1)))} for k, v in (body.overrides or {}).items()},
+    }
+    p.write_text(_tk_json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "saved": out}
+
+
+@router.get("/admin/api/tikhub/logs")
+def admin_tikhub_logs(
+    limit: int = 100,
+    _auth: bool = Depends(_verify_admin_token),
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(500, int(limit)))
+    rows = (
+        db.query(CapabilityCallLog)
+        .filter(CapabilityCallLog.capability_id == "tikhub.fetch")
+        .order_by(CapabilityCallLog.id.desc())
+        .limit(limit)
+        .all()
+    )
+    user_ids = {r.user_id for r in rows}
+    name_map: dict[int, str] = {}
+    if user_ids:
+        for u in db.query(User).filter(User.id.in_(list(user_ids))).all():
+            name_map[u.id] = u.email or str(u.id)
+    out = []
+    for r in rows:
+        out.append({
+            "id": r.id,
+            "user_id": r.user_id,
+            "user": name_map.get(r.user_id, str(r.user_id)),
+            "endpoint_id": r.upstream_tool,
+            "success": bool(r.success),
+            "credits": float(r.credits_charged or 0),
+            "latency_ms": r.latency_ms,
+            "status": r.status,
+            "error": (r.error_message or "")[:200],
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        })
+    # 汇总
+    total = len(rows)
+    total_credits = sum((float(r.credits_charged or 0) for r in rows), 0.0)
+    success_cnt = sum(1 for r in rows if r.success)
+    return {
+        "logs": out,
+        "summary": {
+            "shown": total,
+            "success": success_cnt,
+            "failed": total - success_cnt,
+            "total_credits": round(total_credits, 4),
+        },
+    }
+
+
+@router.get("/admin/api/tikhub/catalog-meta")
+def admin_tikhub_catalog_meta(_auth: bool = Depends(_verify_admin_token)):
+    from .tikhub_proxy import _load_catalog
+    cat = _load_catalog()
+    plats = []
+    for p in cat.get("platforms", []):
+        ep_count = sum(len(g.get("endpoints", [])) for g in p.get("groups", []))
+        plats.append({"id": p.get("id"), "name": p.get("name"), "icon": p.get("icon"), "endpoints": ep_count})
+    return {
+        "platform_count": cat.get("platform_count"),
+        "endpoint_count": cat.get("endpoint_count"),
+        "generated_at": cat.get("generated_at"),
+        "platforms": plats,
+    }
+
+
+@router.post("/admin/api/tikhub/refresh-catalog")
+def admin_tikhub_refresh(_auth: bool = Depends(_verify_admin_token)):
+    from .tikhub_proxy import refresh_catalog_blocking
+    try:
+        meta = refresh_catalog_blocking(force=True)
+        return {"ok": True, **meta}
+    except Exception as e:
+        raise HTTPException(500, f"刷新失败: {e}")
