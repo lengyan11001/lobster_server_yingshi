@@ -39,8 +39,8 @@ def main() -> int:
     ap.add_argument("--build", type=int, default=5, help="manifest.build（须大于客户端 CLIENT_CODE_VERSION.build 才会强拉）")
     ap.add_argument(
         "--public-base",
-        default="https://bhzn.top",
-        help="manifest.bundle_url 使用的 API 根（与线上一致）",
+        default="https://api.51ins.com",
+        help="manifest.bundle_url 使用的 API 根（E 盘对应 server 的公网域名；D 盘对应 server 用 https://bhzn.top，注意分清）",
     )
     args = ap.parse_args()
 
