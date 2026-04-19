@@ -86,9 +86,10 @@ def _mcp_gateway_forward_read_timeout_sec(body: bytes) -> float:
         return 35 * 60.0
     if cap == "image.generate":
         return 25 * 60.0
-    if cap == "comfly.veo.daihuo_pipeline":
+    # 兼容老名（comfly.veo*）与新名（comfly.daihuo*）
+    if cap in ("comfly.daihuo.pipeline", "comfly.veo.daihuo_pipeline"):
         return 130 * 60.0
-    if cap == "comfly.veo":
+    if cap in ("comfly.daihuo", "comfly.veo"):
         return 40 * 60.0
     return 120.0
 

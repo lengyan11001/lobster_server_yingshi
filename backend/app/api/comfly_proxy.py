@@ -228,7 +228,7 @@ def _comfly_headers(model: str = "") -> Dict[str, str]:
 # Endpoints
 # ---------------------------------------------------------------------------
 
-_CAPABILITY_FOR_BILLING = "comfly.veo.daihuo_pipeline"
+_CAPABILITY_FOR_BILLING = "comfly.daihuo.pipeline"
 
 
 @router.post("/api/comfly-proxy/v1/chat/completions", summary="Comfly chat 透明 proxy（按 token usage 计费）")

@@ -319,7 +319,7 @@ _LOBSTER_SYSTEM_HINT = (
     "2. 生成视频：用 lobster__invoke_capability，capability_id=\"video.generate\"，"
     "用户未指定模型时 payload.model 填 \"sora2\"，未指定时长时 duration=4。"
     "3. 如果调用失败（积分不足、模型错误等），直接将错误信息告知用户，不要尝试用其他方式（搜索、网页等）来替代。"
-    "4. 用户说TVC/带货视频时用 capability_id=\"comfly.veo.daihuo_pipeline\"。"
+    "4. 用户说TVC/带货视频时用 capability_id=\"comfly.daihuo.pipeline\"。"
     "5. 生成后如需保存素材用 lobster__save_asset；发布内容用 lobster__publish_content。"
     "6. 用户问有哪些技能、能力、功能时，只需调 list_capabilities 一次即可总结回复，"
     "不要额外调 manage_skills(list_installed/list_store/search_online)。"

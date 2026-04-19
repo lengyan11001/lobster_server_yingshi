@@ -282,7 +282,12 @@ def _tool_definitions(
     is_skill_store_admin: bool = True,
     allowed_capability_ids: Optional[set] = None,
 ) -> List[Dict[str, Any]]:
-    _HIDDEN_FROM_AI = {"comfly.veo", "comfly.veo.daihuo_pipeline"}
+    # 同时隐藏新名（comfly.daihuo*）与老名（comfly.veo*）—— 避免 LLM 直接选这两个能力，
+    # 应该走 video.generate；TVC 整包能力通过 prompt 引导用户说 TVC/带货时由 chat 注入触发
+    _HIDDEN_FROM_AI = {
+        "comfly.daihuo", "comfly.daihuo.pipeline",
+        "comfly.veo", "comfly.veo.daihuo_pipeline",
+    }
     capability_list = sorted(
         cid
         for cid in catalog.keys()
@@ -303,7 +308,7 @@ def _tool_definitions(
                 "【默认模型】image.generate 用户未指定模型时 payload.model 必须填 \"fal-ai/flux-2/flash\"（不要自动选 jimeng）；用户明确指定 jimeng-4.0/jimeng-4.5 等时正常使用。"
                 "video.generate 用户未指定模型时 payload.model 填 \"sora2\"，用户未指定时长时 duration 必须填 4（即 4 秒）。"
                 "【重要】用户指定 veo3.1/veo3.1-fast 等模型生成视频时，使用 capability_id=\"video.generate\"，payload.model 填用户指定的模型名（如 veo3.1）。系统会自动路由到最优上游。"
-                "【爆款TVC】仅当用户明确说「TVC」「带货视频」时才用 capability_id=\"comfly.veo.daihuo_pipeline\"，不要仅因模型名含 veo 就选 comfly.veo。"
+                "【爆款TVC】仅当用户明确说「TVC」「带货视频」时才用 capability_id=\"comfly.daihuo.pipeline\"，不要仅因模型名含 veo 就选 comfly.daihuo。"
             ),
             "inputSchema": {
                 "type": "object",
@@ -384,26 +389,17 @@ def _tool_definitions(
         },
         {
             "name": "publish_content",
-            "description": (
-                "发布素材/内容到平台(抖音/B站/头条等)。"
-                "有素材时传 asset_id（来自 save_asset 或 get_result 的 saved_assets）；纯文字文章可只传 title+description 不传 asset_id。"
-            ),
+            "description": "发布内容到平台(抖音/B站/头条等)。有素材时传asset_id；纯文字文章可只传title+description不传asset_id。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "asset_id": {
-                        "type": "string",
-                        "description": "素材ID（来自 save_asset 或 get_result 的 saved_assets；纯文字发布可选）",
-                    },
+                    "asset_id": {"type": "string", "description": "素材ID(可选，纯文字不需要)"},
                     "account_nickname": {"type": "string", "description": "账号昵称"},
                     "title": {"type": "string", "description": "标题"},
                     "description": {"type": "string", "description": "正文内容"},
                     "tags": {"type": "string", "description": "逗号分隔"},
                     "cover_asset_id": {"type": "string"},
-                    "options": {
-                        "type": "object",
-                        "description": "平台参数(visibility/schedule/content_type:article/micro等)",
-                    },
+                    "options": {"type": "object", "description": "平台参数(content_type:article/micro等)"},
                 },
                 "required": ["account_nickname"],
             },
@@ -2093,6 +2089,19 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
 
         if name == "invoke_capability":
             capability_id = str(args.get("capability_id") or "").strip()
+            # ── 老 capability_id 兼容：comfly.veo* → comfly.daihuo*（在所有后续逻辑生效之前规范化）──
+            _LEGACY_CAPABILITY_ALIAS = {
+                "comfly.veo": "comfly.daihuo",
+                "comfly.veo.daihuo_pipeline": "comfly.daihuo.pipeline",
+            }
+            _new_cid = _LEGACY_CAPABILITY_ALIAS.get(capability_id)
+            if _new_cid:
+                logger.info(
+                    "[MCP] capability_id 老名映射 %s → %s（请客户端尽快升级到新名）",
+                    capability_id, _new_cid,
+                )
+                capability_id = _new_cid
+                args["capability_id"] = capability_id
             payload = args.get("payload") or {}
             if not isinstance(payload, dict):
                 payload = {}
@@ -3025,10 +3034,6 @@ async def _call_tool(name: str, args: Dict[str, Any], token: Optional[str], requ
         if name == "publish_content":
             asset_id = str(args.get("asset_id") or "").strip()
             account_nickname = str(args.get("account_nickname") or "").strip()
-            title = str(args.get("title") or "").strip()
-            description = str(args.get("description") or "").strip()
-            if not asset_id and not (title or description):
-                return [{"type": "text", "text": "请提供 asset_id（通过 save_asset 获得），或提供 title/description 用于纯文字发布"}], True
             if not account_nickname:
                 return [{"type": "text", "text": "请提供 account_nickname（通过 list_publish_accounts 查看）"}], True
             logger.info("[MCP] publish_content 调用: asset_id=%s account_nickname=%s", asset_id, account_nickname)

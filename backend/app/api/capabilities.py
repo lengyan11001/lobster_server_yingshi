@@ -401,9 +401,10 @@ def pre_deduct(
         return out
 
     # ── 爆款TVC 整包流水线 dry_run 总价估算（chat 算力提醒用）──
-    # 客户端 chat 在调 invoke_capability(comfly.veo.daihuo_pipeline) 前会先做 dry_run，
+    # 客户端 chat 在调 invoke_capability(comfly.daihuo.pipeline) 前会先做 dry_run，
     # 这里按 N×image_model + N×video_model + 1×chat_model 累加，与实际 pipeline 调用次数一致。
-    if body.dry_run and body.capability_id == "comfly.veo.daihuo_pipeline":
+    # 兼容老 capability_id "comfly.veo.daihuo_pipeline" → "comfly.daihuo.pipeline"
+    if body.dry_run and body.capability_id in ("comfly.daihuo.pipeline", "comfly.veo.daihuo_pipeline"):
         try:
             from mcp.comfly_upstream import estimate_comfly_credits as _est
             params = body.params if isinstance(body.params, dict) else {}
