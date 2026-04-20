@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>INSclaw · 自媒体内容生产与运营自动化助手</title>
+  <meta name="description" content="INSclaw 是一站式自媒体内容生产与运营自动化平台：内置图文/视频生成、抖音/小红书/头条/视频号自动发布、智能客资挖掘。下载即装，桌面图标启动直接用。">
+  <meta name="keywords" content="INSclaw,自媒体,内容生成,自动发布,小红书,抖音,头条,视频号,客资挖掘,AI助手">
+  <meta property="og:title" content="INSclaw · 让 AI 帮你做内容、发内容、追客户">
+  <meta property="og:description" content="一站式自媒体生产与运营自动化助手 · Windows 安装包一键启动">
+  <meta property="og:type" content="website">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%236366f1'/%3E%3Cstop offset='100%25' stop-color='%2306b6d4'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='14' fill='url(%23g)'/%3E%3Ctext x='50%25' y='58%25' text-anchor='middle' font-family='-apple-system,Segoe UI,sans-serif' font-size='36' font-weight='800' fill='white'%3EI%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg-0: #0a0e1a;
+    --bg-1: #11172a;
+    --bg-card: rgba(255, 255, 255, 0.04);
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --text: #e7eaf0;
+    --text-muted: #8a93a6;
+    --text-dim: #5b6276;
+    --accent: #6366f1;
+    --accent-2: #06b6d4;
+    --accent-warm: #f472b6;
+    --success: #22c55e;
+    --radius: 14px;
+    --radius-sm: 8px;
+    --shadow-card: 0 4px 24px -8px rgba(99, 102, 241, 0.12);
+    --shadow-glow: 0 0 80px -20px rgba(99, 102, 241, 0.4);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg-0);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    line-height: 1.65;
+    overflow-x: hidden;
+  }
+  a { color: inherit; text-decoration: none; }
+  ::selection { background: var(--accent); color: white; }
+
+  /* Background gradient mesh */
+  body::before {
+    content: '';
+    position: fixed; inset: 0; z-index: -1;
+    background:
+      radial-gradient(ellipse 800px 600px at 15% 0%, rgba(99, 102, 241, 0.20), transparent 50%),
+      radial-gradient(ellipse 700px 500px at 85% 30%, rgba(6, 182, 212, 0.13), transparent 50%),
+      radial-gradient(ellipse 900px 700px at 50% 100%, rgba(244, 114, 182, 0.10), transparent 50%),
+      var(--bg-0);
+  }
+
+  /* Nav */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    background: rgba(10, 14, 26, 0.7);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-inner {
+    max-width: 1240px; margin: 0 auto; padding: 0.85rem 2rem;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 0.6rem; font-size: 1.15rem; font-weight: 700;
+  }
+  .brand-icon {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 800; font-size: 18px;
+    box-shadow: 0 2px 12px rgba(99, 102, 241, 0.4);
+  }
+  .nav-links { display: flex; gap: 2rem; align-items: center; }
+  .nav-links a {
+    color: var(--text-muted); font-size: 0.9rem; font-weight: 500; transition: color 0.2s;
+  }
+  .nav-links a:hover { color: var(--text); }
+  .btn {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    padding: 0.55rem 1.1rem; border-radius: var(--radius-sm);
+    font-size: 0.88rem; font-weight: 600; cursor: pointer; border: none;
+    transition: transform 0.15s ease, box-shadow 0.2s ease;
+    white-space: nowrap;
+  }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    color: white;
+    box-shadow: 0 4px 20px -6px rgba(99, 102, 241, 0.6);
+  }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 8px 28px -6px rgba(99, 102, 241, 0.8); }
+  .btn-ghost {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+  }
+  .btn-ghost:hover { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.24); }
+  .btn-lg { padding: 0.85rem 1.6rem; font-size: 0.95rem; }
+
+  /* Hero */
+  .hero {
+    padding: 9rem 2rem 6rem;
+    max-width: 1240px; margin: 0 auto;
+    text-align: center;
+  }
+  .hero .pill {
+    display: inline-flex; align-items: center; gap: 0.35rem;
+    padding: 0.3rem 0.8rem; border-radius: 999px;
+    border: 1px solid rgba(99, 102, 241, 0.35);
+    background: rgba(99, 102, 241, 0.08);
+    font-size: 0.78rem; color: #a5b4fc;
+    margin-bottom: 1.6rem;
+  }
+  .hero h1 {
+    font-size: clamp(2.2rem, 5vw, 3.8rem);
+    font-weight: 800; line-height: 1.15; letter-spacing: -0.02em;
+    margin-bottom: 1.4rem;
+  }
+  .gradient-text {
+    background: linear-gradient(135deg, #a5b4fc 0%, #67e8f9 50%, #f9a8d4 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero p.lead {
+    font-size: clamp(1rem, 2vw, 1.18rem);
+    color: var(--text-muted); max-width: 780px; margin: 0 auto 2.4rem;
+  }
+  .hero .cta { display: flex; gap: 0.8rem; justify-content: center; flex-wrap: wrap; }
+  .hero .stats {
+    display: flex; gap: 3rem; justify-content: center; margin-top: 4.5rem;
+    flex-wrap: wrap;
+  }
+  .stat-item { text-align: center; }
+  .stat-num {
+    font-size: 2rem; font-weight: 800;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .stat-label { font-size: 0.82rem; color: var(--text-muted); margin-top: 0.2rem; }
+
+  /* Section common */
+  section { padding: 5rem 2rem; }
+  .container { max-width: 1240px; margin: 0 auto; }
+  .section-tag {
+    display: inline-block; padding: 0.25rem 0.7rem;
+    border-radius: 999px; font-size: 0.74rem;
+    background: rgba(99, 102, 241, 0.12); color: #a5b4fc;
+    border: 1px solid rgba(99, 102, 241, 0.25); margin-bottom: 1rem;
+  }
+  .section-title {
+    font-size: clamp(1.7rem, 3.5vw, 2.4rem); font-weight: 700;
+    letter-spacing: -0.01em; margin-bottom: 0.8rem;
+  }
+  .section-sub {
+    color: var(--text-muted); font-size: 1.02rem; max-width: 720px;
+  }
+  .section-head { text-align: center; margin-bottom: 3.5rem; }
+  .section-head .section-sub { margin-left: auto; margin-right: auto; }
+
+  /* Feature cards (3 highlights) */
+  .features {
+    display: grid; gap: 1.6rem;
+    grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  }
+  .feature-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 2rem;
+    transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+    position: relative; overflow: hidden;
+  }
+  .feature-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: var(--g, linear-gradient(90deg, var(--accent), var(--accent-2)));
+    opacity: 0; transition: opacity 0.3s;
+  }
+  .feature-card:hover {
+    transform: translateY(-4px); border-color: rgba(99, 102, 241, 0.35);
+    box-shadow: var(--shadow-card);
+  }
+  .feature-card:hover::before { opacity: 1; }
+  .feature-card.fc-1 { --g: linear-gradient(90deg, #6366f1, #06b6d4); }
+  .feature-card.fc-2 { --g: linear-gradient(90deg, #f59e0b, #f472b6); }
+  .feature-card.fc-3 { --g: linear-gradient(90deg, #22c55e, #06b6d4); }
+  .feature-icon {
+    width: 56px; height: 56px; border-radius: 14px;
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 1.2rem; font-size: 26px;
+  }
+  .fc-1 .feature-icon { background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(6,182,212,0.18)); color: #a5b4fc; }
+  .fc-2 .feature-icon { background: linear-gradient(135deg, rgba(245,158,11,0.2), rgba(244,114,182,0.18)); color: #fcd34d; }
+  .fc-3 .feature-icon { background: linear-gradient(135deg, rgba(34,197,94,0.2), rgba(6,182,212,0.18)); color: #86efac; }
+  .feature-card h3 { font-size: 1.3rem; font-weight: 700; margin-bottom: 0.8rem; }
+  .feature-card .feature-desc { color: var(--text-muted); font-size: 0.93rem; margin-bottom: 1rem; }
+  .feature-list { list-style: none; }
+  .feature-list li {
+    display: flex; gap: 0.55rem; align-items: flex-start;
+    padding: 0.45rem 0; font-size: 0.88rem; color: #c5cad7;
+    border-top: 1px dashed rgba(255, 255, 255, 0.06);
+  }
+  .feature-list li:first-child { border-top: none; }
+  .feature-list b { color: #fff; font-weight: 600; }
+  .feature-list .dot {
+    flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); margin-top: 0.55rem;
+  }
+
+  /* Platform grid */
+  .platforms {
+    display: grid; gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    margin-top: 2.5rem;
+  }
+  .platform-chip {
+    display: flex; flex-direction: column; align-items: center; gap: 0.5rem;
+    padding: 1.4rem 1rem; border-radius: var(--radius-sm);
+    background: var(--bg-card); border: 1px solid var(--border);
+    transition: transform 0.2s, border-color 0.2s;
+  }
+  .platform-chip:hover { transform: translateY(-2px); border-color: var(--border-strong); }
+  .platform-emoji { font-size: 32px; line-height: 1; }
+  .platform-chip span { font-size: 0.82rem; color: var(--text-muted); }
+  .platform-chip b { font-size: 0.92rem; }
+
+  /* Steps */
+  .steps {
+    display: grid; gap: 1.4rem;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  }
+  .step-card {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 1.8rem;
+    position: relative;
+  }
+  .step-num {
+    position: absolute; top: -14px; left: 24px;
+    width: 32px; height: 32px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: white; font-weight: 700; font-size: 0.95rem;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step-card h4 { font-size: 1.1rem; margin: 0.6rem 0 0.6rem; }
+  .step-card p { color: var(--text-muted); font-size: 0.9rem; }
+  .step-card code {
+    display: inline-block; margin-top: 0.6rem;
+    padding: 0.25rem 0.55rem; font-size: 0.78rem;
+    background: rgba(0, 0, 0, 0.3); border-radius: 4px;
+    color: #a5b4fc; font-family: "SF Mono", Consolas, monospace;
+  }
+
+  /* Showcase / split section */
+  .split {
+    display: grid; gap: 3rem; align-items: center;
+    grid-template-columns: 1fr 1fr;
+  }
+  @media (max-width: 880px) { .split { grid-template-columns: 1fr; } }
+  .split-text h3 {
+    font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 700; margin-bottom: 1rem;
+  }
+  .split-text p { color: var(--text-muted); margin-bottom: 1.4rem; }
+  .split-points { list-style: none; display: flex; flex-direction: column; gap: 0.7rem; }
+  .split-points li {
+    display: flex; gap: 0.6rem; align-items: flex-start;
+    padding: 0.65rem 0.9rem; background: var(--bg-card);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    font-size: 0.9rem;
+  }
+  .split-points li::before {
+    content: '✓'; flex-shrink: 0;
+    color: var(--success); font-weight: 700; margin-top: 1px;
+  }
+  .split-visual {
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(6, 182, 212, 0.05));
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1.6rem; aspect-ratio: 4/3;
+    display: flex; flex-direction: column; gap: 0.8rem;
+    justify-content: center; position: relative; overflow: hidden;
+  }
+  .mock-window {
+    background: rgba(0, 0, 0, 0.4); border: 1px solid var(--border-strong);
+    border-radius: 10px; padding: 0.8rem; font-size: 0.78rem;
+    box-shadow: 0 8px 32px -10px rgba(0, 0, 0, 0.5);
+  }
+  .mock-window .titlebar {
+    display: flex; gap: 5px; margin-bottom: 0.7rem; padding-bottom: 0.55rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .mock-window .titlebar span {
+    width: 10px; height: 10px; border-radius: 50%;
+  }
+  .mock-window .titlebar span:nth-child(1) { background: #ef4444; }
+  .mock-window .titlebar span:nth-child(2) { background: #f59e0b; }
+  .mock-window .titlebar span:nth-child(3) { background: #22c55e; }
+  .mock-row {
+    display: flex; gap: 0.5rem; padding: 0.45rem 0.6rem;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 6px; margin-top: 0.35rem; align-items: center;
+    font-size: 0.78rem;
+  }
+  .mock-row .tag {
+    padding: 1px 6px; border-radius: 3px; font-size: 0.66rem;
+    background: rgba(99, 102, 241, 0.18); color: #a5b4fc;
+  }
+  .mock-row .ok { color: var(--success); margin-left: auto; }
+
+  /* FAQ */
+  .faq {
+    max-width: 800px; margin: 0 auto;
+  }
+  .faq details {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); margin-bottom: 0.7rem;
+    padding: 1rem 1.3rem; transition: border-color 0.2s;
+  }
+  .faq details[open] { border-color: rgba(99, 102, 241, 0.3); }
+  .faq summary {
+    cursor: pointer; font-weight: 600; font-size: 0.96rem;
+    list-style: none; display: flex; justify-content: space-between; align-items: center;
+  }
+  .faq summary::after {
+    content: '+'; color: var(--text-muted); font-size: 1.4rem; line-height: 1;
+    transition: transform 0.2s;
+  }
+  .faq details[open] summary::after { content: '−'; }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq details p {
+    margin-top: 0.8rem; color: var(--text-muted); font-size: 0.88rem;
+    border-top: 1px dashed var(--border); padding-top: 0.8rem;
+  }
+
+  /* Final CTA */
+  .final-cta {
+    text-align: center; padding: 6rem 2rem;
+    background: radial-gradient(ellipse 600px 400px at center, rgba(99, 102, 241, 0.18), transparent);
+  }
+  .final-cta h2 {
+    font-size: clamp(1.8rem, 4vw, 2.6rem); font-weight: 800; margin-bottom: 1rem;
+  }
+  .final-cta p { color: var(--text-muted); margin-bottom: 2rem; }
+  .meta-tag {
+    margin-top: 1.4rem; display: inline-flex; gap: 0.7rem; flex-wrap: wrap; justify-content: center;
+  }
+  .meta-tag span {
+    font-size: 0.78rem; color: var(--text-muted); padding: 0.25rem 0.6rem;
+    background: rgba(255, 255, 255, 0.04); border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .meta-tag span b { color: var(--text); margin-right: 4px; }
+
+  /* Footer */
+  footer {
+    padding: 3rem 2rem 2rem; border-top: 1px solid var(--border);
+    color: var(--text-dim); font-size: 0.82rem;
+  }
+  .footer-inner {
+    max-width: 1240px; margin: 0 auto;
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;
+  }
+  footer a:hover { color: var(--text); }
+
+  /* Responsive */
+  @media (max-width: 720px) {
+    nav .nav-links { display: none; }
+    .hero { padding: 7rem 1.2rem 4rem; }
+    section { padding: 3.5rem 1.2rem; }
+    .hero .stats { gap: 1.8rem; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="#top" class="brand">
+      <div class="brand-icon">I</div>
+      <span>INSclaw</span>
+    </a>
+    <div class="nav-links">
+      <a href="#features">功能亮点</a>
+      <a href="#platforms">支持平台</a>
+      <a href="#install">如何安装</a>
+      <a href="#faq">FAQ</a>
+    </div>
+    <a href="#download" class="btn btn-primary">立即购买 ¥99</a>
+  </div>
+</nav>
+
+<main id="top">
+  <!-- Hero -->
+  <section class="hero">
+    <div class="pill">⚡ Windows 桌面客户端 · 一次付费 ¥99 · 永久授权</div>
+    <h1>
+      让 AI 帮你<span class="gradient-text">做内容、发内容、追客户</span><br>
+      自媒体运营，从此一个人干一支团队的活
+    </h1>
+    <p class="lead">
+      INSclaw 把内容生产、跨平台发布、用户互动、客资挖掘四件事打包成一个本地客户端 ——
+      像招了一支永不下班的运营、剪辑、客服团队。<br>
+      抖音 / 小红书 / 视频号 / 头条 / YouTube / Instagram 一键同步，无需多平台来回切换。
+    </p>
+    <div class="cta">
+      <a href="#download" class="btn btn-primary btn-lg">⚡ 立即购买 ¥99</a>
+      <a href="#features" class="btn btn-ghost btn-lg">查看功能详情</a>
+    </div>
+    <div class="stats">
+      <div class="stat-item"><div class="stat-num">22+</div><div class="stat-label">支持平台</div></div>
+      <div class="stat-item"><div class="stat-num">1000+</div><div class="stat-label">数据接口</div></div>
+      <div class="stat-item"><div class="stat-num">N×</div><div class="stat-label">智能体协作</div></div>
+      <div class="stat-item"><div class="stat-num">∞</div><div class="stat-label">7x24 自动运营</div></div>
+    </div>
+  </section>
+
+  <!-- 3 大功能亮点 -->
+  <section id="features">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">FEATURES</span>
+        <h2 class="section-title">三大功能模块，覆盖从生产到变现的全链路</h2>
+        <p class="section-sub">不是单点工具，是一个能把"想到 → 做出 → 发出去 → 接到客户"打通的运营操作系统。</p>
+      </div>
+      <div class="features">
+
+        <div class="feature-card fc-1">
+          <div class="feature-icon">🎨</div>
+          <h3>内置图文视频生成 Skills</h3>
+          <p class="feature-desc">从内容构思到最终成片，无需在多个工具之间反复切换。</p>
+          <ul class="feature-list">
+            <li><span class="dot"></span><div><b>图文生成</b>：海报、PPT、长图、社交媒体配图，自定义尺寸/风格/品牌元素。</div></li>
+            <li><span class="dot"></span><div><b>视频生成</b>：脚本 → 分镜 → 成片，一键生成短视频，营销/产品/知识全场景。</div></li>
+            <li><span class="dot"></span><div><b>多模态协作</b>：文字、图片、视频在同一任务流内无缝流转，N 个智能体接力搞定全流程。</div></li>
+          </ul>
+        </div>
+
+        <div class="feature-card fc-2">
+          <div class="feature-icon">📤</div>
+          <h3>自媒体发布与互动自动化</h3>
+          <p class="feature-desc">像一个真正的运营助理，从发布到互动一条龙闭环。</p>
+          <ul class="feature-list">
+            <li><span class="dot"></span><div><b>自动发布</b>：多平台分发，按预设规则定时发图文/视频，解放双手。</div></li>
+            <li><span class="dot"></span><div><b>智能互动</b>：自动回复评论、私信，进行用户沟通和引导，提高互动效率。</div></li>
+            <li><span class="dot"></span><div><b>内容复盘</b>：发布数据自动整理分析，给出优化建议，持续迭代内容策略。</div></li>
+          </ul>
+        </div>
+
+        <div class="feature-card fc-3">
+          <div class="feature-icon">🎯</div>
+          <h3>主动获取客资，拓展业务边界</h3>
+          <p class="feature-desc">不只"干活"，还会"找活" —— 主动为你挖掘潜在客户和商业机会。</p>
+          <ul class="feature-list">
+            <li><span class="dot"></span><div><b>线索挖掘</b>：通过社交媒体等渠道，自动筛选和整理潜在客户信息，形成线索库。</div></li>
+            <li><span class="dot"></span><div><b>智能触达</b>：按客户画像，自动生成个性化触达文案，进行初步沟通和转化。</div></li>
+            <li><span class="dot"></span><div><b>商机跟进</b>：线索分级 + 跟进提醒，不错过任何潜在合作机会。</div></li>
+          </ul>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- Showcase: 跨平台能力 -->
+  <section id="platforms" style="background: rgba(255, 255, 255, 0.015);">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">PLATFORMS</span>
+        <h2 class="section-title">一份内容，22+ 平台无缝触达</h2>
+        <p class="section-sub">从内容平台到电商，从国内到出海，发布与数据采集都打通。</p>
+      </div>
+      <div class="platforms">
+        <div class="platform-chip"><div class="platform-emoji">📕</div><b>小红书</b><span>发布·同行追踪·评论</span></div>
+        <div class="platform-chip"><div class="platform-emoji">🎵</div><b>抖音</b><span>视频/图文一键发</span></div>
+        <div class="platform-chip"><div class="platform-emoji">📰</div><b>头条号</b><span>图文/视频</span></div>
+        <div class="platform-chip"><div class="platform-emoji">💚</div><b>视频号</b><span>跨平台分发</span></div>
+        <div class="platform-chip"><div class="platform-emoji">▶️</div><b>YouTube</b><span>多账号 OAuth</span></div>
+        <div class="platform-chip"><div class="platform-emoji">📷</div><b>Instagram</b><span>Reels / Carousel</span></div>
+        <div class="platform-chip"><div class="platform-emoji">🎬</div><b>TikTok</b><span>内容 + 数据</span></div>
+        <div class="platform-chip"><div class="platform-emoji">📺</div><b>B站</b><span>动态 / 视频</span></div>
+        <div class="platform-chip"><div class="platform-emoji">⚡</div><b>快手</b><span>短视频</span></div>
+        <div class="platform-chip"><div class="platform-emoji">🐦</div><b>X / Twitter</b><span>多账号经营</span></div>
+        <div class="platform-chip"><div class="platform-emoji">🏪</div><b>抖店/小红书千帆</b><span>商品发布</span></div>
+        <div class="platform-chip"><div class="platform-emoji">🛒</div><b>1688/淘宝/拼多多</b><span>电商详情页</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 模块详情 1：内容生产 -->
+  <section>
+    <div class="container">
+      <div class="split">
+        <div class="split-visual">
+          <div class="mock-window">
+            <div class="titlebar"><span></span><span></span><span></span></div>
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">📝 任务 #2024：露营装备种草视频</div>
+            <div class="mock-row"><span class="tag">分析</span>商品主图 → 提取卖点</div>
+            <div class="mock-row"><span class="tag">脚本</span>生成 12 个分镜文案</div>
+            <div class="mock-row"><span class="tag">生图</span>分镜配图 nano-banana-2</div>
+            <div class="mock-row"><span class="tag">配音</span>电商主播音色 ✓</div>
+            <div class="mock-row"><span class="tag">合成</span>Veo 3.1 视频段拼接<span class="ok">✓ 已完成</span></div>
+          </div>
+        </div>
+        <div class="split-text">
+          <h3>从一张主图到一条爆款 —— 全部在一个任务里</h3>
+          <p>把对话框当作你的内容总监：上传一张商品图，告诉它"做条种草视频"，剩下的从分析、脚本、分镜、配图、配音、剪辑都自动接力完成。</p>
+          <ul class="split-points">
+            <li>商品/主图分析 → 自动提炼卖点和卖点</li>
+            <li>多分镜脚本生成 + 文生图 / Veo 视频接力</li>
+            <li>素材库自动入库，可直接复用到下一条内容</li>
+            <li>支持电商详情页长图、PPT、海报等图文场景</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 模块详情 2：发布与运营 -->
+  <section style="background: rgba(255, 255, 255, 0.015);">
+    <div class="container">
+      <div class="split">
+        <div class="split-text">
+          <h3>多账号、多平台，一处操作全网同步</h3>
+          <p>每个账号一个独立的浏览器环境，cookie 长期持有，发布完不掉线；定时发布、互动回复都跑在你的本机，安全可控。</p>
+          <ul class="split-points">
+            <li>抖音 / 小红书 / 头条 / 视频号 一键并发发布</li>
+            <li>账号独立浏览器持久化（per-account user_data）</li>
+            <li>支持账号级代理（http / https / socks5）</li>
+            <li>发布后自动监测评论 / 私信，AI 兜底回复</li>
+            <li>企业微信 / WhatsApp / Messenger 客服打通</li>
+          </ul>
+        </div>
+        <div class="split-visual">
+          <div class="mock-window">
+            <div class="titlebar"><span></span><span></span><span></span></div>
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">🚀 多平台发布进度</div>
+            <div class="mock-row"><span class="tag" style="background: rgba(244, 114, 182, 0.18); color: #f9a8d4;">小红书</span>视频上传 100%<span class="ok">✓</span></div>
+            <div class="mock-row"><span class="tag" style="background: rgba(0, 0, 0, 0.5); color: #f3f4f6;">抖音</span>转码完成，已点发布<span class="ok">✓</span></div>
+            <div class="mock-row"><span class="tag" style="background: rgba(245, 158, 11, 0.18); color: #fcd34d;">头条号</span>等待审核中<span style="color: var(--text-muted); margin-left: auto;">···</span></div>
+            <div class="mock-row"><span class="tag" style="background: rgba(34, 197, 94, 0.18); color: #86efac;">视频号</span>队列中<span style="color: var(--text-muted); margin-left: auto;">···</span></div>
+            <div class="mock-row"><span class="tag" style="background: rgba(99, 102, 241, 0.2); color: #a5b4fc;">YouTube</span>OAuth 上传中 76%<span style="color: var(--text-muted); margin-left: auto;">···</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 模块详情 3：客资 -->
+  <section>
+    <div class="container">
+      <div class="split">
+        <div class="split-visual">
+          <div class="mock-window">
+            <div class="titlebar"><span></span><span></span><span></span></div>
+            <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 6px;">🎯 同行评论挖掘 → 高意向客户线索</div>
+            <div class="mock-row"><span class="tag">@小米</span>"求链接！这款多少钱"<span class="ok">★ S</span></div>
+            <div class="mock-row"><span class="tag">@阿飞</span>"老师，我也想学！"<span style="color: #f59e0b; margin-left: auto;">★ A</span></div>
+            <div class="mock-row"><span class="tag">@蚊子</span>"还有别的型号吗"<span style="color: #f59e0b; margin-left: auto;">★ A</span></div>
+            <div class="mock-row"><span class="tag">@JoJo</span>"好喜欢，求测评"<span style="color: var(--text-muted); margin-left: auto;">B</span></div>
+            <div class="mock-row" style="background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.25);">→ AI 已生成 4 条个性化触达文案，待发送</div>
+          </div>
+        </div>
+        <div class="split-text">
+          <h3>同行评论区里的人，就是你的客户</h3>
+          <p>盯着同行账号的笔记和评论，把"在求链接""问哪里买""想入手"的高意向用户筛出来 —— 然后让 AI 帮你写私信、做触达。</p>
+          <ul class="split-points">
+            <li>关键词监测 + 同行账号跟踪（小红书等）</li>
+            <li>评论 / 互动数据自动入库，按意向分级</li>
+            <li>个性化触达文案生成，避免群发感</li>
+            <li>跟进提醒，让线索不沉底</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 安装 -->
+  <section id="install" style="background: rgba(255, 255, 255, 0.015);">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">INSTALL</span>
+        <h2 class="section-title">三步上手，零配置启动</h2>
+        <p class="section-sub">桌面客户端，本地运行，数据不出本机；自带浏览器与 Node 运行时，免装依赖。</p>
+      </div>
+      <div class="steps">
+        <div class="step-card">
+          <div class="step-num">1</div>
+          <h4>下载安装包</h4>
+          <p>点下方按钮下载 Windows 安装包（约 1GB，含浏览器与运行时）。</p>
+        </div>
+        <div class="step-card">
+          <div class="step-num">2</div>
+          <h4>双击安装</h4>
+          <p>解压到任意目录，运行一次 <code>install.bat</code> 完成首次环境检查。</p>
+        </div>
+        <div class="step-card">
+          <div class="step-num">3</div>
+          <h4>桌面图标启动</h4>
+          <p>桌面"INSclaw"图标双击即开，扫码登录后即可使用全部功能。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq">
+    <div class="container">
+      <div class="section-head">
+        <span class="section-tag">FAQ</span>
+        <h2 class="section-title">常见问题</h2>
+      </div>
+      <div class="faq">
+        <details>
+          <summary>支持哪些操作系统？</summary>
+          <p>当前支持 Windows 10/11 64 位。macOS 版本在路上。</p>
+        </details>
+        <details>
+          <summary>怎么收费？</summary>
+          <p>软件本体一次性购买 <b>¥99</b> 永久授权（含全部功能模块、OTA 自动升级）。账号注册免费，新用户赠送启动积分。基础功能（发布、生图、对话）按积分消耗，高阶 AI 调用（爆款 TVC、电商详情页、视频生成等）按次扣费。后续买家可独立购买积分套餐。</p>
+        </details>
+        <details>
+          <summary>账号密码会上传到服务器吗？</summary>
+          <p>不会。所有平台账号的 cookie / 浏览器 user_data 全部存在你的本机 <code>browser_data/</code> 目录，服务器只做积分结算和 AI 调度，不接触你的登录态。</p>
+        </details>
+        <details>
+          <summary>多账号会被平台封号吗？</summary>
+          <p>每个账号都有独立的 user_data 目录与浏览器指纹隔离，支持账号级代理（http/https/socks5）。在合理频率下使用与人工操作风控等级一致；高强度反爬平台（如视频号、淘宝）支持 CDP attach 模式，把脚本接到你自己开的 Chrome 上更稳。</p>
+        </details>
+        <details>
+          <summary>客资挖掘的数据来自哪里？</summary>
+          <p>基于公开的社交平台数据（小红书、抖音等）通过官方与合规接口获取，并支持你自定义关键词与同行账号清单。每次调用按次扣积分。</p>
+        </details>
+        <details>
+          <summary>能否私有化部署？</summary>
+          <p>支持。客户端本身就是本地运行的；如果你需要把 AI 调度服务也部署在自有机器上，请联系商务对接定制方案。</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- Final CTA -->
+  <section id="download" class="final-cta">
+    <h2 class="gradient-text">现在就让 AI 接管你的内容生产线</h2>
+    <p>购买后即刻获取 Windows 安装包下载链接，双击解压 → 运行 <code style="background: rgba(0,0,0,0.4); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">一键启动.bat</code> → 即刻开始</p>
+    <div class="price-card" id="priceCard">
+      <div class="price-card-inner">
+        <div class="price-meta">
+          <div class="price-name" id="priceName">INSclaw · Windows 完整安装包</div>
+          <div class="price-desc" id="priceDesc">含 Chromium / Node / Python 运行时，约 1GB，开箱即用。</div>
+          <div class="price-tags">
+            <span><b>系统</b>Windows 10/11 64 位</span>
+            <span><b>体积</b>≈ 1GB</span>
+            <span><b>含</b>Chromium · Node · Python</span>
+            <span><b>更新</b>OTA 自动升级</span>
+          </div>
+        </div>
+        <div class="price-action">
+          <div class="price-num"><span class="currency">¥</span><span id="priceYuan">99</span></div>
+          <div class="price-unit">一次性购买 / 永久授权</div>
+          <button type="button" class="btn btn-primary btn-lg buy-btn" id="buyBtn">立即购买 ¥<span id="buyBtnPrice">99</span></button>
+          <div class="price-hint">微信扫码支付 · 付款后即刻获取下载链接</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- 购买 Modal：扫码支付 + 轮询 + 显示下载链接 -->
+<div class="modal-mask" id="payModal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-labelledby="payModalTitle">
+    <button type="button" class="modal-close" id="payModalClose" aria-label="关闭">×</button>
+
+    <!-- 阶段 1：等待支付 -->
+    <div class="pay-stage" id="stagePay">
+      <h3 id="payModalTitle">微信扫码支付</h3>
+      <div class="pay-amount">¥<span id="payAmountText">99</span> · <span id="payProductText">INSclaw · Windows 完整安装包</span></div>
+      <div class="qr-wrap">
+        <div class="qr-loading" id="qrLoading">
+          <div class="spinner"></div><div>生成订单中…</div>
+        </div>
+        <img id="qrImg" alt="微信支付二维码" style="display: none;">
+      </div>
+      <div class="pay-status" id="payStatus">请用微信扫描二维码完成支付</div>
+      <div class="pay-meta">
+        <div>订单号：<code id="payOrderNo">-</code></div>
+        <div id="payCountdown"></div>
+      </div>
+      <div class="pay-tip">
+        <p>· 支付完成会自动弹出下载链接，无需手动刷新</p>
+        <p>· 二维码 2 小时内有效；遇到异常请联系客服 hi@51ins.com</p>
+      </div>
+    </div>
+
+    <!-- 阶段 2：支付成功 -->
+    <div class="pay-stage" id="stageSuccess" style="display: none;">
+      <div class="success-icon">✓</div>
+      <h3 style="color: var(--success);">支付成功</h3>
+      <p style="color: var(--text-muted); margin-bottom: 1.4rem;">感谢支持 INSclaw！下载链接已生成，7 天内有效。</p>
+      <div class="dl-row">
+        <a href="#" id="downloadLink" class="btn btn-primary btn-lg" download>⬇ 立即下载安装包</a>
+        <button type="button" class="btn btn-ghost btn-lg" id="copyLinkBtn">复制下载链接</button>
+      </div>
+      <div class="dl-meta">
+        <div><b>订单号</b> <code id="successOrderNo">-</code></div>
+        <div><b>有效期</b> 7 天，可下载次数 ≤ 10</div>
+      </div>
+      <div class="dl-tip">
+        <p><b>下一步：</b></p>
+        <ol style="margin-left: 1.2rem; color: var(--text-muted); font-size: 0.86rem; line-height: 1.8;">
+          <li>下载完毕后双击 zip 解压到任意目录（建议非系统盘）</li>
+          <li>首次使用：双击 <code>install.bat</code> 完成环境检查</li>
+          <li>桌面"INSclaw"图标双击启动，扫码登录即可使用</li>
+        </ol>
+      </div>
+    </div>
+
+    <!-- 阶段 3：错误 -->
+    <div class="pay-stage" id="stageError" style="display: none;">
+      <div class="error-icon">!</div>
+      <h3>下单失败</h3>
+      <p id="errorMsg" style="color: var(--text-muted); margin-bottom: 1rem;">服务暂时不可用，请稍后重试。</p>
+      <button type="button" class="btn btn-ghost btn-lg" id="retryBtn">重新尝试</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  /* Price card */
+  .price-card {
+    max-width: 760px; margin: 0 auto; padding: 2rem 1.5rem;
+    background: linear-gradient(135deg, rgba(99,102,241,0.10), rgba(6,182,212,0.05));
+    border: 1px solid rgba(99,102,241,0.25); border-radius: var(--radius);
+    box-shadow: 0 8px 36px -12px rgba(99,102,241,0.3);
+  }
+  .price-card-inner {
+    display: grid; grid-template-columns: 1fr auto; gap: 2rem; align-items: center;
+  }
+  @media (max-width: 720px) {
+    .price-card-inner { grid-template-columns: 1fr; gap: 1.4rem; text-align: center; }
+  }
+  .price-name { font-size: 1.2rem; font-weight: 700; margin-bottom: 0.4rem; }
+  .price-desc { color: var(--text-muted); font-size: 0.92rem; margin-bottom: 0.9rem; }
+  .price-tags { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .price-tags span {
+    font-size: 0.74rem; color: var(--text-muted);
+    padding: 0.2rem 0.55rem; background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border); border-radius: 4px;
+  }
+  .price-tags span b { color: var(--text); margin-right: 4px; }
+  .price-action { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; }
+  .price-num {
+    font-size: 3rem; font-weight: 800; line-height: 1;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .price-num .currency { font-size: 1.3rem; vertical-align: super; margin-right: 2px; }
+  .price-unit { font-size: 0.78rem; color: var(--text-muted); }
+  .buy-btn { min-width: 200px; }
+  .price-hint { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem; }
+
+  /* Modal */
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    display: none; align-items: center; justify-content: center;
+    padding: 1rem;
+  }
+  .modal-mask.visible { display: flex; }
+  .modal {
+    background: var(--bg-1); border: 1px solid var(--border-strong);
+    border-radius: var(--radius); padding: 2rem 1.8rem; position: relative;
+    max-width: 480px; width: 100%; max-height: calc(100vh - 2rem); overflow: auto;
+    box-shadow: 0 20px 60px -10px rgba(0,0,0,0.5), 0 0 60px -10px rgba(99,102,241,0.3);
+  }
+  .modal-close {
+    position: absolute; top: 0.8rem; right: 0.9rem;
+    background: none; border: none; color: var(--text-muted);
+    font-size: 1.6rem; cursor: pointer; line-height: 1;
+    width: 32px; height: 32px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-close:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+  .modal h3 { font-size: 1.3rem; margin-bottom: 0.7rem; text-align: center; }
+  .pay-amount { text-align: center; color: var(--text-muted); font-size: 0.92rem; margin-bottom: 1.4rem; }
+  .qr-wrap {
+    width: 240px; height: 240px; margin: 0 auto;
+    background: white; border-radius: 12px; padding: 12px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 24px -8px rgba(99,102,241,0.4);
+  }
+  .qr-wrap img { width: 100%; height: 100%; object-fit: contain; }
+  .qr-loading {
+    display: flex; flex-direction: column; gap: 0.6rem; align-items: center;
+    color: #6b7280; font-size: 0.82rem;
+  }
+  .spinner {
+    width: 28px; height: 28px;
+    border: 3px solid rgba(99,102,241,0.18);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .pay-status {
+    text-align: center; color: var(--accent); font-size: 0.92rem;
+    margin: 1.2rem 0 0.6rem; font-weight: 500;
+  }
+  .pay-status.checking { color: var(--text-muted); }
+  .pay-meta {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 0.76rem; color: var(--text-muted); padding: 0.6rem 0;
+    border-top: 1px dashed var(--border); margin-top: 0.6rem;
+  }
+  .pay-meta code { font-family: "SF Mono", Consolas, monospace; opacity: 0.85; }
+  .pay-tip { margin-top: 1rem; padding: 0.8rem 1rem; background: rgba(99,102,241,0.05);
+    border-radius: var(--radius-sm); border: 1px solid rgba(99,102,241,0.15); }
+  .pay-tip p { font-size: 0.78rem; color: var(--text-muted); margin: 0.2rem 0; }
+
+  /* Success */
+  .success-icon, .error-icon {
+    width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 1rem;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 2.2rem; font-weight: 700; color: white;
+  }
+  .success-icon { background: linear-gradient(135deg, #22c55e, #06b6d4); box-shadow: 0 8px 24px -8px rgba(34,197,94,0.5); }
+  .error-icon { background: linear-gradient(135deg, #ef4444, #f59e0b); box-shadow: 0 8px 24px -8px rgba(239,68,68,0.5); }
+  .pay-stage { animation: fadeIn 0.3s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+  .dl-row { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 1.2rem; }
+  .dl-row .btn { width: 100%; justify-content: center; }
+  .dl-meta { font-size: 0.8rem; color: var(--text-muted);
+    padding: 0.7rem 0.9rem; background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 1rem; }
+  .dl-meta div { padding: 0.15rem 0; }
+  .dl-meta b { color: var(--text); margin-right: 0.4rem; }
+  .dl-meta code { font-family: "SF Mono", Consolas, monospace; font-size: 0.78rem; }
+  .dl-tip p { font-size: 0.84rem; color: var(--text); margin-bottom: 0.4rem; }
+</style>
+
+<script>
+  // ── 商品配置：从后端 /api/landing/products 拉取，失败时回退到默认 ──
+  let CURRENT_PRODUCT = { id: 'insclaw_full', name: 'INSclaw · Windows 完整安装包', price_yuan: 99 };
+
+  fetch('/api/landing/products', { credentials: 'omit' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      if (!d || !Array.isArray(d.products) || !d.products.length) return;
+      var p = d.products[0];
+      CURRENT_PRODUCT = { id: p.id, name: p.name, price_yuan: p.price_yuan };
+      document.getElementById('priceName').textContent = p.name;
+      document.getElementById('priceDesc').textContent = p.description || '';
+      document.getElementById('priceYuan').textContent = String(p.price_yuan);
+      document.getElementById('buyBtnPrice').textContent = String(p.price_yuan);
+      document.getElementById('payAmountText').textContent = String(p.price_yuan);
+      document.getElementById('payProductText').textContent = p.name;
+    })
+    .catch(function () { /* 用默认值 */ });
+
+  // ── Modal 控制 ──
+  var modal = document.getElementById('payModal');
+  function showModal() { modal.classList.add('visible'); modal.setAttribute('aria-hidden', 'false'); }
+  function hideModal() {
+    modal.classList.remove('visible'); modal.setAttribute('aria-hidden', 'true');
+    if (POLL_TIMER) { clearInterval(POLL_TIMER); POLL_TIMER = null; }
+    if (COUNTDOWN_TIMER) { clearInterval(COUNTDOWN_TIMER); COUNTDOWN_TIMER = null; }
+  }
+  document.getElementById('payModalClose').addEventListener('click', hideModal);
+  modal.addEventListener('click', function (e) { if (e.target === modal) hideModal(); });
+
+  function showStage(name) {
+    document.getElementById('stagePay').style.display = (name === 'pay') ? '' : 'none';
+    document.getElementById('stageSuccess').style.display = (name === 'success') ? '' : 'none';
+    document.getElementById('stageError').style.display = (name === 'error') ? '' : 'none';
+  }
+
+  function setPayStatus(text, isChecking) {
+    var el = document.getElementById('payStatus');
+    el.textContent = text;
+    el.className = 'pay-status' + (isChecking ? ' checking' : '');
+  }
+
+  // ── 购买流程 ──
+  var POLL_TIMER = null;
+  var COUNTDOWN_TIMER = null;
+  var CURRENT_ORDER = null;
+
+  document.getElementById('buyBtn').addEventListener('click', function () {
+    showStage('pay');
+    document.getElementById('qrLoading').style.display = '';
+    document.getElementById('qrImg').style.display = 'none';
+    setPayStatus('请用微信扫描二维码完成支付', false);
+    document.getElementById('payOrderNo').textContent = '-';
+    showModal();
+
+    fetch('/api/landing/create-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'omit',
+      body: JSON.stringify({ product_id: CURRENT_PRODUCT.id }),
+    })
+      .then(function (r) {
+        return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; });
+      })
+      .then(function (res) {
+        if (!res.ok) {
+          throw new Error((res.data && res.data.detail) || ('HTTP ' + res.status));
+        }
+        CURRENT_ORDER = res.data;
+        document.getElementById('payOrderNo').textContent = res.data.out_trade_no;
+        var img = document.getElementById('qrImg');
+        img.src = '/api/landing/qr-png?data=' + encodeURIComponent(res.data.code_url);
+        img.onload = function () {
+          document.getElementById('qrLoading').style.display = 'none';
+          img.style.display = '';
+        };
+        startPolling(res.data.out_trade_no);
+        startCountdown(120 * 60); // 2 小时
+      })
+      .catch(function (e) {
+        showStage('error');
+        document.getElementById('errorMsg').textContent = e.message || '下单失败，请稍后重试';
+      });
+  });
+
+  document.getElementById('retryBtn').addEventListener('click', function () {
+    document.getElementById('buyBtn').click();
+  });
+
+  function startPolling(outTradeNo) {
+    if (POLL_TIMER) clearInterval(POLL_TIMER);
+    var pollCount = 0;
+    POLL_TIMER = setInterval(function () {
+      pollCount++;
+      // 5 分钟后降频（每 5 秒 → 每 15 秒）
+      if (pollCount > 60 && pollCount % 3 !== 0) return;
+      setPayStatus('正在确认支付状态…', true);
+      fetch('/api/landing/order-status?out_trade_no=' + encodeURIComponent(outTradeNo), { credentials: 'omit' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d && d.status === 'paid') {
+            clearInterval(POLL_TIMER); POLL_TIMER = null;
+            if (COUNTDOWN_TIMER) { clearInterval(COUNTDOWN_TIMER); COUNTDOWN_TIMER = null; }
+            onPaid(d);
+          } else {
+            setPayStatus('请用微信扫描二维码完成支付', false);
+          }
+        })
+        .catch(function () { setPayStatus('请用微信扫描二维码完成支付', false); });
+    }, 5000);
+  }
+
+  function startCountdown(totalSec) {
+    if (COUNTDOWN_TIMER) clearInterval(COUNTDOWN_TIMER);
+    var remain = totalSec;
+    var el = document.getElementById('payCountdown');
+    function tick() {
+      if (remain <= 0) {
+        el.textContent = '二维码已过期';
+        clearInterval(COUNTDOWN_TIMER); COUNTDOWN_TIMER = null;
+        if (POLL_TIMER) { clearInterval(POLL_TIMER); POLL_TIMER = null; }
+        setPayStatus('二维码已过期，请关闭后重新购买', false);
+        return;
+      }
+      var h = Math.floor(remain / 3600);
+      var m = Math.floor((remain % 3600) / 60);
+      var s = remain % 60;
+      el.textContent = '剩余 ' + (h ? (h + ':') : '') + String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+      remain--;
+    }
+    tick();
+    COUNTDOWN_TIMER = setInterval(tick, 1000);
+  }
+
+  function onPaid(orderInfo) {
+    showStage('success');
+    document.getElementById('successOrderNo').textContent = orderInfo.out_trade_no || '-';
+    var dl = document.getElementById('downloadLink');
+    dl.href = orderInfo.download_url || '#';
+    // 自动复制功能
+    document.getElementById('copyLinkBtn').onclick = function () {
+      var url = location.origin + (orderInfo.download_url || '');
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(url).then(function () {
+          var btn = document.getElementById('copyLinkBtn');
+          var orig = btn.textContent;
+          btn.textContent = '✓ 已复制';
+          setTimeout(function () { btn.textContent = orig; }, 1500);
+        });
+      } else {
+        window.prompt('复制下方链接：', url);
+      }
+    };
+  }
+</script>
+
+<!-- 旧的下载按钮脚本里 a[href="#download"] 高亮逻辑改为高亮购买按钮 -->
+
+<footer>
+  <div class="footer-inner">
+    <div>
+      <a href="#top" class="brand" style="margin-bottom: 0.4rem;">
+        <div class="brand-icon" style="width: 26px; height: 26px; font-size: 14px;">I</div>
+        <span style="font-size: 0.95rem;">INSclaw</span>
+      </a>
+      <div style="margin-top: 0.4rem;">© 2026 INSclaw · 自媒体内容生产与运营自动化平台</div>
+    </div>
+    <div style="display: flex; gap: 1.6rem; flex-wrap: wrap;">
+      <a href="https://api.51ins.com" target="_blank">控制台</a>
+      <a href="#features">功能</a>
+      <a href="#install">下载</a>
+      <a href="#faq">帮助</a>
+      <a href="mailto:hi@51ins.com">联系我们</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // Hero 主下载按钮高亮"立即购买"按钮（购买流程见下方 modal 脚本）
+  document.querySelectorAll('a[href="#download"]').forEach(function (a) {
+    a.addEventListener('click', function () {
+      setTimeout(function () {
+        var btn = document.getElementById('buyBtn');
+        if (btn) btn.style.boxShadow = '0 0 0 4px rgba(99, 102, 241, 0.4)';
+        setTimeout(function () { if (btn) btn.style.boxShadow = ''; }, 1500);
+      }, 400);
+    });
+  });
+
+  // 轻量动画：进入视口时显现
+  if ('IntersectionObserver' in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) {
+          e.target.style.opacity = '1';
+          e.target.style.transform = 'translateY(0)';
+        }
+      });
+    }, { threshold: 0.12 });
+    document.querySelectorAll('.feature-card, .step-card, .platform-chip, .split-visual, .split-text').forEach(function (el) {
+      el.style.opacity = '0';
+      el.style.transform = 'translateY(16px)';
+      el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+      io.observe(el);
+    });
+  }
+</script>
+
+</body>
+</html>

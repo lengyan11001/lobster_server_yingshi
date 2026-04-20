@@ -25,6 +25,7 @@ from .api.mcp_gateway import router as mcp_gateway_router
 # from .api.custom_config import router as custom_config_router
 from .api.openclaw_config import router as openclaw_config_router
 from .api.billing import router as billing_router
+from .api.landing_pay import router as landing_pay_router
 # 算力账号已去掉：速推统一走服务器配置的 SUTUI_SERVER_TOKEN(S)，负载均衡
 # from .api.consumption_accounts import router as consumption_accounts_router
 from .api.mcp_registry import router as mcp_registry_router
@@ -766,6 +767,7 @@ def create_app() -> FastAPI:
     # 自定义配置已迁至客户端；server 仅保留支付相关（sutui/balance、recharge 在 openclaw_config 中）
     # app.include_router(custom_config_router, prefix="")
     app.include_router(billing_router, prefix="")
+    app.include_router(landing_pay_router, prefix="")
     # app.include_router(consumption_accounts_router, prefix="")
     app.include_router(mcp_registry_router, prefix="")
     app.include_router(assets_router, prefix="")
@@ -807,9 +809,24 @@ def create_app() -> FastAPI:
         name="client_client_code",
     )
 
-    # 前端由 lobster_online 提供，本服务仅 API；根路径返回说明
+    # INSclaw 公网官网落地页：landing/index.html + landing/downloads/*.zip 安装包直链
+    # （与 client_static 区分：landing 是面向访客的营销页，可放对外下载与文案；客户端自带 UI 仍由 lobster_online 提供）
+    _landing_dir = Path(__file__).resolve().parent.parent.parent / "landing"
+    if _landing_dir.is_dir():
+        app.mount(
+            "/landing",
+            StaticFiles(directory=str(_landing_dir), html=True),
+            name="landing",
+        )
+        logger.info("[启动] 已挂载 landing 静态目录: %s", _landing_dir)
+
+    # 根路径：若 landing/index.html 存在则跳转到落地页；否则维持 JSON 提示
+    from fastapi.responses import RedirectResponse
+
     @app.get("/", include_in_schema=False)
     def index():
+        if (_landing_dir / "index.html").is_file():
+            return RedirectResponse(url="/landing/", status_code=302)
         return JSONResponse(content={"message": "Lobster API. Use the online client (lobster_online) to access the UI."})
 
     logger.info("[启动] create_app 完成")

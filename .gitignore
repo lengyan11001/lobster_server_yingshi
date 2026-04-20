@@ -47,6 +47,10 @@ data/sutui_llm_snapshot.json
 data/sutui_reconcile_last.json
 temp_assets/
 
+# 落地页：私有安装包（仅 paid 订单凭 token 才能下载）不进 git，直接 scp 到服务器
+landing_private/*.zip
+landing_private/*.exe
+
 # 部署回滚
 .deploy_rollback_commit
 

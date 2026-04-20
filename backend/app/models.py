@@ -256,6 +256,35 @@ class RechargeOrder(Base):
     wechat_transaction_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
 
+class LandingOrder(Base):
+    """落地页匿名订单：访客购买 INSclaw 安装包（无需登录）。
+    支付完成后生成 download_token，访客凭 token 在有限时间内访问下载链接。"""
+
+    __tablename__ = "landing_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    out_trade_no: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    product_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # insclaw_full / insclaw_slim
+    amount_fen: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False, index=True)  # pending / paid / cancelled
+    payment_method: Mapped[str] = mapped_column(String(32), default="wechat", nullable=False)
+    # 联系信息（可选；用户填了便于客服重发链接 / 纸质开票）
+    contact_email: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    contact_phone: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # 审计
+    client_ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    # 支付完成后的实付 + 微信交易号
+    callback_amount_fen: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    wechat_transaction_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    # 下载凭证：paid 时生成，过期时间默认 7 天，最大下载次数 10
+    download_token: Mapped[Optional[str]] = mapped_column(String(64), unique=True, nullable=True, index=True)
+    download_token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    download_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class UserInstallation(Base):
     """在线版：同一账号最多绑定 3 个安装身份（installation_id），LRU 顶掉最久未访问。"""
 
