@@ -470,15 +470,12 @@
         <div class="platform-chip"><div class="platform-emoji">📕</div><b>小红书</b><span>发布·同行追踪·评论</span></div>
         <div class="platform-chip"><div class="platform-emoji">🎵</div><b>抖音</b><span>视频/图文一键发</span></div>
         <div class="platform-chip"><div class="platform-emoji">📰</div><b>头条号</b><span>图文/视频</span></div>
-        <div class="platform-chip"><div class="platform-emoji">💚</div><b>视频号</b><span>跨平台分发</span></div>
         <div class="platform-chip"><div class="platform-emoji">▶️</div><b>YouTube</b><span>多账号 OAuth</span></div>
-        <div class="platform-chip"><div class="platform-emoji">📷</div><b>Instagram</b><span>Reels / Carousel</span></div>
         <div class="platform-chip"><div class="platform-emoji">🎬</div><b>TikTok</b><span>内容 + 数据</span></div>
         <div class="platform-chip"><div class="platform-emoji">📺</div><b>B站</b><span>动态 / 视频</span></div>
-        <div class="platform-chip"><div class="platform-emoji">⚡</div><b>快手</b><span>短视频</span></div>
-        <div class="platform-chip"><div class="platform-emoji">🐦</div><b>X / Twitter</b><span>多账号经营</span></div>
-        <div class="platform-chip"><div class="platform-emoji">🏪</div><b>抖店/小红书千帆</b><span>商品发布</span></div>
-        <div class="platform-chip"><div class="platform-emoji">🛒</div><b>1688/淘宝/拼多多</b><span>电商详情页</span></div>
+        <div class="platform-chip"><div class="platform-emoji">📢</div><b>企业微信群发</b><span>批量触达客户</span></div>
+        <div class="platform-chip"><div class="platform-emoji">💬</div><b>微信客服</b><span>自动回复·智能转人工</span></div>
+        <div class="platform-chip"><div class="platform-emoji">🤖</div><b>微信控制</b><span>消息收发·朋友圈互动</span></div>
       </div>
     </div>
   </section>
@@ -991,6 +988,85 @@
 </script>
 
 <!-- 旧的下载按钮脚本里 a[href="#download"] 高亮逻辑改为高亮购买按钮 -->
+
+<!-- 客服微信：常驻右下角悬浮按钮 + 点击弹窗展示二维码 -->
+<button type="button" class="cs-float-btn" id="csFloatBtn" aria-label="联系客服" title="联系客服">
+  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
+  </svg>
+  <span>联系客服</span>
+</button>
+
+<div class="modal-mask" id="csModal" aria-hidden="true">
+  <div class="modal cs-modal" role="dialog" aria-labelledby="csModalTitle">
+    <button type="button" class="modal-close" id="csModalClose" aria-label="关闭">×</button>
+    <h3 id="csModalTitle">扫码加客服微信</h3>
+    <p style="color: var(--text-muted); text-align: center; font-size: 0.88rem; margin-bottom: 1.4rem;">
+      售前咨询 / 安装答疑 / 商务合作
+    </p>
+    <div class="cs-qr-wrap">
+      <img src="https://cdn-video.51sux.com/storage/docs/20260414/17a4f4b0c4a54ec48af84cfb157e7735.png" alt="联系我们" class="join-overlay-image">
+    </div>
+    <p style="color: var(--text-muted); text-align: center; font-size: 0.78rem; margin-top: 1rem;">
+      或邮件 hi@51ins.com
+    </p>
+  </div>
+</div>
+
+<style>
+  /* 客服悬浮按钮 */
+  .cs-float-btn {
+    position: fixed; right: 24px; bottom: 24px; z-index: 900;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 0.7rem 1.1rem; border-radius: 999px; cursor: pointer;
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+    color: white; border: none; font-size: 0.92rem; font-weight: 600;
+    box-shadow: 0 8px 24px -4px rgba(99,102,241,0.5),
+                0 0 0 6px rgba(99,102,241,0.08);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    animation: csFloatPulse 2.6s ease-in-out infinite;
+  }
+  .cs-float-btn:hover {
+    transform: translateY(-2px) scale(1.04);
+    box-shadow: 0 12px 32px -4px rgba(99,102,241,0.7),
+                0 0 0 10px rgba(99,102,241,0.12);
+    animation: none;
+  }
+  .cs-float-btn svg { display: block; }
+  @keyframes csFloatPulse {
+    0%, 100% { box-shadow: 0 8px 24px -4px rgba(99,102,241,0.5), 0 0 0 6px rgba(99,102,241,0.08); }
+    50%      { box-shadow: 0 8px 24px -4px rgba(99,102,241,0.7), 0 0 0 14px rgba(99,102,241,0.0); }
+  }
+  @media (max-width: 720px) {
+    .cs-float-btn { right: 14px; bottom: 14px; padding: 0.6rem 0.9rem; }
+    .cs-float-btn span { display: none; }
+  }
+  .cs-modal { max-width: 360px; }
+  .cs-qr-wrap {
+    width: 240px; height: 240px; margin: 0 auto; padding: 12px;
+    background: white; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 24px -8px rgba(99,102,241,0.4);
+  }
+  .cs-qr-wrap .join-overlay-image {
+    width: 100%; height: 100%; object-fit: contain; display: block;
+  }
+</style>
+
+<script>
+  (function () {
+    var csModal = document.getElementById('csModal');
+    function showCs() { csModal.classList.add('visible'); csModal.setAttribute('aria-hidden', 'false'); }
+    function hideCs() { csModal.classList.remove('visible'); csModal.setAttribute('aria-hidden', 'true'); }
+    document.getElementById('csFloatBtn').addEventListener('click', showCs);
+    document.getElementById('csModalClose').addEventListener('click', hideCs);
+    csModal.addEventListener('click', function (e) { if (e.target === csModal) hideCs(); });
+    /* ESC 关闭 */
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && csModal.classList.contains('visible')) hideCs();
+    });
+  })();
+</script>
 
 <footer>
   <div class="footer-inner">
