@@ -1,13 +1,14 @@
 """管理后台：管理员登录、用户查询、积分充值、数据统计。
 
 路由挂载在 /admin 前缀。
-- GET  /admin/              管理后台页面
-- POST /admin/api/login     管理员登录
-- GET  /admin/api/search    搜索用户
-- GET  /admin/api/user/{id} 用户详情 + 最近流水
-- POST /admin/api/add-credits 给用户加积分
-- GET  /admin/api/users     用户列表（分页）
-- GET  /admin/api/stats     数据统计
+- GET  /admin/                  管理后台页面
+- POST /admin/api/login         管理员登录
+- GET  /admin/api/search        搜索用户
+- GET  /admin/api/user/{id}     用户详情 + 最近流水
+- POST /admin/api/add-credits   给用户加积分
+- POST /admin/api/reset-password 重置用户密码
+- GET  /admin/api/users         用户列表（分页）
+- GET  /admin/api/stats         数据统计
 """
 from __future__ import annotations
 
@@ -190,6 +191,36 @@ def admin_add_credits(
         "new_credits": float(quantize_credits(user.credits)),
         "delta": float(delta),
     }
+
+
+class ResetPasswordBody(BaseModel):
+    user_id: int
+    new_password: str
+
+
+@router.post("/admin/api/reset-password")
+def admin_reset_password(
+    body: ResetPasswordBody,
+    _auth: bool = Depends(_verify_admin_token),
+    db: Session = Depends(get_db),
+):
+    """管理员重置指定用户的登录密码。密码规则与注册一致（6~128 位）。"""
+    pwd = (body.new_password or "").strip()
+    if len(pwd) < 6:
+        raise HTTPException(status_code=400, detail="密码至少 6 位")
+    if len(pwd) > 128:
+        raise HTTPException(status_code=400, detail="密码长度不能超过 128 位")
+    user = db.query(User).filter(User.id == body.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    from .auth import get_password_hash
+
+    user.hashed_password = get_password_hash(pwd)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    logger.info("[admin/reset-password] user_id=%s email=%s ok", user.id, user.email)
+    return {"ok": True, "user_id": user.id, "email": user.email}
 
 
 @router.get("/admin/api/users")

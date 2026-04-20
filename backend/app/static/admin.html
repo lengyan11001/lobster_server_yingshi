@@ -89,6 +89,14 @@ tr:hover{background:var(--bg)}
 .tab:hover:not(.active){color:var(--text)}
 .detail-back{cursor:pointer;color:var(--primary);font-size:13px;margin-bottom:12px;display:inline-flex;align-items:center;gap:4px}
 .detail-back:hover{text-decoration:underline}
+/* Modal */
+.modal-mask{display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:200;align-items:center;justify-content:center;padding:20px}
+.modal-mask.show{display:flex}
+.modal-card{background:var(--card);border-radius:var(--radius);box-shadow:0 10px 40px rgba(0,0,0,.18);padding:24px;width:100%;max-width:380px}
+.modal-card h3{font-size:16px;margin-bottom:6px;color:var(--text)}
+.modal-card .modal-sub{font-size:12px;color:var(--text-secondary);margin-bottom:16px}
+.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.modal-card .form-group input[type="password"]{width:100%}
 </style>
 </head>
 <body>
@@ -162,6 +170,7 @@ tr:hover{background:var(--bg)}
           <input type="number" id="rechargeAmount" placeholder="积分数量" step="1">
           <input type="text" id="rechargeDesc" placeholder="备注（可选）" value="管理员手动加积分" style="width:200px">
           <button class="btn btn-success btn-sm" onclick="doAddCredits()">充值</button>
+          <button class="btn btn-outline btn-sm" onclick="openResetPassword()" style="margin-left:8px">重置密码</button>
         </div>
       </div>
       <div class="card">
@@ -237,6 +246,27 @@ tr:hover{background:var(--bg)}
       <div class="chart-card"><h3>能力调用排行</h3><div id="chartCapRanking"></div></div>
     </div>
     <div class="chart-card"><h3>积分消耗 TOP 10 用户</h3><div id="chartTopConsumers"></div></div>
+  </div>
+</div>
+
+<!-- 重置密码弹窗 -->
+<div class="modal-mask" id="resetPwdModal" onclick="if(event.target===this)closeResetPassword()">
+  <div class="modal-card">
+    <h3>重置用户密码</h3>
+    <div class="modal-sub" id="resetPwdSub">将为该用户设置一个新的登录密码（6～128 位）。</div>
+    <div class="form-group">
+      <label>新密码</label>
+      <input type="password" id="resetPwdNew" autocomplete="new-password" placeholder="至少 6 位">
+    </div>
+    <div class="form-group">
+      <label>确认密码</label>
+      <input type="password" id="resetPwdConfirm" autocomplete="new-password" placeholder="再次输入新密码">
+    </div>
+    <div class="error-msg" id="resetPwdError" style="text-align:left;min-height:18px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline btn-sm" onclick="closeResetPassword()">取消</button>
+      <button class="btn btn-primary btn-sm" id="resetPwdSubmit" onclick="doResetPassword()" style="width:auto">确认重置</button>
+    </div>
   </div>
 </div>
 
@@ -442,6 +472,52 @@ async function doAddCredits() {
   } catch(e) { toast(e.message, 'error'); }
 }
 
+function openResetPassword() {
+  if (!currentUserId) { toast('请先选择用户', 'error'); return; }
+  const sub = document.getElementById('resetPwdSub');
+  const card = document.getElementById('userDetailCard');
+  const emailNode = card ? card.querySelector('.stat-item:nth-child(2) .value') : null;
+  const tip = emailNode ? emailNode.textContent.trim() : ('用户 #' + currentUserId);
+  sub.innerHTML = '将为 <strong>' + tip + '</strong> 设置新的登录密码（6～128 位）。';
+  document.getElementById('resetPwdNew').value = '';
+  document.getElementById('resetPwdConfirm').value = '';
+  document.getElementById('resetPwdError').textContent = '';
+  document.getElementById('resetPwdModal').classList.add('show');
+  setTimeout(() => document.getElementById('resetPwdNew').focus(), 50);
+}
+
+function closeResetPassword() {
+  document.getElementById('resetPwdModal').classList.remove('show');
+}
+
+async function doResetPassword() {
+  if (!currentUserId) return;
+  const np = document.getElementById('resetPwdNew').value;
+  const cp = document.getElementById('resetPwdConfirm').value;
+  const err = document.getElementById('resetPwdError');
+  err.textContent = '';
+  if (!np || np.length < 6) { err.textContent = '密码至少 6 位'; return; }
+  if (np.length > 128) { err.textContent = '密码长度不能超过 128 位'; return; }
+  if (np !== cp) { err.textContent = '两次输入的密码不一致'; return; }
+  const btn = document.getElementById('resetPwdSubmit');
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '提交中…';
+  try {
+    const data = await api('/admin/api/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: currentUserId, new_password: np })
+    });
+    closeResetPassword();
+    toast('密码已重置：' + (data.email || ('#' + data.user_id)));
+  } catch(e) {
+    err.textContent = e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
+}
+
 async function loadSkillVisibility(userId) {
   const section = document.getElementById('skillVisibilitySection');
   try {
@@ -478,6 +554,10 @@ async function toggleSkillVisibility(userId, pkgId, checked) {
 }
 
 document.getElementById('loginPass').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+document.getElementById('resetPwdConfirm').addEventListener('keydown', e => { if(e.key==='Enter') doResetPassword(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.getElementById('resetPwdModal').classList.contains('show')) closeResetPassword();
+});
 
 let statsCache = null;
 async function loadStats() {
