@@ -57,6 +57,7 @@ DEFAULT_VISIBLE_PACKAGES: tuple[str, ...] = (
     "openclaw_weixin_channel",
     "media_edit_skill",
     "tikhub_explorer",
+    "xhs_competitor",
 )
 
 
