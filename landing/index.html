@@ -689,22 +689,22 @@
     <div class="pay-stage" id="stageSuccess" style="display: none;">
       <div class="success-icon">✓</div>
       <h3 style="color: var(--success);">支付成功</h3>
-      <p style="color: var(--text-muted); margin-bottom: 1.4rem;">感谢支持 INSclaw！下载链接已生成，7 天内有效。</p>
-      <div class="dl-row">
-        <a href="#" id="downloadLink" class="btn btn-primary btn-lg" download>⬇ 立即下载安装包</a>
-        <button type="button" class="btn btn-ghost btn-lg" id="copyLinkBtn">复制下载链接</button>
+      <p style="color: var(--text-muted); margin-bottom: 1.4rem;">感谢支持 INSclaw！请按需下载（7 天内有效，可重复下载 ≤ 20 次）。</p>
+      <div class="dl-row" id="downloadList">
+        <!-- JS 动态填充：完整版 / 轻量版 -->
       </div>
       <div class="dl-meta">
         <div><b>订单号</b> <code id="successOrderNo">-</code></div>
-        <div><b>有效期</b> 7 天，可下载次数 ≤ 10</div>
+        <div><b>有效期</b> 7 天</div>
       </div>
       <div class="dl-tip">
         <p><b>下一步：</b></p>
         <ol style="margin-left: 1.2rem; color: var(--text-muted); font-size: 0.86rem; line-height: 1.8;">
           <li>下载完毕后双击 zip 解压到任意目录（建议非系统盘）</li>
-          <li>首次使用：双击 <code>install.bat</code> 完成环境检查</li>
+          <li>完整版双击 <code>install.bat</code> ；轻量版双击 <code>install_slim.bat</code> 完成依赖安装</li>
           <li>桌面"INSclaw"图标双击启动，扫码登录即可使用</li>
         </ol>
+        <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.6rem;">遇到问题点右下角悬浮按钮联系客服。</p>
       </div>
     </div>
 
@@ -968,22 +968,37 @@
   function onPaid(orderInfo) {
     showStage('success');
     document.getElementById('successOrderNo').textContent = orderInfo.out_trade_no || '-';
-    var dl = document.getElementById('downloadLink');
-    dl.href = orderInfo.download_url || '#';
-    // 自动复制功能
-    document.getElementById('copyLinkBtn').onclick = function () {
-      var url = location.origin + (orderInfo.download_url || '');
-      if (navigator.clipboard) {
-        navigator.clipboard.writeText(url).then(function () {
-          var btn = document.getElementById('copyLinkBtn');
-          var orig = btn.textContent;
-          btn.textContent = '✓ 已复制';
-          setTimeout(function () { btn.textContent = orig; }, 1500);
-        });
-      } else {
-        window.prompt('复制下方链接：', url);
-      }
-    };
+    var listEl = document.getElementById('downloadList');
+    var downloads = (orderInfo.downloads && orderInfo.downloads.length)
+      ? orderInfo.downloads
+      : (orderInfo.download_url ? [{ kind: 'full', label: '安装包', url: orderInfo.download_url }] : []);
+    listEl.innerHTML = '';
+    downloads.forEach(function (d, idx) {
+      var row = document.createElement('div');
+      row.style.cssText = 'display:flex;flex-direction:column;gap:6px;padding:0.75rem 0.9rem;background:rgba(255,255,255,0.04);border:1px solid var(--border);border-radius:var(--radius-sm);';
+      var btnClass = idx === 0 ? 'btn btn-primary' : 'btn btn-ghost';
+      row.innerHTML =
+        '<div style="font-size:0.82rem;color:var(--text-muted);">' + (d.label || d.kind) + '</div>'
+        + '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">'
+        +   '<a href="' + d.url + '" class="' + btnClass + '" download style="flex:1;min-width:140px;justify-content:center;">⬇ 下载</a>'
+        +   '<button type="button" class="btn btn-ghost copy-btn" data-url="' + d.url + '">复制链接</button>'
+        + '</div>';
+      listEl.appendChild(row);
+    });
+    listEl.querySelectorAll('.copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var url = location.origin + (btn.getAttribute('data-url') || '');
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(url).then(function () {
+            var orig = btn.textContent;
+            btn.textContent = '✓ 已复制';
+            setTimeout(function () { btn.textContent = orig; }, 1500);
+          });
+        } else {
+          window.prompt('复制下方链接：', url);
+        }
+      });
+    });
   }
 </script>
 

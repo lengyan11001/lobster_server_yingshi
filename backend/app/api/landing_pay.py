@@ -45,15 +45,27 @@ _BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 _PRIVATE_DIR = _BASE_DIR / "landing_private"
 _PRIVATE_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── 产品配置：单品 99 元 INSclaw 完整版 ──────────────────────────────────
-# 文件名映射在 _PRIVATE_DIR 下；只要把对应的 .zip 放到该目录即可。
+# ── 产品配置：单品 99 元 INSclaw（购买后可下载 完整 + 轻量 两个版本）─────
+# 文件放在 _PRIVATE_DIR 下；只要把对应的 .zip 放到该目录即可。
 PRODUCTS: Dict[str, Dict[str, Any]] = {
     "insclaw_full": {
-        "name": "INSclaw · Windows 完整安装包",
+        "name": "INSclaw · Windows 安装包",
         "price_fen": 9900,  # ¥99
+        "description": "购买后即可下载完整版（含 Chromium / Node / Python 运行时，约 3GB，开箱即用）或轻量版（约 220MB，本机有 Python/Node 时联网装依赖）。",
+    },
+}
+
+# 一笔订单可下载两种安装包（完整 / 轻量），对应 _PRIVATE_DIR 下的实际 zip 文件名
+INSCLAW_FILE_VARIANTS: Dict[str, Dict[str, str]] = {
+    "full": {
         "filename": "INSclaw-Setup-Windows-x64.zip",
         "download_filename": "INSclaw-Setup-Windows-x64.zip",
-        "description": "含 Chromium / Node / Python 运行时，约 1GB，开箱即用。",
+        "label": "完整版（约 3GB · 含运行时·开箱即用）",
+    },
+    "slim": {
+        "filename": "INSclaw-Slim-Windows-x64.zip",
+        "download_filename": "INSclaw-Slim-Windows-x64.zip",
+        "label": "轻量版（约 220MB · 联网装依赖·适合开发者）",
     },
 }
 
@@ -335,8 +347,12 @@ async def landing_wechat_notify(request: Request, db: Session = Depends(get_db))
     return PlainTextResponse("success")
 
 
-@router.get("/api/landing/download", summary="凭 download_token 下载安装包")
-def landing_download(token: str = Query(..., min_length=8, max_length=64), db: Session = Depends(get_db)):
+@router.get("/api/landing/download", summary="凭 download_token 下载安装包（kind=full|slim）")
+def landing_download(
+    token: str = Query(..., min_length=8, max_length=64),
+    kind: str = Query("full", pattern="^(full|slim)$"),
+    db: Session = Depends(get_db),
+):
     token = (token or "").strip()
     order = db.query(LandingOrder).filter(LandingOrder.download_token == token).first()
     if not order:
@@ -346,24 +362,25 @@ def landing_download(token: str = Query(..., min_length=8, max_length=64), db: S
     now = datetime.utcnow()
     if order.download_token_expires_at and now > order.download_token_expires_at:
         raise HTTPException(status_code=410, detail="下载凭证已过期，请联系客服")
-    if order.download_count >= 10:
+    if order.download_count >= 20:
         raise HTTPException(status_code=429, detail="下载次数已达上限，请联系客服")
-    product = PRODUCTS.get(order.product_id)
-    if not product:
-        raise HTTPException(status_code=500, detail="商品配置丢失，请联系客服")
-    file_path = _PRIVATE_DIR / product["filename"]
+
+    variant = INSCLAW_FILE_VARIANTS.get(kind)
+    if not variant:
+        raise HTTPException(status_code=400, detail=f"未知的下载类型: {kind}")
+    file_path = _PRIVATE_DIR / variant["filename"]
     if not file_path.is_file():
-        logger.error("landing download missing file: %s (order=%s)", file_path, order.out_trade_no)
+        logger.error("landing download missing file: %s (order=%s, kind=%s)", file_path, order.out_trade_no, kind)
         raise HTTPException(
             status_code=503,
-            detail="安装包文件未就绪，请联系客服（管理员需把对应 zip 放到 landing/_private/）",
+            detail=f"{variant['label']} 暂未就绪，请联系客服或换另一个版本",
         )
     order.download_count = (order.download_count or 0) + 1
     db.commit()
     return FileResponse(
         path=str(file_path),
         media_type="application/zip",
-        filename=product.get("download_filename") or product["filename"],
+        filename=variant["download_filename"],
     )
 
 
@@ -411,12 +428,23 @@ def _mark_order_paid(
 
 
 def _order_to_paid_response(order: LandingOrder) -> Dict[str, Any]:
+    downloads = []
+    if order.download_token:
+        for kind, variant in INSCLAW_FILE_VARIANTS.items():
+            downloads.append({
+                "kind": kind,
+                "label": variant["label"],
+                "url": f"/api/landing/download?token={order.download_token}&kind={kind}",
+                "filename": variant["download_filename"],
+            })
     return {
         "status": "paid",
         "out_trade_no": order.out_trade_no,
         "product_id": order.product_id,
         "amount_fen": order.amount_fen,
         "download_token": order.download_token,
-        "download_url": f"/api/landing/download?token={order.download_token}" if order.download_token else None,
+        "downloads": downloads,
+        # 兼容旧前端：默认指向 full 版
+        "download_url": f"/api/landing/download?token={order.download_token}&kind=full" if order.download_token else None,
         "download_expires_at": order.download_token_expires_at.isoformat() if order.download_token_expires_at else None,
     }
