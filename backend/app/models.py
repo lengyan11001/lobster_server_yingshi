@@ -24,7 +24,7 @@ class User(Base):
     sutui_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     """自建微信登录：开放平台 openid，用于扫码登录关联用户。"""
     wechat_openid: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
-    """注册时客户端所在安装包的品牌标记（与 LOBSTER_BRAND_MARK / brands.json 的 marks 键一致，如 bihuo、yingshi）。"""
+    """注册时客户端所在安装包的品牌标记（与 LOBSTER_BRAND_MARK / brands.json 的 marks 键一致，默认 yingshi；兼容 bihuo）。"""
     brand_mark: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     """企业微信消息回调 FromUserName（成员 userid 等），与站内账号绑定后用于渠道侧扣费。"""
     wecom_userid: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, unique=True, index=True)
