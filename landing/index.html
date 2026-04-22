@@ -680,7 +680,7 @@
         <div id="payCountdown"></div>
       </div>
       <div class="pay-tip">
-        <p>· 支付完成会自动弹出下载链接，无需手动刷新</p>
+        <p>· 支付完成会自动弹出下载链接；刷新页面后同一浏览器内仍会显示下载入口</p>
         <p>· 二维码 2 小时内有效；遇到异常请联系客服 hi@51ins.com</p>
       </div>
     </div>
@@ -877,6 +877,14 @@
   var POLL_TIMER = null;
   var COUNTDOWN_TIMER = null;
   var CURRENT_ORDER = null;
+  /** 同一浏览器内刷新后仍可凭订单号拉取已支付下载链接（见 restorePaidLandingAfterRefresh） */
+  var LANDING_ORDER_SSKEY = 'insclaw_landing_out_trade_no';
+  function persistLandingOutTradeNo(no) {
+    try { if (no) sessionStorage.setItem(LANDING_ORDER_SSKEY, String(no)); } catch (e) {}
+  }
+  function clearLandingOutTradeNo() {
+    try { sessionStorage.removeItem(LANDING_ORDER_SSKEY); } catch (e) {}
+  }
 
   document.getElementById('buyBtn').addEventListener('click', function () {
     showStage('pay');
@@ -900,6 +908,7 @@
           throw new Error((res.data && res.data.detail) || ('HTTP ' + res.status));
         }
         CURRENT_ORDER = res.data;
+        persistLandingOutTradeNo(res.data.out_trade_no);
         document.getElementById('payOrderNo').textContent = res.data.out_trade_no;
         var img = document.getElementById('qrImg');
         img.src = '/api/landing/qr-png?data=' + encodeURIComponent(res.data.code_url);
@@ -1000,6 +1009,29 @@
       });
     });
   }
+
+  // 支付成功后用户若刷新落地页，仅靠内存会丢下载区；后端 order-status 对已付款单会返回 downloads
+  function restorePaidLandingAfterRefresh() {
+    var saved = '';
+    try { saved = (sessionStorage.getItem(LANDING_ORDER_SSKEY) || '').trim(); } catch (e) { return; }
+    if (!saved || saved.length < 8) return;
+    fetch('/api/landing/order-status?out_trade_no=' + encodeURIComponent(saved), { credentials: 'omit' })
+      .then(function (r) {
+        if (r.status === 404) {
+          clearLandingOutTradeNo();
+          return null;
+        }
+        return r.ok ? r.json() : null;
+      })
+      .then(function (d) {
+        if (!d || d.status !== 'paid') return;
+        CURRENT_ORDER = d;
+        showModal();
+        onPaid(d);
+      })
+      .catch(function () { /* 忽略 */ });
+  }
+  restorePaidLandingAfterRefresh();
 </script>
 
 <!-- 旧的下载按钮脚本里 a[href="#download"] 高亮逻辑改为高亮购买按钮 -->
