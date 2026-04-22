@@ -53,6 +53,11 @@ DEFAULT_VISIBLE_PACKAGES: tuple[str, ...] = (
     "sutui_mcp",
     "douyin_publish",
     "toutiao_publish",
+    "youtube_publish",
+    "twilio_whatsapp",
+    "openclaw_weixin_channel",
+    "wecom_reply",
+    "xhs_competitor",
 )
 
 
