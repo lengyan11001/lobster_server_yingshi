@@ -82,11 +82,11 @@
     },
     "media_edit_skill": {
       "name": "素材剪辑",
-      "description": "对素材库视频/图片做叠字、裁剪、画幅、静音、配乐、静图转视频、抽帧；需本机已安装 ffmpeg。1000 积分解锁后可在对话中用自然语言描述剪辑意图（须给出可解析参数）。",
+      "description": "对素材库视频/图片做叠字、裁剪、画幅、静音、配乐、静图转视频、抽帧；需本机已安装 ffmpeg。在对话中用自然语言描述剪辑意图即可调用。",
       "type": "builtin",
-      "store_visibility": "debug",
-      "unlock_price_credits": 1000,
+      "store_visibility": "popular",
       "status": "available",
+      "default_installed": true,
       "capabilities": {
         "media.edit": {
           "description": "本地素材剪辑（invoke_capability capability_id=media.edit）",
