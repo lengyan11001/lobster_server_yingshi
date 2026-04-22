@@ -51,13 +51,8 @@ def _skill_store_admin(user: User) -> bool:
 
 DEFAULT_VISIBLE_PACKAGES: tuple[str, ...] = (
     "sutui_mcp",
-    "xiaohongshu_publish",
     "douyin_publish",
     "toutiao_publish",
-    "openclaw_weixin_channel",
-    "media_edit_skill",
-    "tikhub_explorer",
-    "xhs_competitor",
 )
 
 
