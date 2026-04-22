@@ -654,7 +654,7 @@
           <button type="button" class="btn btn-primary btn-lg buy-btn" id="buyBtn">立即购买 ¥<span id="buyBtnPrice">99</span></button>
           <div class="price-hint">微信扫码支付 · 付款后即刻获取下载链接</div>
           <p id="landingDebugHint" class="landing-debug-hint" style="display: none;" role="status">
-            调试模式：将发起 <b>¥0.01</b> 微信支付（需服务器开启 <code>LANDING_DEBUG_PAY_*</code> 且 URL 含三参数）。
+            调试模式：将发起 <b>¥0.01</b> 微信支付（需服务器 <code>LANDING_DEBUG_PAY_ENABLED=true</code> 且 URL 含 <code>ins_debug=1&amp;ins_pay_test=1</code>）。
           </p>
         </div>
       </div>
@@ -847,9 +847,8 @@
       var p = new URLSearchParams(window.location.search);
       var a = (p.get('ins_debug') || '').trim();
       var b = (p.get('ins_pay_test') || '').trim();
-      var c = (p.get('ins_ck') || '').trim();
-      if (a === '1' && b === '1' && c.length >= 8) {
-        return { ins_debug: a, ins_pay_test: b, ins_ck: c };
+      if (a === '1' && b === '1') {
+        return { ins_debug: a, ins_pay_test: b };
       }
     } catch (e) {}
     return null;
@@ -858,14 +857,12 @@
   function landingProductsQuerySuffix() {
     if (!LANDING_DEBUG_PARAMS) return '';
     return '?ins_debug=' + encodeURIComponent(LANDING_DEBUG_PARAMS.ins_debug)
-      + '&ins_pay_test=' + encodeURIComponent(LANDING_DEBUG_PARAMS.ins_pay_test)
-      + '&ins_ck=' + encodeURIComponent(LANDING_DEBUG_PARAMS.ins_ck);
+      + '&ins_pay_test=' + encodeURIComponent(LANDING_DEBUG_PARAMS.ins_pay_test);
   }
   function landingDebugOrderBodyBase() {
     return LANDING_DEBUG_PARAMS ? {
       ins_debug: LANDING_DEBUG_PARAMS.ins_debug,
       ins_pay_test: LANDING_DEBUG_PARAMS.ins_pay_test,
-      ins_ck: LANDING_DEBUG_PARAMS.ins_ck,
     } : {};
   }
 
