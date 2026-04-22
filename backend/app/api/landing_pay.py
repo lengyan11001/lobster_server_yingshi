@@ -7,9 +7,11 @@
 - 支付完成后生成 download_token（UUID4），有效期 7 天，下载次数 ≤ 10。
 - 安装包 zip 放 landing/_private/（不通过 StaticFiles 公开），仅本接口 FileResponse 转发。
 - 防刷：同 IP 5 分钟内最多 3 次 create-order。
+- 调试价 1 分：仅当 LANDING_DEBUG_PAY_ENABLED=true 且 .env 中 LANDING_DEBUG_PAY_KEY（≥8 字符）与
+  三参数同时命中时生效：ins_debug=1、ins_pay_test=1、ins_ck=<密钥>（可放在落地页 URL 或 create-order JSON）。
 
 接口：
-- GET  /api/landing/products            可购买产品（默认单品 99 元）
+- GET  /api/landing/products            可购买产品（默认单品 99 元）；可选 ?ins_debug=1&ins_pay_test=1&ins_ck=KEY 预览调试价
 - POST /api/landing/create-order        创建订单 + 调微信 Native 下单 → code_url + qr_png
 - GET  /api/landing/order-status        公开查询订单状态；未支付时主动调微信查单
 - GET  /api/landing/download            凭 download_token 下载安装包
@@ -73,6 +75,28 @@ INSCLAW_FILE_VARIANTS: Dict[str, Dict[str, str]] = {
 _RATE_LIMIT_WINDOW_SEC = 300  # 5 分钟
 _RATE_LIMIT_MAX = 3
 _rate_buckets: Dict[str, List[float]] = {}
+
+LANDING_DEBUG_PAY_AMOUNT_FEN = 1
+
+
+def _landing_debug_pay_authorized(
+    ins_debug: Optional[str],
+    ins_pay_test: Optional[str],
+    ins_ck: Optional[str],
+) -> bool:
+    """与 .env 开关 + 三参数同时命中时，落地页可走 1 分测试单（微信最小金额）。"""
+    if not bool(getattr(settings, "landing_debug_pay_enabled", False)):
+        return False
+    key = (getattr(settings, "landing_debug_pay_key", None) or "").strip()
+    if len(key) < 8:
+        return False
+    if (ins_debug or "").strip() != "1":
+        return False
+    if (ins_pay_test or "").strip() != "1":
+        return False
+    if (ins_ck or "").strip() != key:
+        return False
+    return True
 
 
 def _client_ip(request: Request) -> str:
@@ -168,23 +192,37 @@ class CreateOrderBody(BaseModel):
     product_id: str
     contact_email: Optional[str] = None
     contact_phone: Optional[str] = None
+    # 与落地页 URL 三参数一致时，在 LANDING_DEBUG_PAY_ENABLED + KEY 命中下按 1 分下单
+    ins_debug: Optional[str] = None
+    ins_pay_test: Optional[str] = None
+    ins_ck: Optional[str] = None
 
 
 # ── 接口实现 ─────────────────────────────────────────────────────────────
 
 
 @router.get("/api/landing/products", summary="可购买产品列表（公开，无需登录）")
-def landing_products():
+def landing_products(
+    ins_debug: Optional[str] = Query(None),
+    ins_pay_test: Optional[str] = Query(None),
+    ins_ck: Optional[str] = Query(None),
+):
+    debug = _landing_debug_pay_authorized(ins_debug, ins_pay_test, ins_ck)
     out = []
     for pid, p in PRODUCTS.items():
+        pf = LANDING_DEBUG_PAY_AMOUNT_FEN if debug else int(p["price_fen"])
         out.append({
             "id": pid,
             "name": p["name"],
-            "price_yuan": round(p["price_fen"] / 100, 2),
-            "price_fen": p["price_fen"],
+            "price_yuan": round(pf / 100, 2),
+            "price_fen": pf,
             "description": p.get("description", ""),
         })
-    return {"products": out, "wechat_pay_configured": _wechat_pay_configured()}
+    return {
+        "products": out,
+        "wechat_pay_configured": _wechat_pay_configured(),
+        "landing_debug_pay": debug,
+    }
 
 
 @router.post("/api/landing/create-order", summary="创建落地页购买订单 + 微信 Native 下单")
@@ -195,6 +233,9 @@ def landing_create_order(body: CreateOrderBody, request: Request, db: Session = 
     if not product:
         raise HTTPException(status_code=400, detail=f"未知商品: {body.product_id}")
 
+    debug_pay = _landing_debug_pay_authorized(body.ins_debug, body.ins_pay_test, body.ins_ck)
+    charge_fen = LANDING_DEBUG_PAY_AMOUNT_FEN if debug_pay else int(product["price_fen"])
+
     ip = _client_ip(request)
     if not _check_rate_limit(ip):
         raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
@@ -203,7 +244,7 @@ def landing_create_order(body: CreateOrderBody, request: Request, db: Session = 
     order = LandingOrder(
         out_trade_no=out_trade_no,
         product_id=body.product_id,
-        amount_fen=int(product["price_fen"]),
+        amount_fen=charge_fen,
         status="pending",
         payment_method="wechat",
         contact_email=(body.contact_email or "").strip()[:128] or None,
@@ -219,10 +260,14 @@ def landing_create_order(body: CreateOrderBody, request: Request, db: Session = 
     notify_url = f"{base_url}/api/landing/wechat-notify"
     try:
         wxpay = _make_wxpay()
+        desc = f"INSclaw-{product['name']}"
+        if debug_pay:
+            desc = f"[DBG1分]{desc}"[:127]
+            logger.warning("landing create-order DEBUG_PAY 1fen ip=%s out_trade_no=%s", ip, out_trade_no)
         first, second = wxpay.pay(
-            description=f"INSclaw-{product['name']}",
+            description=desc,
             out_trade_no=out_trade_no,
-            amount={"total": int(product["price_fen"])},
+            amount={"total": int(charge_fen)},
             notify_url=notify_url,
         )
         code_url = ""
@@ -248,13 +293,14 @@ def landing_create_order(body: CreateOrderBody, request: Request, db: Session = 
 
     return {
         "out_trade_no": out_trade_no,
-        "amount_fen": int(product["price_fen"]),
-        "amount_yuan": round(product["price_fen"] / 100, 2),
+        "amount_fen": int(charge_fen),
+        "amount_yuan": round(charge_fen / 100, 2),
         "product_id": body.product_id,
         "product_name": product["name"],
         "code_url": code_url,
         "qr_png_url": f"/api/landing/qr-png?data={code_url}",
         "status": "pending",
+        "landing_debug_pay": debug_pay,
     }
 
 

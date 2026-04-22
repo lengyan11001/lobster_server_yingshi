@@ -653,6 +653,9 @@
           <div class="price-unit">一次性购买 / 永久授权</div>
           <button type="button" class="btn btn-primary btn-lg buy-btn" id="buyBtn">立即购买 ¥<span id="buyBtnPrice">99</span></button>
           <div class="price-hint">微信扫码支付 · 付款后即刻获取下载链接</div>
+          <p id="landingDebugHint" class="landing-debug-hint" style="display: none;" role="status">
+            调试模式：将发起 <b>¥0.01</b> 微信支付（需服务器开启 <code>LANDING_DEBUG_PAY_*</code> 且 URL 含三参数）。
+          </p>
         </div>
       </div>
     </div>
@@ -751,6 +754,10 @@
   .price-unit { font-size: 0.78rem; color: var(--text-muted); }
   .buy-btn { min-width: 200px; }
   .price-hint { font-size: 0.72rem; color: var(--text-dim); margin-top: 0.2rem; }
+  .landing-debug-hint { margin-top: 0.75rem; padding: 0.55rem 0.75rem; border-radius: var(--radius-sm);
+    border: 1px dashed rgba(250, 204, 21, 0.55); background: rgba(250, 204, 21, 0.08); color: #fbbf24;
+    font-size: 0.8rem; text-align: center; line-height: 1.45; }
+  .landing-debug-hint code { font-size: 0.72rem; color: #fde68a; }
 
   /* Modal */
   .modal-mask {
@@ -835,7 +842,34 @@
   // ── 商品配置：从后端 /api/landing/products 拉取，失败时回退到默认 ──
   let CURRENT_PRODUCT = { id: 'insclaw_full', name: 'INSclaw · Windows 完整安装包', price_yuan: 99 };
 
-  fetch('/api/landing/products', { credentials: 'omit' })
+  function getLandingDebugParamsFromUrl() {
+    try {
+      var p = new URLSearchParams(window.location.search);
+      var a = (p.get('ins_debug') || '').trim();
+      var b = (p.get('ins_pay_test') || '').trim();
+      var c = (p.get('ins_ck') || '').trim();
+      if (a === '1' && b === '1' && c.length >= 8) {
+        return { ins_debug: a, ins_pay_test: b, ins_ck: c };
+      }
+    } catch (e) {}
+    return null;
+  }
+  var LANDING_DEBUG_PARAMS = getLandingDebugParamsFromUrl();
+  function landingProductsQuerySuffix() {
+    if (!LANDING_DEBUG_PARAMS) return '';
+    return '?ins_debug=' + encodeURIComponent(LANDING_DEBUG_PARAMS.ins_debug)
+      + '&ins_pay_test=' + encodeURIComponent(LANDING_DEBUG_PARAMS.ins_pay_test)
+      + '&ins_ck=' + encodeURIComponent(LANDING_DEBUG_PARAMS.ins_ck);
+  }
+  function landingDebugOrderBodyBase() {
+    return LANDING_DEBUG_PARAMS ? {
+      ins_debug: LANDING_DEBUG_PARAMS.ins_debug,
+      ins_pay_test: LANDING_DEBUG_PARAMS.ins_pay_test,
+      ins_ck: LANDING_DEBUG_PARAMS.ins_ck,
+    } : {};
+  }
+
+  fetch('/api/landing/products' + landingProductsQuerySuffix(), { credentials: 'omit' })
     .then(function (r) { return r.ok ? r.json() : null; })
     .then(function (d) {
       if (!d || !Array.isArray(d.products) || !d.products.length) return;
@@ -847,6 +881,8 @@
       document.getElementById('buyBtnPrice').textContent = String(p.price_yuan);
       document.getElementById('payAmountText').textContent = String(p.price_yuan);
       document.getElementById('payProductText').textContent = p.name;
+      var dbgHint = document.getElementById('landingDebugHint');
+      if (dbgHint) dbgHint.style.display = (d && d.landing_debug_pay) ? 'block' : 'none';
     })
     .catch(function () { /* 用默认值 */ });
 
@@ -898,7 +934,7 @@
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'omit',
-      body: JSON.stringify({ product_id: CURRENT_PRODUCT.id }),
+      body: JSON.stringify(Object.assign({ product_id: CURRENT_PRODUCT.id }, landingDebugOrderBodyBase())),
     })
       .then(function (r) {
         return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; });
@@ -910,6 +946,9 @@
         CURRENT_ORDER = res.data;
         persistLandingOutTradeNo(res.data.out_trade_no);
         document.getElementById('payOrderNo').textContent = res.data.out_trade_no;
+        if (res.data.amount_yuan != null) {
+          document.getElementById('payAmountText').textContent = String(res.data.amount_yuan);
+        }
         var img = document.getElementById('qrImg');
         img.src = '/api/landing/qr-png?data=' + encodeURIComponent(res.data.code_url);
         img.onload = function () {
