@@ -386,6 +386,8 @@
       "store_visibility": "online",
       "default_installed": true,
       "status": "available",
+      "workspace": "tikhub-explorer",
+      "workspace_color": "rgba(59,130,246,0.35)",
       "capabilities": {},
       "tags": ["data", "tikhub", "douyin", "tiktok", "xhs", "zhihu", "youtube", "bilibili"]
     },
@@ -396,6 +398,8 @@
       "store_visibility": "online",
       "default_installed": true,
       "status": "available",
+      "workspace": "xhs-competitor",
+      "workspace_color": "rgba(239,68,68,0.35)",
       "capabilities": {},
       "tags": ["data", "xiaohongshu", "competitor", "tracking", "comments", "tikhub"]
     }

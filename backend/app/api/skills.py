@@ -236,6 +236,10 @@ def list_store(current_user: User = Depends(get_current_user), db: Session = Dep
             "default_installed": pkg.get("default_installed"),
             "unlocked": pkg_id in unlocked,
         }
+        if pkg.get("workspace"):
+            entry["workspace"] = pkg["workspace"]
+        if pkg.get("workspace_color"):
+            entry["workspace_color"] = pkg["workspace_color"]
         pc = pkg.get("package_config")
         if isinstance(pc, dict):
             entry["package_config"] = pc
