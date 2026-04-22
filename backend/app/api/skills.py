@@ -62,18 +62,12 @@ DEFAULT_VISIBLE_PACKAGES: tuple[str, ...] = (
 
 
 def _ensure_user_visibility_seeded(db: Session, user_id: int) -> None:
-    """确保用户的可见技能记录至少包含 DEFAULT_VISIBLE_PACKAGES：
-    - 新用户：种入全部默认；
-    - 老用户（已有部分可见）：补齐 DEFAULT 中缺失的项，不影响用户自己关闭过的其它包。
-    """
-    existing = {
-        r[0] for r in db.query(UserSkillVisibility.package_id)
-        .filter(UserSkillVisibility.user_id == user_id).all()
-    }
-    missing = [p for p in DEFAULT_VISIBLE_PACKAGES if p not in existing]
-    if not missing:
+    """新用户首次访问时种入 DEFAULT_VISIBLE_PACKAGES；已有任何记录的用户不再补齐，
+    避免管理员移除后被自动加回。新增默认包需通过管理后台或脚本单独推送。"""
+    count = db.query(UserSkillVisibility).filter(UserSkillVisibility.user_id == user_id).count()
+    if count > 0:
         return
-    for pkg_id in missing:
+    for pkg_id in DEFAULT_VISIBLE_PACKAGES:
         db.add(UserSkillVisibility(user_id=user_id, package_id=pkg_id))
     db.commit()
 
