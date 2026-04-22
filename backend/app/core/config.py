@@ -91,8 +91,6 @@ class Settings(BaseSettings):
     wechat_pay_public_key_path: Optional[str] = None
     """微信支付公钥模式：公钥ID（形如 PUB_KEY_ID_011736889298...），勿与 APIv3 密钥混淆"""
     wechat_pay_public_key_id: Optional[str] = None
-    """INSclaw 落地页：为 true 且请求带 ins_debug=1&ins_pay_test=1 时微信下单 1 分（临时联调，测完请改回 false）。"""
-    landing_debug_pay_enabled: bool = False
     # ── 付呗聚合支付（替代自建微信支付）──
     """付呗商户开放平台 API ID"""
     fubei_app_id: Optional[str] = None
