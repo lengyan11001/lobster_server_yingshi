@@ -392,8 +392,8 @@
       "tags": ["data", "tikhub", "douyin", "tiktok", "xhs", "zhihu", "youtube", "bilibili"]
     },
     "xhs_competitor": {
-      "name": "小红书同行",
-      "description": "跟踪同行账号 + 关键词监测，自动同步笔记与评论入库；按需翻页、按次扣积分。基于 TikHub 多平台数据接口，无需单独配置 Token。",
+      "name": "多平台同行",
+      "description": "跟踪同行账号 + 关键词监测，自动同步笔记与评论入库；支持小红书、抖音、快手；按需翻页、按次扣积分。基于 TikHub 多平台数据接口，无需单独配置 Token。",
       "type": "builtin",
       "store_visibility": "online",
       "default_installed": true,
