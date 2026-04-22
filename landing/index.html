@@ -912,14 +912,58 @@
   var CURRENT_ORDER = null;
   /** 同一浏览器内刷新后仍可凭订单号拉取已支付下载链接（见 restorePaidLandingAfterRefresh） */
   var LANDING_ORDER_SSKEY = 'insclaw_landing_out_trade_no';
+  /** 一旦支付成功，持久化成功单；后续不再展示充值入口，只保留下载入口 */
+  var LANDING_PAID_ORDER_SSKEY = 'insclaw_landing_paid_order';
   function persistLandingOutTradeNo(no) {
     try { if (no) sessionStorage.setItem(LANDING_ORDER_SSKEY, String(no)); } catch (e) {}
   }
   function clearLandingOutTradeNo() {
     try { sessionStorage.removeItem(LANDING_ORDER_SSKEY); } catch (e) {}
   }
+  function persistLandingPaidOrder(orderInfo) {
+    try {
+      if (!orderInfo || !orderInfo.out_trade_no) return;
+      sessionStorage.setItem(LANDING_PAID_ORDER_SSKEY, JSON.stringify(orderInfo));
+    } catch (e) {}
+  }
+  function loadLandingPaidOrder() {
+    try {
+      var raw = sessionStorage.getItem(LANDING_PAID_ORDER_SSKEY) || '';
+      if (!raw) return null;
+      var parsed = JSON.parse(raw);
+      return (parsed && parsed.out_trade_no) ? parsed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  function applyPaidModeUi() {
+    var buyBtn = document.getElementById('buyBtn');
+    if (buyBtn) {
+      buyBtn.textContent = '查看下载链接';
+    }
+    document.querySelectorAll('a[href="#download"]').forEach(function (a) {
+      a.textContent = '查看下载';
+      a.setAttribute('href', 'javascript:void(0)');
+      a.onclick = function (e) {
+        e.preventDefault();
+        var paid = loadLandingPaidOrder();
+        if (paid) {
+          showModal();
+          onPaid(paid);
+        }
+      };
+    });
+    var hint = document.querySelector('.price-hint');
+    if (hint) hint.textContent = '已支付用户：点击“查看下载”获取安装包链接';
+  }
 
   document.getElementById('buyBtn').addEventListener('click', function () {
+    var paidOrder = loadLandingPaidOrder();
+    if (paidOrder) {
+      showModal();
+      onPaid(paidOrder);
+      return;
+    }
     showStage('pay');
     document.getElementById('qrLoading').style.display = '';
     document.getElementById('qrImg').style.display = 'none';
@@ -1011,6 +1055,8 @@
   }
 
   function onPaid(orderInfo) {
+    persistLandingPaidOrder(orderInfo);
+    applyPaidModeUi();
     showStage('success');
     document.getElementById('successOrderNo').textContent = orderInfo.out_trade_no || '-';
     var listEl = document.getElementById('downloadList');
@@ -1048,6 +1094,12 @@
 
   // 支付成功后用户若刷新落地页，仅靠内存会丢下载区；后端 order-status 对已付款单会返回 downloads
   function restorePaidLandingAfterRefresh() {
+    var paid = loadLandingPaidOrder();
+    if (paid && paid.out_trade_no) {
+      showModal();
+      onPaid(paid);
+      return;
+    }
     var saved = '';
     try { saved = (sessionStorage.getItem(LANDING_ORDER_SSKEY) || '').trim(); } catch (e) { return; }
     if (!saved || saved.length < 8) return;

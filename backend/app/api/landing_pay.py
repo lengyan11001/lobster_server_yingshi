@@ -52,7 +52,7 @@ PRODUCTS: Dict[str, Dict[str, Any]] = {
     "insclaw_full": {
         "name": "INSclaw · Windows 安装包",
         "price_fen": 9900,  # ¥99
-        "description": "购买后即可下载完整版（含 Chromium / Node / Python 运行时，约 1GB，开箱即用）或轻量版（约 220MB，本机有 Python/Node 时联网装依赖）。",
+        "description": "购买后即可下载完整版（含 Chromium / Node / Python 运行时，约 1GB，开箱即用）或轻量版（约 70MB，安装时联网拉取依赖）。",
     },
 }
 
@@ -66,7 +66,7 @@ INSCLAW_FILE_VARIANTS: Dict[str, Dict[str, str]] = {
     "slim": {
         "filename": "INSclaw-Slim-Windows-x64.zip",
         "download_filename": "INSclaw-Slim-Windows-x64.zip",
-        "label": "轻量版（约 220MB · 联网装依赖·适合开发者）",
+        "label": "轻量版（约 70MB · 联网装依赖·适合开发者）",
     },
 }
 
