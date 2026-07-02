@@ -1357,11 +1357,18 @@ async def sutui_chat_completions(
             if _openai_nonstream_completion_usable(data, r.status_code):
                 if _openai_completion_missing_tool_calls(data, body):
                     _forced_ok = False
-                    if not body.get("_tool_forced"):
+                    fake_tool_text = _response_has_fake_tool_text(data)
+                    if not fake_tool_text:
+                        logger.info(
+                            "[chat_trace] trace_id=%s tool_calls_missing model=%s provider=%s "
+                            "but response is plain text; skip forced retry",
+                            trace_id, mid_try, att["provider"],
+                        )
+                    elif not body.get("_tool_forced"):
                         logger.info(
                             "[chat_trace] trace_id=%s tool_calls_missing model=%s provider=%s "
                             "→ retry tool_choice=required (fake_text=%s)",
-                            trace_id, mid_try, att["provider"], _response_has_fake_tool_text(data),
+                            trace_id, mid_try, att["provider"], fake_tool_text,
                         )
                         body["tool_choice"] = "required"
                         body["_tool_forced"] = True
@@ -1387,7 +1394,7 @@ async def sutui_chat_completions(
                         logger.warning(
                             "[chat_trace] trace_id=%s tool_calls_missing model=%s provider=%s after forced retry, "
                             "fallback to next (fake_text=%s)",
-                            trace_id, mid_try, att["provider"], _response_has_fake_tool_text(data),
+                            trace_id, mid_try, att["provider"], fake_tool_text,
                         )
                         if attempt_idx < len(attempts) - 1:
                             continue
