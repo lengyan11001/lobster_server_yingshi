@@ -135,6 +135,21 @@ def _is_model_tripped(model: str) -> bool:
 
 _SUTUI_PROVIDER_PREFIXES = ("anthropic/", "openai/", "google/", "deepseek/", "meta/", "mistral/", "cohere/")
 
+
+def _should_strip_provider_prefixes() -> bool:
+    raw = (os.environ.get("SUTUI_CHAT_STRIP_PROVIDER_PREFIXES") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _allow_client_chat_model() -> bool:
+    raw = (os.environ.get("SUTUI_CHAT_ALLOW_CLIENT_MODEL") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _server_controlled_chat_model() -> str:
+    model = (os.environ.get("SUTUI_CHAT_SERVER_MODEL") or "openai/gpt-5.5").strip()
+    return model or "openai/gpt-5.5"
+
 # ---------------------------------------------------------------------------
 # Request body optimiser — reduce prompt tokens sent to upstream LLM
 # ---------------------------------------------------------------------------
@@ -318,8 +333,10 @@ _LOBSTER_SYSTEM_HINT = (
     "用户未指定模型时 payload.model 填 \"fal-ai/flux-2/flash\"。"
     "2. 生成视频：用 lobster__invoke_capability，capability_id=\"video.generate\"，"
     "用户未指定模型时 payload.model 填 \"sora2\"，未指定时长时 duration=4。"
+    "用户指定 st-ai/super-seed2、super-seed2、seedance2、Seedance 2 时，仍然用 video.generate，"
+    "payload.model 原样填用户指定模型；这是速推已支持模型，禁止回答未安装或商店无上架。"
     "3. 如果调用失败（积分不足、模型错误等），直接将错误信息告知用户，不要尝试用其他方式（搜索、网页等）来替代。"
-    "4. 用户说TVC/带货视频时用 capability_id=\"comfly.daihuo.pipeline\"。"
+    "4. 仅当用户说TVC/带货视频且未指定速推模型时，才用 capability_id=\"comfly.daihuo.pipeline\"。"
     "5. 生成后如需保存素材用 lobster__save_asset；发布内容用 lobster__publish_content。"
     "6. 用户问有哪些技能、能力、功能时，只需调 list_capabilities 一次即可总结回复，"
     "不要额外调 manage_skills(list_installed/list_store/search_online)。"
@@ -472,7 +489,7 @@ def _enforce_single_search_models_tool_call(body: Dict[str, Any], trace_id: str)
 
 
 def _strip_provider_prefix(mid: str) -> str:
-    """速推 model id 不带 provider 前缀（如 claude-opus-4-6 而非 anthropic/claude-opus-4-6）。"""
+    """Legacy opt-in: strip provider prefixes only when explicitly enabled."""
     for pfx in _SUTUI_PROVIDER_PREFIXES:
         if mid.startswith(pfx):
             return mid[len(pfx):]
@@ -482,17 +499,19 @@ def _strip_provider_prefix(mid: str) -> str:
 def _remap_sutui_chat_model(body: Dict[str, Any]) -> None:
     """将客户端传来的 model 映射为速推分销商侧实际有通道的 id（就地修改 body）。
 
-    1. 自动剥离 provider 前缀（anthropic/、openai/ 等）
+    1. 默认保留 provider 前缀（如 openai/gpt-5.5）；仅设置
+       SUTUI_CHAT_STRIP_PROVIDER_PREFIXES=1 时兼容旧逻辑剥离前缀。
     2. 环境变量 SUTUI_CHAT_MODEL_MAP_JSON：JSON 对象，键为入站 model 字符串，值为转发到 xskill 的 model。
     """
     mid = (body.get("model") or "").strip()
     if not mid:
         return
-    stripped = _strip_provider_prefix(mid)
-    if stripped != mid:
-        logger.info("[sutui-chat] 自动剥离 provider 前缀: %s -> %s", mid, stripped)
-        body["model"] = stripped
-        mid = stripped
+    if _should_strip_provider_prefixes():
+        stripped = _strip_provider_prefix(mid)
+        if stripped != mid:
+            logger.info("[sutui-chat] 自动剥离 provider 前缀: %s -> %s", mid, stripped)
+            body["model"] = stripped
+            mid = stripped
     raw = (os.environ.get("SUTUI_CHAT_MODEL_MAP_JSON") or "").strip()
     if not raw:
         return
@@ -507,6 +526,15 @@ def _remap_sutui_chat_model(body: Dict[str, Any]) -> None:
     if isinstance(to_id, str) and to_id.strip():
         logger.info("[sutui-chat] SUTUI_CHAT_MODEL_MAP_JSON 映射 model: %s -> %s", mid, to_id.strip())
         body["model"] = to_id.strip()
+
+
+def _apply_server_controlled_chat_model(body: Dict[str, Any]) -> None:
+    target = _server_controlled_chat_model()
+    incoming = (body.get("model") or "").strip()
+    if incoming != target:
+        logger.info("[sutui-chat] 服务端统一选择对话模型: %s -> %s", incoming or "-", target)
+    body["model"] = target
+    _remap_sutui_chat_model(body)
 
 
 # 日志中单条响应最大字符（避免 choices 正文撑爆日志）
@@ -631,9 +659,9 @@ def _xskill_upstream_pool_quota_error(data: Any) -> bool:
 
 
 def _parse_sutui_chat_fallback_chain_env() -> List[str]:
-    """主→备模型顺序：默认 deepseek-chat → claude-opus-4-6；可用 SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON 覆盖。"""
+    """主→备模型顺序；可用 SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON 覆盖。"""
     raw = (os.environ.get("SUTUI_CHAT_MODEL_FALLBACK_CHAIN_JSON") or "").strip()
-    default = ["deepseek-chat", "claude-opus-4-6"]
+    default = [_server_controlled_chat_model()]
     if not raw:
         return default
     try:
@@ -1166,7 +1194,10 @@ async def sutui_chat_completions(
         (body.get("model") or "-"),
     )
 
-    _remap_sutui_chat_model(body)
+    if _allow_client_chat_model():
+        _remap_sutui_chat_model(body)
+    else:
+        _apply_server_controlled_chat_model(body)
     _optimize_request_body(body)
     _enforce_single_search_models_tool_call(body, trace_id)
     _enforce_max_tool_call_rounds(body, trace_id)
